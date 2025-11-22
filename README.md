@@ -1,61 +1,78 @@
 # sgrep
 
-Semantic grep for your codebase — local-first, fast, agent-friendly.
+Semantic search for your codebase. Fast, local-first, agent-ready.
 
-## What you get
-- Natural-language search that feels like `grep`.
-- Local-first indexing + BM25 + semantic ranking; remote is opt-in.
-- Auto-index on first search; `--sync` to refresh; `sgrep watch` to keep it hot.
-- JSON output for agents; simple flags for scores, content, limits.
+- Semantic: Finds concepts (“auth logic”), not just strings.
+- Local & Private: Default embeddings and indexes stay on your machine.
+- Auto-Isolated: Each repo gets its own store automatically.
+- Agent-Ready: Stable `--json` output and streaming-friendly.
+- Adaptive: Auto-index on first search; `--sync` or `watch` keeps it fresh.
 
-## Install
+## Quick Start
+Install
+```bash
+cargo install --git https://github.com/dallenpyrah/sgrep --locked
+```
+or build locally:
 ```bash
 cargo build --release
+cp target/release/sgrep /usr/local/bin/sgrep
 ```
-Binary: `target/release/sgrep` (put it on your PATH if you like).
 
-## Use in 30 seconds
+Search
 ```bash
-# 1) search (auto-indexes if missing)
+cd my-repo
 sgrep search "where do we handle authentication?"
+```
+First search auto-indexes. Switching repos just works—per-repo stores are automatic.
 
-# 2) keep it fresh while you code
-sgrep watch --add .     # add current repo once
-sgrep watch             # start watching and auto-reindex on changes
-sgrep watch --list      # see watched paths
+Keep Fresh (Watch)
+```bash
+sgrep watch --add .   # add current repo once
+sgrep watch           # start watching and auto-reindex on changes
+sgrep watch --list    # show watched paths
+```
 
-# 3) optional: remote backend + embeddings
+Remote (optional)
+```bash
 SGREP_REMOTE_URL=http://localhost:6333 sgrep search "payment flow" --remote
 SGREP_EMBEDDING_URL=http://localhost:8080/embed sgrep index --sync
 ```
 
-Common flags:
-- `--sync` force re-index before searching.
-- `--content` include full chunk text; `--scores` show scoring.
-- `-m/--max` total matches, `--per-file` per-file cap.
-- `--json` agent-ready output.
+## Commands
+`sgrep search` (default)
+- Example: `sgrep search "how is the database connection pooled?"`
+- Flags: `-m <n>` max results (25), `--per-file <n>` (1), `--content` full chunks, `--scores`, `--sync` force reindex, `--json`, `--remote`.
 
-## Commands at a glance
-- `sgrep search <query>` – semantic + keyword search (auto-sync if missing).
-- `sgrep index [--path DIR] [--force=false] [--remote]` – build/refresh index.
-- `sgrep watch [--add PATH|--remove PATH|--list|--clear] [--debounce-ms N]` – auto-reindex on file changes.
-- `sgrep list` – show known stores.
-- `sgrep setup` – ensure data dir exists.
-- `sgrep doctor` – basic health info.
+`sgrep index`
+- Manually (re)build index. Respects `.gitignore`.
+- Examples: `sgrep index`, `sgrep index --dry-run`, `sgrep index --force=false`, `sgrep index --remote`.
 
-## Config & data
-- Data: `~/.sgrep/stores/<store-id>/...` (override with `SGREP_DATA_DIR=/path/to/data`).
+`sgrep watch`
+- Auto-reindex on file changes.
+- Examples: `sgrep watch`, `sgrep watch --add path`, `sgrep watch --remove path`, `sgrep watch --list`, `sgrep watch --clear`.
+
+`sgrep list`
+- Show indexed repos and locations.
+
+`sgrep doctor`
+- Basic health check (data dir, stores).
+
+`sgrep setup`
+- Ensure data dir exists.
+
+## Configuration
+- Data location: `~/.sgrep/stores/...` (override with `SGREP_DATA_DIR=/path/to/data`).
 - Watch list: `~/.sgrep/watch.jsonl` (or under `SGREP_DATA_DIR`).
 - Remote vector DB: `SGREP_REMOTE_URL`, `SGREP_REMOTE_API_KEY`, `SGREP_REMOTE_COLLECTION`.
 - Remote embeddings: `SGREP_EMBEDDING_URL` (POST `{ "text": "..." }` → `{ "embedding": [...] }`).
 
-## How it works (short)
-- Per-repo store keyed by canonical path.
-- Chunking with overlaps; skips oversized files; dedup by chunk hash.
+## Performance & Architecture
 - Hybrid ranking: BM25 (Tantivy) + semantic cosine; candidate pruning for speed.
-- Optional remote search via Qdrant; same output schema for local/remote.
+- Chunking with overlap; skips oversized files; dedup by chunk hash.
+- Local-first; optional remote search via Qdrant with the same output schema.
 
-## Tips
-- Use `--sync` after large refactors; otherwise searches reuse the index.
-- `sgrep index --remote` pushes to your remote vector DB after local build.
-- Set `SGREP_DATA_DIR` in CI or sandboxes to keep state isolated.
+## Troubleshooting
+- Index stale? `sgrep index --sync`.
+- Weird results? `sgrep doctor`.
+- Clean slate? Delete the store under `~/.sgrep` (or `SGREP_DATA_DIR`) and reindex.
