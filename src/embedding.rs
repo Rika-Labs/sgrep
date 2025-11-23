@@ -21,12 +21,10 @@ impl Default for Embedder {
 
 impl Embedder {
     pub fn new(max_cache: u64) -> Self {
-        tracing::info!("Initializing BGE-small-en-v1.5-q (quantized, fast)...");
         let model = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::BGESmallENV15Q)
                 .with_show_download_progress(true)
         ).expect("Failed to initialize embedding model");
-        tracing::info!("✓ Fast embedding model loaded");
         Self {
             cache: Cache::builder().max_capacity(max_cache).build(),
             model: Arc::new(std::sync::Mutex::new(model)),
