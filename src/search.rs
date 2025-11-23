@@ -33,6 +33,9 @@ pub struct SearchConfig {
     pub max_results: usize,
     pub per_file: usize,
     pub include_content: bool,
+    pub lang_filter: Option<String>,
+    pub path_filter: Option<String>,
+    pub ignore_filter: Option<String>,
 }
 
 pub fn search(root: &Path, embedder: &Embedder, config: SearchConfig) -> Result<SearchResponse> {
@@ -63,7 +66,10 @@ pub fn search(root: &Path, embedder: &Embedder, config: SearchConfig) -> Result<
     let candidate_ids: HashSet<u64> = if bm25_scores.is_empty() {
         HashSet::new()
     } else {
-        let mut pairs: Vec<(u64, f32)> = bm25_scores.iter().map(|(id, score)| (*id, *score)).collect();
+        let mut pairs: Vec<(u64, f32)> = bm25_scores
+            .iter()
+            .map(|(id, score)| (*id, *score))
+            .collect();
         pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
         pairs
             .into_iter()
@@ -71,11 +77,34 @@ pub fn search(root: &Path, embedder: &Embedder, config: SearchConfig) -> Result<
             .map(|(id, _)| id)
             .collect()
     };
+    let lang_filters = parse_list(&config.lang_filter);
+    let path_filters = parse_list(&config.path_filter);
+    let ignore_filters = parse_list(&config.ignore_filter);
+    let query_tokens = extract_tokens(&config.query);
     let mut matches: Vec<SearchMatch> = chunks
         .par_iter()
         .filter_map(|chunk| {
             if chunk.text.is_empty() {
                 return None;
+            }
+            if !lang_filters.is_empty() {
+                if let Some(ext) = Path::new(&chunk.path).extension().and_then(|s| s.to_str()) {
+                    if !lang_filters.iter().any(|f| f.eq_ignore_ascii_case(ext)) {
+                        return None;
+                    }
+                }
+            }
+            if !path_filters.is_empty() {
+                let p = &chunk.path;
+                if !path_filters.iter().any(|f| p.contains(f)) {
+                    return None;
+                }
+            }
+            if !ignore_filters.is_empty() {
+                let p = &chunk.path;
+                if ignore_filters.iter().any(|f| p.contains(f)) {
+                    return None;
+                }
             }
             if !candidate_ids.is_empty() && !candidate_ids.contains(&chunk.id) {
                 return None;
@@ -90,10 +119,16 @@ pub fn search(root: &Path, embedder: &Embedder, config: SearchConfig) -> Result<
                     }
                 }
             }
+            let identifier_boost = identifier_match_boost(&chunk.text, &query_tokens);
+            keyword_score *= identifier_boost;
             if semantic <= 0.0 && keyword_score == 0.0 {
                 return None;
             }
-            let score = semantic * 0.7 + keyword_score * 0.3;
+            let file_type_boost = file_type_multiplier(&chunk.file_type, &chunk.path);
+            let path_boost = path_multiplier(&chunk.path);
+            let score = (semantic * 0.6 + keyword_score * 0.3 + identifier_boost * 0.1)
+                * file_type_boost
+                * path_boost;
             let snippet = snippet_for_chunk(chunk, config.include_content);
             let item = SearchMatch {
                 path: chunk.path.clone(),
@@ -150,12 +185,84 @@ fn snippet_for_chunk(chunk: &ChunkRecord, include_full: bool) -> String {
     lines.join("\n")
 }
 
+fn parse_list(input: &Option<String>) -> Vec<String> {
+    input
+        .as_ref()
+        .map(|s| {
+            s.split(',')
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn extract_tokens(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn identifier_match_boost(text: &str, tokens: &[String]) -> f32 {
+    if tokens.is_empty() {
+        return 1.0;
+    }
+    let lower = text.to_ascii_lowercase();
+    let mut boost = 1.0;
+    for t in tokens {
+        if lower.contains(t) {
+            boost += 0.2;
+        }
+    }
+    boost
+}
+
+fn file_type_multiplier(file_type: &str, path: &str) -> f32 {
+    let explicit = match file_type {
+        "code" => Some(1.5),
+        "doc" => Some(0.6),
+        "config" => Some(0.9),
+        "data" => Some(0.9),
+        _ => None,
+    };
+    if let Some(v) = explicit {
+        return v;
+    }
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "java" | "c" | "cpp" => 1.4,
+        "md" | "mdx" | "txt" => 0.6,
+        "json" | "yaml" | "yml" | "toml" => 0.9,
+        _ => 1.0,
+    }
+}
+
+fn path_multiplier(path: &str) -> f32 {
+    if path.contains("src/") || path.contains("lib/") || path.contains("convex/") {
+        1.3
+    } else if path.contains("docs/")
+        || path.contains("data/")
+        || path.contains("test/")
+        || path.contains("tests/")
+    {
+        0.4
+    } else {
+        1.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-    use serial_test::serial;
     use crate::indexer::{IndexOptions, index_repository};
+    use serial_test::serial;
+    use tempfile::tempdir;
 
     #[test]
     fn empty_query_returns_no_results() {
@@ -169,6 +276,9 @@ mod tests {
                 max_results: 10,
                 per_file: 1,
                 include_content: false,
+                lang_filter: None,
+                path_filter: None,
+                ignore_filter: None,
             },
         )
         .unwrap();
@@ -191,12 +301,15 @@ fn hello() {
         .unwrap();
         let data_root = dir.path().join("data");
         let original_data = std::env::var("SGREP_DATA_DIR").ok();
-        unsafe { std::env::set_var("SGREP_DATA_DIR", &data_root); }
+        unsafe {
+            std::env::set_var("SGREP_DATA_DIR", &data_root);
+        }
         let embedder = Embedder::from_env().unwrap();
         let opts = IndexOptions {
             root: dir.path().to_path_buf(),
             force_reindex: true,
             dry_run: false,
+            include_markdown: true,
         };
         index_repository(&embedder, opts).unwrap();
 
@@ -208,6 +321,9 @@ fn hello() {
                 max_results: 10,
                 per_file: 2,
                 include_content: true,
+                lang_filter: None,
+                path_filter: None,
+                ignore_filter: None,
             },
         )
         .unwrap();
@@ -217,9 +333,13 @@ fn hello() {
         assert!(snippet.contains("println!"));
 
         if let Some(data) = original_data {
-            unsafe { std::env::set_var("SGREP_DATA_DIR", data); }
+            unsafe {
+                std::env::set_var("SGREP_DATA_DIR", data);
+            }
         } else {
-            unsafe { std::env::remove_var("SGREP_DATA_DIR"); }
+            unsafe {
+                std::env::remove_var("SGREP_DATA_DIR");
+            }
         }
     }
 }

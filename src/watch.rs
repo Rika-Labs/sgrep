@@ -60,8 +60,13 @@ fn persist(paths: &[PathBuf]) -> Result<()> {
         writer.write_all(b"\n")?;
     }
     writer.flush()?;
-    std::fs::rename(&tmp, &state_path)
-        .with_context(|| format!("failed to move {} to {}", tmp.display(), state_path.display()))?;
+    std::fs::rename(&tmp, &state_path).with_context(|| {
+        format!(
+            "failed to move {} to {}",
+            tmp.display(),
+            state_path.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -99,10 +104,7 @@ fn initial_paths(user_path: Option<PathBuf>) -> Result<Vec<PathBuf>> {
     }
     let stored = list()?;
     if !stored.is_empty() {
-        return Ok(stored
-            .into_iter()
-            .map(|p| canonicalize(&p))
-            .collect());
+        return Ok(stored.into_iter().map(|p| canonicalize(&p)).collect());
     }
     let current = std::env::current_dir().context("failed to read current directory")?;
     Ok(vec![canonicalize(&current)])
@@ -114,13 +116,18 @@ fn ensure_indexes(embedder: &Embedder, paths: &[PathBuf]) -> Result<()> {
             root: root.clone(),
             force_reindex: true,
             dry_run: false,
+            include_markdown: true,
         };
         let _ = index_repository(embedder, opts)?;
     }
     Ok(())
 }
 
-pub fn run_watch(embedder: &Embedder, user_path: Option<PathBuf>, debounce_ms: Option<u64>) -> Result<()> {
+pub fn run_watch(
+    embedder: &Embedder,
+    user_path: Option<PathBuf>,
+    debounce_ms: Option<u64>,
+) -> Result<()> {
     let paths = initial_paths(user_path)?;
     persist(&paths)?;
     ensure_indexes(embedder, &paths)?;
@@ -169,6 +176,7 @@ pub fn run_watch(embedder: &Embedder, user_path: Option<PathBuf>, debounce_ms: O
                             root: root.clone(),
                             force_reindex: true,
                             dry_run: false,
+                            include_markdown: true,
                         };
                         if let Err(err) = index_repository(embedder, opts) {
                             eprintln!("reindex failed for {}: {}", root.display(), err);
@@ -199,7 +207,9 @@ mod tests {
         let root = dir.path().join("proj");
         std::fs::create_dir_all(&root).unwrap();
         let data_root = dir.path().join("data");
-        unsafe { std::env::set_var("SGREP_DATA_DIR", &data_root); }
+        unsafe {
+            std::env::set_var("SGREP_DATA_DIR", &data_root);
+        }
         assert!(list().unwrap().is_empty());
 
         assert!(add(&root).unwrap());
@@ -215,6 +225,8 @@ mod tests {
         clear().unwrap();
         assert!(list().unwrap().is_empty());
 
-        unsafe { std::env::remove_var("SGREP_DATA_DIR"); }
+        unsafe {
+            std::env::remove_var("SGREP_DATA_DIR");
+        }
     }
 }

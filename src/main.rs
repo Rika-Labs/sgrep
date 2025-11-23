@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 
+mod chunker;
 mod embedding;
 mod fts;
 mod indexer;
@@ -37,15 +38,25 @@ enum Command {
         content: bool,
         #[arg(long)]
         scores: bool,
+        #[arg(long)]
+        lang: Option<String>,
+        #[arg(long)]
+        paths: Option<String>,
+        #[arg(long)]
+        ignore: Option<String>,
     },
     Index {
         path: Option<PathBuf>,
         #[arg(long)]
         remote: bool,
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
         force: bool,
         #[arg(long = "dry-run")]
         dry_run: bool,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        include_md: bool,
+        #[arg(long = "no-md", action = ArgAction::SetTrue)]
+        no_md: bool,
     },
     Watch(WatchArgs),
     Setup,
@@ -70,8 +81,8 @@ struct WatchArgs {
 }
 
 fn main() {
-    let result = run();
-    if result.is_err() {
+    if let Err(err) = run() {
+        eprintln!("error: {err:?}");
         std::process::exit(1);
     }
 }
@@ -89,15 +100,11 @@ fn run() -> Result<()> {
             sync,
             content,
             scores,
+            lang,
+            paths,
+            ignore,
         } => handle_search(
-            query,
-            json,
-            max,
-            per_file,
-            remote,
-            sync,
-            content,
-            scores,
+            query, json, max, per_file, remote, sync, content, scores, lang, paths, ignore,
             &embedder,
         )?,
         Command::Index {
@@ -105,7 +112,9 @@ fn run() -> Result<()> {
             remote,
             force,
             dry_run,
-        } => handle_index(path, remote, force, dry_run, &embedder)?,
+            include_md,
+            no_md,
+        } => handle_index(path, remote, force, dry_run, include_md, no_md, &embedder)?,
         Command::Watch(args) => handle_watch(args, &embedder)?,
         Command::Setup => handle_setup()?,
         Command::List => handle_list()?,
@@ -123,6 +132,9 @@ fn handle_search(
     sync_index: bool,
     include_content: bool,
     show_scores: bool,
+    lang: Option<String>,
+    paths: Option<String>,
+    ignore: Option<String>,
     embedder: &embedding::Embedder,
 ) -> Result<()> {
     if query.trim().is_empty() {
@@ -134,6 +146,7 @@ fn handle_search(
             root: root.clone(),
             force_reindex: sync_index,
             dry_run: false,
+            include_markdown: true,
         };
         let _ = indexer::index_repository(embedder, options)?;
     }
@@ -146,6 +159,9 @@ fn handle_search(
                 max_results: max,
                 per_file,
                 include_content,
+                lang_filter: lang,
+                path_filter: paths,
+                ignore_filter: ignore,
             },
         )?
     } else {
@@ -157,6 +173,9 @@ fn handle_search(
                 max_results: max,
                 per_file,
                 include_content,
+                lang_filter: lang,
+                path_filter: paths,
+                ignore_filter: ignore,
             },
         )?
     };
@@ -198,6 +217,8 @@ fn handle_index(
     remote_backend: bool,
     force_reindex: bool,
     dry_run: bool,
+    include_md: bool,
+    no_md: bool,
     embedder: &embedding::Embedder,
 ) -> Result<()> {
     let target = match path {
@@ -209,6 +230,7 @@ fn handle_index(
         root: target.clone(),
         force_reindex: should_force,
         dry_run,
+        include_markdown: if no_md { false } else { include_md },
     };
     let stats = indexer::index_repository(embedder, options)?;
     if stats.skipped_existing {

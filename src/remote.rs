@@ -163,7 +163,11 @@ fn upsert_batch(client: &Client, config: &RemoteConfig, batch: &[QdrantPoint]) -
     Ok(())
 }
 
-pub fn remote_search(root: &Path, embedder: &Embedder, config_query: SearchConfig) -> Result<SearchResponse> {
+pub fn remote_search(
+    root: &Path,
+    embedder: &Embedder,
+    config_query: SearchConfig,
+) -> Result<SearchResponse> {
     if config_query.query.trim().is_empty() {
         return Ok(SearchResponse {
             query: config_query.query,
