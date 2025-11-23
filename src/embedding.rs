@@ -135,7 +135,7 @@ impl BatchEmbedder for Embedder {
 pub struct PooledEmbedder {
     pool: Vec<Embedder>,
     counter: AtomicUsize,
-    cache: Cache<String, Arc<Vec<f32>>>,
+    _cache: Cache<String, Arc<Vec<f32>>>,
 }
 
 impl PooledEmbedder {
@@ -175,7 +175,7 @@ impl PooledEmbedder {
         Self {
             pool,
             counter: AtomicUsize::new(0),
-            cache,
+            _cache: cache,
         }
     }
 

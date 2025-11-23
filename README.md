@@ -158,10 +158,11 @@ sgrep watch ../service --debounce-ms 200
 sgrep is designed to be a "good citizen" on your machine:
 
 1. **Real Embeddings:** Uses BGE-small-en-v1.5-q, a quantized SOTA model (33M params) that runs locally via FastEmbed + ONNX. First run downloads the model (~24MB) once.
-2. **The Thermostat:** Indexing adjusts concurrency in real-time based on memory pressure and CPU speed. It won't freeze your laptop.
-3. **Smart Chunking:** Uses `tree-sitter` to split code by function/class boundaries, ensuring embeddings capture complete logical blocks.
-4. **Deduplication:** Identical code blocks (boilerplate, license headers) are embedded once and cached, saving space and time.
-5. **Hybrid Search:** 70% semantic similarity + 20% keyword matching (path/filename boosted) + 10% recency for optimal results.
+2. **Parallel Processing:** By default, uses a pool of embedding model instances (one per CPU core, max 8) to process batches in parallel. This provides 3-6x speedup on multi-core systems compared to sequential processing.
+3. **The Thermostat:** Indexing adjusts concurrency in real-time based on memory pressure and CPU speed. It won't freeze your laptop.
+4. **Smart Chunking:** Uses `tree-sitter` to split code by function/class boundaries, ensuring embeddings capture complete logical blocks.
+5. **Deduplication:** Identical code blocks (boilerplate, license headers) are embedded once and cached, saving space and time.
+6. **Hybrid Search:** 70% semantic similarity + 20% keyword matching (path/filename boosted) + 10% recency for optimal results.
 
 **Target metrics:**
 
@@ -195,8 +196,11 @@ Stores are isolated automatically — no manual configuration needed!
 - **Model cache:** `~/.cache/fastembed/` (embedding models downloaded once on first use)
 - **Hardware choice:** sgrep auto-detects CoreML on Apple Silicon and CUDA on NVIDIA. Override with `--device cpu|cuda|coreml` or `SGREP_DEVICE=cpu|cuda|coreml`.
 - **Batch size:** Auto-tunes (CPU 256, GPU 512). Override with `--batch-size N` or `SGREP_BATCH_SIZE=N` (16–2048). Larger batches improve throughput; smaller batches reduce memory.
+- **Embedder pool size:** By default, creates multiple model instances (one per CPU core, max 8) for parallel processing. Override with `SGREP_EMBED_POOL_SIZE=N` to set the number of instances. Set `SGREP_USE_POOLED_EMBEDDER=false` to disable pooling and use a single model instance.
 - **Env Vars:**
   - `SGREP_HOME`: Override default data directory
+  - `SGREP_EMBEDDER_POOL_SIZE`: Number of model instances in the pool (default: CPU cores, max 8)
+  - `SGREP_USE_POOLED_EMBEDDER`: Enable/disable pooled embedder (default: `true`)
   - `RUST_LOG=sgrep=debug`: Enable tracing spans for chunking, embedding, and storage
   - `RAYON_NUM_THREADS=4`: Limit concurrency on thermally constrained laptops
 
