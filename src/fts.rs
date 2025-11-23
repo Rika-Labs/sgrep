@@ -9,7 +9,7 @@ use crate::chunker::CodeChunk;
 static STOPWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
         "the", "and", "for", "but", "with", "from", "this", "that", "into", "when", "what",
-        "where", "how", "why", "does", "are", "our", "your", "their", "then",
+        "how", "why", "does", "are", "our", "your", "their", "then",
     ]
     .into_iter()
     .collect()

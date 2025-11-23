@@ -176,6 +176,18 @@ fn detect_language(path: &Path) -> Option<LanguageKind> {
         "tsx" => Some(LanguageKind::Tsx),
         "js" | "jsx" => Some(LanguageKind::JavaScript),
         "go" => Some(LanguageKind::Go),
+        "java" => Some(LanguageKind::Java),
+        "c" | "h" => Some(LanguageKind::C),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(LanguageKind::Cpp),
+        "cs" => Some(LanguageKind::CSharp),
+        "rb" => Some(LanguageKind::Ruby),
+        "md" | "markdown" => Some(LanguageKind::Markdown),
+        "json" => Some(LanguageKind::Json),
+        "yaml" | "yml" => Some(LanguageKind::Yaml),
+        "toml" => Some(LanguageKind::Toml),
+        "html" | "htm" => Some(LanguageKind::Html),
+        "css" => Some(LanguageKind::Css),
+        "sh" | "bash" => Some(LanguageKind::Bash),
         _ => None,
     }
 }
@@ -193,9 +205,40 @@ fn is_semantic_node(kind: &str) -> bool {
             | "interface_declaration"
             | "lexical_declaration"
             | "module"
+            | "mod_item"
+            | "const_item"
+            | "const_declaration"
+            | "variable_declaration"
+            | "type_item"
+            | "type_alias_declaration"
+            | "type_declaration"
+            | "enum_item"
+            | "enum_declaration"
+            | "static_item"
+            | "macro_definition"
+            | "decorated_definition"
+            | "assignment"
+            | "export_statement"
+            | "namespace_declaration"
+            | "var_declaration"
+            | "package_clause"
+            | "section"
+            | "atx_heading"
+            | "setext_heading"
+            | "fenced_code_block"
+            | "list"
+            | "block_quote"
+            | "pair"
+            | "object"
+            | "array"
+            | "block_mapping"
+            | "block_sequence"
+            | "table"
+            | "rule_set"
     ) || kind.contains("function")
         || kind.contains("class")
         || kind.contains("method")
+        || kind.contains("heading")
 }
 
 #[derive(Clone, Copy)]
@@ -206,6 +249,18 @@ enum LanguageKind {
     TypeScript,
     Tsx,
     Go,
+    Java,
+    C,
+    Cpp,
+    CSharp,
+    Ruby,
+    Markdown,
+    Json,
+    Yaml,
+    Toml,
+    Html,
+    Css,
+    Bash,
 }
 
 impl LanguageKind {
@@ -217,6 +272,18 @@ impl LanguageKind {
             LanguageKind::TypeScript => "typescript",
             LanguageKind::Tsx => "tsx",
             LanguageKind::Go => "go",
+            LanguageKind::Java => "java",
+            LanguageKind::C => "c",
+            LanguageKind::Cpp => "cpp",
+            LanguageKind::CSharp => "csharp",
+            LanguageKind::Ruby => "ruby",
+            LanguageKind::Markdown => "markdown",
+            LanguageKind::Json => "json",
+            LanguageKind::Yaml => "yaml",
+            LanguageKind::Toml => "toml",
+            LanguageKind::Html => "html",
+            LanguageKind::Css => "css",
+            LanguageKind::Bash => "bash",
         }
     }
 
@@ -228,6 +295,24 @@ impl LanguageKind {
             LanguageKind::TypeScript => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
             LanguageKind::Tsx => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
             LanguageKind::Go => Some(tree_sitter_go::LANGUAGE.into()),
+            LanguageKind::Java => Some(tree_sitter_java::LANGUAGE.into()),
+            LanguageKind::C => Some(tree_sitter_c::LANGUAGE.into()),
+            LanguageKind::Cpp => Some(tree_sitter_cpp::LANGUAGE.into()),
+            LanguageKind::CSharp => Some(tree_sitter_c_sharp::LANGUAGE.into()),
+            LanguageKind::Ruby => Some(tree_sitter_ruby::LANGUAGE.into()),
+            LanguageKind::Markdown => Some(tree_sitter_md::LANGUAGE.into()),
+            LanguageKind::Json => Some(tree_sitter_json::LANGUAGE.into()),
+            LanguageKind::Yaml => {
+                let lang = tree_sitter_yaml::language();
+                Some(unsafe { std::mem::transmute(lang) })
+            }
+            LanguageKind::Toml => {
+                let lang = tree_sitter_toml::language();
+                Some(unsafe { std::mem::transmute(lang) })
+            }
+            LanguageKind::Html => Some(tree_sitter_html::LANGUAGE.into()),
+            LanguageKind::Css => Some(tree_sitter_css::LANGUAGE.into()),
+            LanguageKind::Bash => Some(tree_sitter_bash::LANGUAGE.into()),
         }
     }
 }
