@@ -113,3 +113,127 @@ fn collect_files(root: &Path) -> Vec<PathBuf> {
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use uuid::Uuid;
+
+    fn create_test_repo() -> PathBuf {
+        let temp_dir = std::env::temp_dir().join(format!("sgrep_indexer_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        
+        fs::write(temp_dir.join("test.rs"), "fn hello() { println!(\"Hello\"); }").unwrap();
+        fs::write(temp_dir.join("test.py"), "def hello():\n    print('Hello')").unwrap();
+        
+        let src_dir = temp_dir.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("lib.rs"), "pub fn test() {}").unwrap();
+        
+        temp_dir
+    }
+
+    #[test]
+    fn indexer_creates_report() {
+        let embedder = Arc::new(Embedder::default());
+        let indexer = Indexer::new(embedder);
+        
+        let test_repo = create_test_repo();
+        let request = IndexRequest {
+            path: test_repo.clone(),
+            force: true,
+        };
+        
+        let report = indexer.build_index(request).unwrap();
+        
+        assert!(report.files_indexed > 0);
+        assert!(report.chunks_indexed > 0);
+        assert!(report.duration.as_secs() < 60);
+        
+        fs::remove_dir_all(&test_repo).ok();
+    }
+
+    #[test]
+    fn indexer_saves_to_store() {
+        let embedder = Arc::new(Embedder::default());
+        let indexer = Indexer::new(embedder);
+        
+        let test_repo = create_test_repo();
+        let request = IndexRequest {
+            path: test_repo.clone(),
+            force: true,
+        };
+        
+        indexer.build_index(request).unwrap();
+        
+        let store = IndexStore::new(&test_repo).unwrap();
+        let loaded = store.load().unwrap();
+        
+        assert!(loaded.is_some());
+        let index = loaded.unwrap();
+        assert!(index.chunks.len() > 0);
+        assert_eq!(index.chunks.len(), index.vectors.len());
+        
+        fs::remove_dir_all(&test_repo).ok();
+    }
+
+    #[test]
+    fn collect_files_respects_gitignore() {
+        let test_repo = create_test_repo();
+        
+        std::process::Command::new("git")
+            .args(&["init"])
+            .current_dir(&test_repo)
+            .output()
+            .ok();
+        
+        fs::write(test_repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        fs::write(test_repo.join("ignored.txt"), "this should be ignored").unwrap();
+        fs::write(test_repo.join("visible.txt"), "this should be visible").unwrap();
+        
+        let files = collect_files(&test_repo);
+        let file_names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
+            .collect();
+        
+        assert!(!file_names.contains(&"ignored.txt".to_string()), 
+            "ignored.txt should not be collected, found files: {:?}", file_names);
+        assert!(file_names.contains(&"visible.txt".to_string()));
+        
+        fs::remove_dir_all(&test_repo).ok();
+    }
+
+    #[test]
+    fn index_metadata_has_correct_fields() {
+        let embedder = Arc::new(Embedder::default());
+        let indexer = Indexer::new(embedder.clone());
+        
+        let test_repo = create_test_repo();
+        let request = IndexRequest {
+            path: test_repo.clone(),
+            force: true,
+        };
+        
+        indexer.build_index(request).unwrap();
+        
+        let store = IndexStore::new(&test_repo).unwrap();
+        let index = store.load().unwrap().unwrap();
+        
+        assert_eq!(index.metadata.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(index.metadata.vector_dim, embedder.dimension());
+        assert!(index.metadata.total_files > 0);
+        assert!(index.metadata.total_chunks > 0);
+        assert_eq!(index.metadata.total_chunks, index.chunks.len());
+        
+        fs::remove_dir_all(&test_repo).ok();
+    }
+
+    #[test]
+    fn canonical_handles_nonexistent_paths() {
+        let nonexistent = PathBuf::from("/this/path/does/not/exist");
+        let result = canonical(&nonexistent);
+        assert_eq!(result, nonexistent);
+    }
+}
