@@ -1,255 +1,106 @@
-use std::collections::hash_map::DefaultHasher;
-use std::fs::File;
-use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use blake3::Hasher;
+use chrono::{DateTime, Utc};
+use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChunkRecord {
-    pub id: u64,
-    pub path: String,
-    pub start_line: u32,
-    pub end_line: u32,
-    pub text: String,
-    pub embedding: Vec<f32>,
-    #[serde(default)]
-    pub file_type: String,
-}
+use crate::chunker::CodeChunk;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct StoreSummary {
-    pub id: String,
-    pub index_path: PathBuf,
-}
+const INDEX_FILE: &str = "index.bin.zst";
 
 #[derive(Debug, Clone)]
-pub struct StorePaths {
-    pub index_path: PathBuf,
-    pub fts_path: PathBuf,
+pub struct IndexStore {
+    root: PathBuf,
+    repo_hash: String,
 }
 
-const DATA_DIR_NAME: &str = ".sgrep";
-const STORES_DIR_NAME: &str = "stores";
-const INDEX_FILE_NAME: &str = "index.jsonl";
-const FTS_DIR_NAME: &str = "fts";
-const META_FILE_NAME: &str = "index_meta.json";
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FileMetadata {
-    pub path: String,
-    pub content_hash: String,
-    pub indexed_at: u64,
-    pub chunk_ids: Vec<u64>,
-}
-
-fn data_root() -> Result<PathBuf> {
-    if let Ok(custom) = std::env::var("SGREP_DATA_DIR") {
-        return Ok(PathBuf::from(custom));
+impl IndexStore {
+    pub fn new(repo_path: &Path) -> Result<Self> {
+        let absolute = fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+        let repo_hash = hash_path(&absolute);
+        let mut root = data_dir();
+        root.push("indexes");
+        root.push(&repo_hash);
+        fs::create_dir_all(&root)
+            .with_context(|| format!("Failed to create {}", root.display()))?;
+        Ok(Self { root, repo_hash })
     }
-    if let Ok(home) = std::env::var("HOME") {
-        return Ok(PathBuf::from(home).join(DATA_DIR_NAME));
-    }
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    Ok(cwd.join(DATA_DIR_NAME))
-}
 
-pub fn stores_dir() -> Result<PathBuf> {
-    Ok(data_root()?.join(STORES_DIR_NAME))
-}
-
-fn store_id(root: &Path) -> String {
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let name = canonical
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("repo");
-    let mut hasher = DefaultHasher::new();
-    canonical.to_string_lossy().hash(&mut hasher);
-    let hash = hasher.finish();
-    format!("{}-{:016x}", name, hash)
-}
-
-pub fn store_name_for_root(root: &Path) -> Result<String> {
-    Ok(store_id(root))
-}
-
-pub fn resolve_paths(root: &Path) -> Result<StorePaths> {
-    let base = stores_dir()?;
-    let id = store_id(root);
-    let base_dir = base.join(&id);
-    let index_path = base_dir.join(INDEX_FILE_NAME);
-    let fts_path = base_dir.join(FTS_DIR_NAME);
-    Ok(StorePaths {
-        index_path,
-        fts_path,
-    })
-}
-
-pub fn index_exists(root: &Path) -> Result<bool> {
-    let paths = resolve_paths(root)?;
-    Ok(paths.index_path.exists())
-}
-
-pub fn save_index(root: &Path, chunks: &[ChunkRecord]) -> Result<()> {
-    let paths = resolve_paths(root)?;
-    let index_path = paths.index_path;
-    if let Some(parent) = index_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let tmp_path = index_path.with_extension("jsonl.tmp");
-    let file = File::create(&tmp_path)
-        .with_context(|| format!("failed to create {}", tmp_path.display()))?;
-    let mut writer = BufWriter::new(file);
-    for chunk in chunks {
-        let line = serde_json::to_string(chunk)?;
-        writer.write_all(line.as_bytes())?;
-        writer.write_all(b"\n")?;
-    }
-    writer.flush()?;
-    std::fs::rename(&tmp_path, &index_path).with_context(|| {
-        format!(
-            "failed to move {} to {}",
-            tmp_path.display(),
-            index_path.display()
-        )
-    })?;
-    Ok(())
-}
-
-pub fn load_index(root: &Path) -> Result<Vec<ChunkRecord>> {
-    let paths = resolve_paths(root)?;
-    let index_path = paths.index_path;
-    if !index_path.exists() {
-        return Ok(Vec::new());
-    }
-    let file = File::open(&index_path)
-        .with_context(|| format!("failed to open {}", index_path.display()))?;
-    let reader = BufReader::new(file);
-    let mut chunks = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    pub fn load(&self) -> Result<Option<RepositoryIndex>> {
+        let path = self.root.join(INDEX_FILE);
+        if !path.exists() {
+            return Ok(None);
         }
-        let chunk: ChunkRecord = serde_json::from_str(&line)?;
-        chunks.push(chunk);
+        let bytes =
+            fs::read(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+        let buffer = zstd::stream::decode_all(bytes.as_slice())?;
+        let index: RepositoryIndex = bincode::deserialize(&buffer)?;
+        Ok(Some(index))
     }
-    Ok(chunks)
+
+    pub fn save(&self, index: &RepositoryIndex) -> Result<()> {
+        let path = self.root.join(INDEX_FILE);
+        let bytes = bincode::serialize(index)?;
+        let compressed = zstd::stream::encode_all(bytes.as_slice(), 3)?;
+        fs::write(&path, compressed)?;
+        Ok(())
+    }
+
+    pub fn repo_hash(&self) -> &str {
+        &self.repo_hash
+    }
 }
 
-fn meta_path_for_root(root: &Path) -> Result<PathBuf> {
-    let paths = resolve_paths(root)?;
-    Ok(paths.index_path.with_file_name(META_FILE_NAME))
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepositoryIndex {
+    pub metadata: IndexMetadata,
+    pub chunks: Vec<CodeChunk>,
+    pub vectors: Vec<Vec<f32>>,
 }
 
-pub fn load_metadata(root: &Path) -> Result<Vec<FileMetadata>> {
-    let path = meta_path_for_root(root)?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let file = File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut items = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let meta: FileMetadata = serde_json::from_str(&line)?;
-        items.push(meta);
-    }
-    Ok(items)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexMetadata {
+    pub version: String,
+    pub repo_path: PathBuf,
+    pub repo_hash: String,
+    pub vector_dim: usize,
+    pub indexed_at: DateTime<Utc>,
+    pub total_files: usize,
+    pub total_chunks: usize,
 }
 
-pub fn save_metadata(root: &Path, items: &[FileMetadata]) -> Result<()> {
-    let path = meta_path_for_root(root)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let tmp_path = path.with_extension("tmp");
-    let file = File::create(&tmp_path)
-        .with_context(|| format!("failed to create {}", tmp_path.display()))?;
-    let mut writer = BufWriter::new(file);
-    for meta in items {
-        let line = serde_json::to_string(meta)?;
-        writer.write_all(line.as_bytes())?;
-        writer.write_all(b"\n")?;
-    }
-    writer.flush()?;
-    std::fs::rename(&tmp_path, &path).with_context(|| {
-        format!(
-            "failed to move {} to {}",
-            tmp_path.display(),
-            path.display()
-        )
-    })?;
-    Ok(())
-}
-
-pub fn list_stores() -> Result<Vec<StoreSummary>> {
-    let dir = stores_dir()?;
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut stores = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let id = match path.file_name().and_then(|s| s.to_str()) {
-            Some(v) => v.to_string(),
-            None => continue,
-        };
-        let index_path = path.join(INDEX_FILE_NAME);
-        stores.push(StoreSummary { id, index_path });
-    }
-    Ok(stores)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serial_test::serial;
-
-    #[test]
-    fn store_id_is_stable_for_same_path() {
-        let root = PathBuf::from("/tmp/example");
-        let a = store_id(&root);
-        let b = store_id(&root);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    #[serial]
-    fn resolve_paths_builds_expected_layout() {
-        let dir = tempfile::tempdir().unwrap();
-        let data_root = dir.path().join("data");
-        let original_data = std::env::var("SGREP_DATA_DIR").ok();
-        unsafe {
-            std::env::set_var("SGREP_DATA_DIR", &data_root);
-        }
-
-        let root = dir.path().join("proj");
-        std::fs::create_dir_all(&root).unwrap();
-        let paths = resolve_paths(&root).unwrap();
-        assert!(paths.index_path.ends_with("index.jsonl"));
-        assert!(paths.fts_path.ends_with("fts"));
-
-        if let Some(data) = original_data {
-            unsafe {
-                std::env::set_var("SGREP_DATA_DIR", data);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("SGREP_DATA_DIR");
-            }
+impl RepositoryIndex {
+    pub fn new(metadata: IndexMetadata, chunks: Vec<CodeChunk>, vectors: Vec<Vec<f32>>) -> Self {
+        debug_assert_eq!(chunks.len(), vectors.len());
+        Self {
+            metadata,
+            chunks,
+            vectors,
         }
     }
+}
+
+fn data_dir() -> PathBuf {
+    if let Some(dirs) = ProjectDirs::from("dev", "RikaLabs", "sgrep") {
+        dirs.data_local_dir().to_path_buf()
+    } else {
+        dirs_next_best()
+    }
+}
+
+fn dirs_next_best() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".sgrep")
+}
+
+fn hash_path(path: &Path) -> String {
+    let mut hasher = Hasher::new();
+    hasher.update(path.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    digest.to_hex().to_string()
 }
