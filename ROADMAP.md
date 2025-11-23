@@ -1,162 +1,372 @@
-# sgrep Development Roadmap
+# sgrep Product Roadmap
 
-This document provides a comprehensive overview of implemented features and planned enhancements for sgrep. It serves as a reference for contributors, users, and stakeholders to understand the current state and future direction of the project.
+**Vision:** The fastest, most accurate local semantic code search tool, purpose-built for developers and AI coding agents.
 
-## Status Legend
+**Current Version:** 0.1.6
+**Target 1.0:** Q2 2025
 
-- ✅ **Implemented** - Feature is complete and available in the current release
-- 🔄 **In Progress** - Feature is currently under active development
-- 📋 **Planned** - Feature is documented and scheduled for future implementation
-- 🔍 **Under Consideration** - Feature is being evaluated for inclusion
+---
 
-## Core Commands
+## Version 1.0 - Production Ready (Target: Q2 2025)
 
-### Implemented ✅
+**Goal:** Battle-tested, production-ready semantic code search with comprehensive documentation and stability guarantees.
 
-- [x] **`sgrep search`** - Semantic code search engine supporting natural language queries with hybrid ranking (semantic similarity, keyword matching, recency)
-- [x] **`sgrep index`** - Manual repository indexing with full re-index capability via `--force` flag
-- [x] **`sgrep watch`** - File system watcher with configurable debounce for incremental index updates
+### 1.0.0 - Core Stability ✅ (Released)
+- ✅ Real semantic embeddings (BGE-small-en-v1.5-q, 384-dim)
+- ✅ SIMD-accelerated cosine similarity (SimSIMD)
+- ✅ Batch embedding generation (256 chunks/batch)
+- ✅ Built-in ignore patterns (.git, node_modules, etc.)
+- ✅ Tree-sitter based code chunking (15+ languages)
+- ✅ Hybrid search (70% semantic, 20% keyword, 10% recency)
+- ✅ Repository auto-isolation with hash-based indexing
+- ✅ File system watcher with incremental updates
 
-### Planned 📋
+### 1.0.1 - Performance & Quality
+**Status:** 🔄 In Progress
 
-- [ ] **`sgrep serve`** - HTTP API endpoint providing sub-50ms search responses for integration with external tools and services
-- [ ] **`sgrep list`** - Repository management command displaying indexed repositories, index sizes, and last update timestamps
-- [ ] **`sgrep doctor`** - Diagnostic utility for verifying embedding model availability, index integrity, and system health
+#### Indexing Performance
+- [ ] **Parallel Batch Processing** - Process multiple batches concurrently
+  - Current: Sequential batch processing
+  - Target: 3-5x speedup with parallel ONNX sessions
 
-## Search Capabilities
+- [ ] **GPU Acceleration** (Optional) - CUDA/Metal support for embedding generation
+  - Detect available GPU via ONNX Runtime
+  - Fallback to CPU if unavailable
+  - Target: 10-20x speedup on GPU
 
-### Implemented ✅
+- [ ] **Incremental Indexing** - Only re-embed changed files
+  - Track file hashes and modification times
+  - Skip unchanged files during re-index
+  - Target: 95% reduction in re-index time
 
-- [x] **Semantic Search** - Vector similarity search using cosine similarity on embedded query and code chunks
-- [x] **Keyword Matching** - Full-text search with intelligent stopword filtering and relevance scoring
-- [x] **Recency Boost** - Temporal ranking factor prioritizing recently modified files
-- [x] **Hybrid Scoring** - Weighted combination algorithm (60% semantic, 30% keyword, 10% recency)
-- [x] **Glob Pattern Filtering** - File path filtering via `--glob` flag with support for multiple patterns
-- [x] **Metadata Filters** - Language and path-based filtering using `--filters` flag (e.g., `lang=rust`, `path=src`)
-- [x] **Result Pagination** - Configurable result limit via `-n, --limit` flag
-- [x] **Context Display** - Full chunk content rendering via `-c, --context` flag
+#### Search Performance
+- [ ] **Memory-Mapped Index Loading** - Zero-copy index access via `mmap`
+  - Use `memmap2` + `rkyv` for instant index loading
+  - Current: ~100ms load time
+  - Target: <1ms load time
 
-### Planned 📋
+- [ ] **Index Warming** - Pre-load frequently accessed indexes
+  - Background index loading on startup
+  - Smart caching of recent searches
 
-- [ ] **JSON Output Format** - Structured JSON response format via `--json` flag for programmatic consumption and agent integration
-- [ ] **Extended Metadata** - Enhanced result structure including comprehensive chunk metadata (path, line ranges, language, modification timestamps)
+### 1.0.2 - Developer Experience
+**Status:** 📋 Planned (Q1 2025)
 
-## Indexing & Code Analysis
+- [ ] **JSON Output** - Structured output for agent integration
+  ```bash
+  sgrep search "auth logic" --json
+  ```
 
-### Implemented ✅
+- [ ] **Automatic Indexing** - Index on first search (no manual `sgrep index`)
 
-- [x] **Tree-sitter Integration** - Syntax-aware code chunking using tree-sitter parsers for:
-  - Rust
-  - Python
-  - JavaScript
-  - TypeScript
-  - TSX
-  - Go
-- [x] **Fallback Chunking** - Line-based chunking strategy for unsupported languages and parsing failures
-- [x] **Semantic Boundary Detection** - Intelligent code segmentation at function, class, and module boundaries
-- [x] **Chunk Size Constraints** - Enforced limits (200 lines, 2048 characters) to optimize embedding quality
-- [x] **Git Integration** - Respects `.gitignore` patterns for intelligent file exclusion
-- [x] **Repository Isolation** - Automatic per-repository index isolation using path-based hashing
-- [x] **Progress Reporting** - Real-time indexing progress indicators with file and chunk counts
-- [x] **Force Re-index** - Complete index rebuild capability via `--force` flag
+- [ ] **Progress Improvements**
+  - Show embedding progress (X/Y embeddings generated)
+  - Estimated time remaining
+  - Network progress for model downloads
 
-### Planned 📋
+- [ ] **Better Error Messages**
+  - Actionable suggestions ("Run `sgrep index` first")
+  - Index corruption auto-recovery
+  - Model download retry with exponential backoff
 
-- [ ] **Automatic Indexing** - Transparent index creation on first search operation (currently requires explicit `sgrep index` invocation)
-- [ ] **Content Deduplication** - Detection and single-embedding of identical code blocks to reduce storage and improve performance
-- [ ] **Intelligent File Filtering** - Automatic exclusion of binary files, lockfiles, and minified assets during indexing
-- [ ] **Incremental Indexing** - Differential index updates processing only modified files since last index
+### 1.0.3 - Configuration System
+**Status:** 📋 Planned (Q1 2025)
 
-## Embedding System
+- [ ] **Configuration File** - `.sgrep.toml` for persistent settings
+  ```toml
+  [search]
+  default_limit = 20
+  semantic_weight = 0.7
 
-### Implemented ✅
+  [embedding]
+  model = "BGESmallENV15Q"
+  batch_size = 256
 
-- [x] **Hashed Embeddings** - Deterministic, transformer-inspired embedding generation using cryptographic hashing
-- [x] **Vector Dimensions** - Fixed 512-dimensional embedding vectors
-- [x] **Embedding Cache** - In-memory cache supporting up to 50,000 entries for performance optimization
-- [x] **Vector Normalization** - L2-normalized vectors ensuring consistent similarity calculations
+  [indexing]
+  exclude_patterns = ["*.lock", "dist/"]
+  max_chunk_size = 200
+  ```
 
-### Planned 📋
+- [ ] **Per-Repository Config** - `.sgrepignore` files
 
-- [ ] **ONNX Backend** - Optional ONNX runtime integration for production-grade embedding models (feature flag exists in `Cargo.toml`, implementation pending)
-- [ ] **Configurable Dimensions** - Runtime-configurable embedding vector dimensions
-- [ ] **Multi-Backend Support** - Pluggable embedding backend architecture supporting multiple embedding providers
+- [ ] **Environment Variables** - Full env var support
+  - `SGREP_MODEL` - Override default embedding model
+  - `SGREP_THREADS` - Control parallelism
+  - `SGREP_CACHE_SIZE` - Embedding cache size
 
-## Performance & Resource Management
+---
 
-### Implemented ✅
+## Version 1.1 - Advanced Search (Target: Q2 2025)
 
-- [x] **Parallel Processing** - Rayon-powered multi-threaded indexing and search operations
-- [x] **Index Compression** - Zstandard (zstd) compression for efficient index storage
-- [x] **Binary Serialization** - Bincode serialization format for fast index I/O operations
-- [x] **Concurrency Control** - Environment variable (`RAYON_NUM_THREADS`) for manual thread pool sizing
+**Goal:** Enterprise-grade search capabilities with advanced filtering and ranking.
 
-### Planned 📋
+### 1.1.0 - Query Language
+- [ ] **Advanced Query Syntax**
+  ```bash
+  sgrep search "auth AND (jwt OR oauth)" --lang rust
+  sgrep search "function:login path:auth/"
+  sgrep search "NOT test" --exclude-path tests/
+  ```
 
-- [ ] **Adaptive Throttling** - Dynamic concurrency adjustment based on system resource utilization (RAM, CPU)
-- [ ] **Memory Pressure Monitoring** - Real-time memory usage tracking with automatic backpressure mechanisms
-- [ ] **Thermal Management** - CPU temperature-aware throttling for mobile and laptop devices
-- [ ] **Index Optimization** - Storage efficiency improvements through advanced compression and indexing strategies
+- [ ] **Regex Support** - Combine semantic + regex
+  ```bash
+  sgrep search "login" --regex "fn \w+_login"
+  ```
 
-## Configuration & Customization
+- [ ] **Fuzzy Search** - Typo-tolerant search
 
-### Implemented ✅
+- [ ] **Multi-Query Search** - OR multiple semantic queries
 
-- [x] **Environment Variables** - Configuration via `SGREP_HOME`, `RUST_LOG`, and `RAYON_NUM_THREADS`
-- [x] **Data Directory Detection** - Automatic discovery of user data directory (`~/.sgrep/` by default)
-- [x] **Repository Auto-detection** - Automatic repository path resolution from current working directory
+### 1.1.1 - Ranking Improvements
+- [ ] **BM25 Keyword Scoring** - Replace simple keyword matching
+  - TF-IDF with document frequency
+  - Length normalization
+  - Target: 20-30% better keyword recall
 
-### Planned 📋
+- [ ] **Learning to Rank** - User feedback loop
+  - Track clicked results
+  - Adjust weights based on usage
+  - Personalized ranking over time
 
-- [ ] **Configuration File** - `sgrep.toml` configuration file for persistent settings
-- [ ] **Exclusion Patterns** - User-defined file and path exclusion patterns
-- [ ] **Embedding Backend Selection** - Configuration-driven embedding provider selection
-- [ ] **Concurrency Limits** - Per-operation concurrency limit configuration
-- [ ] **Custom Index Locations** - Repository-specific index path overrides
+- [ ] **Custom Ranking Weights** - User-defined scoring
+  ```bash
+  sgrep search "auth" --semantic 0.8 --keyword 0.1 --recency 0.1
+  ```
 
-## Storage & Index Management
+### 1.1.2 - Search Features
+- [ ] **Cross-Repository Search** - Search multiple repos at once
+  ```bash
+  sgrep search "auth" --repos "~/work/*"
+  ```
 
-### Implemented ✅
+- [ ] **Search History** - Recent searches with caching
 
-- [x] **Index Storage** - Hierarchical index storage under `~/.sgrep/indexes/<hash>/`
-- [x] **Compressed Index Format** - Zstandard-compressed binary index files (`index.bin.zst`)
-- [x] **Index Metadata** - Comprehensive metadata tracking (version, repository path, hash, indexing timestamps, statistics)
-- [x] **Repository Isolation** - Hash-based repository identification ensuring index separation
+- [ ] **Search Suggestions** - "Did you mean...?" suggestions
 
-### Planned 📋
+- [ ] **Related Results** - "Similar to this result" exploration
 
-- [ ] **Index Versioning** - Version-aware index format with automatic migration capabilities
-- [ ] **Index Maintenance** - Utilities for index cleanup, pruning, and optimization
-- [ ] **Health Monitoring** - Index integrity checks and validation tools
-- [ ] **Cross-Repository Search** - Unified search across multiple indexed repositories
+---
 
-## Developer Experience
+## Version 1.2 - Massive Scale (Target: Q3 2025)
 
-### Implemented ✅
+**Goal:** Handle repositories with millions of lines of code efficiently.
 
-- [x] **Command-Line Interface** - Intuitive CLI with descriptive error messages and help text
-- [x] **Progress Indicators** - Visual progress bars and status updates during long-running operations
-- [x] **Colored Output** - Syntax-highlighted terminal output for improved readability
-- [x] **Observability** - Comprehensive tracing and logging support via `RUST_LOG` environment variable
+### 1.2.0 - HNSW Vector Index
+- [ ] **Approximate Nearest Neighbor Search** - Logarithmic search time
+  - Integrate `hnswlib-rs` for large indexes (>10K chunks)
+  - Automatic fallback to linear search for small indexes
+  - Target: <100ms search on 1M chunks
 
-### Planned 📋
+- [ ] **Quantized Vectors** - Compress embeddings for storage
+  - f32 → f16: 50% size reduction, minimal accuracy loss
+  - f32 → i8: 75% size reduction, <5% accuracy loss
+  - Product quantization for 90%+ compression
 
-- [ ] **Enhanced Error Messages** - Context-aware error messages with actionable suggestions
-- [ ] **Index Validation Tools** - Utilities for detecting and repairing corrupted indexes
-- [ ] **Performance Benchmarks** - Built-in benchmarking tools for performance regression testing
-- [ ] **Integration Examples** - Sample code and documentation for coding agent integrations
+- [ ] **Disk-Based Index** - Support indexes larger than RAM
+  - Use `mmap` for on-demand page loading
+  - LRU cache for hot chunks
+  - Target: 10GB+ indexes with 1GB RAM
 
-## Testing & Quality Assurance
+### 1.2.1 - Distributed Indexing
+- [ ] **Parallel Model Instances** - Multiple ONNX sessions
+  - One session per core for maximum throughput
+  - Lock-free batch queue
+  - Target: 10-20 chunks/second per core
 
-### Implemented ✅
+- [ ] **Streaming Indexing** - Process while indexing
+  - Start search before indexing completes
+  - Incremental index updates
+  - Live progress with partial results
 
-- [x] **Unit Tests** - Comprehensive unit test coverage for core chunking logic
-- [x] **Embedding Tests** - Unit tests verifying embedding normalization and cache behavior
-- [x] **Search Tests** - Unit tests for keyword extraction and filter logic
+### 1.2.2 - Index Optimization
+- [ ] **Automatic Index Pruning** - Remove stale/deleted files
 
-### Planned 📋
+- [ ] **Index Defragmentation** - Optimize storage layout
 
-- [ ] **Integration Tests** - End-to-end integration tests covering full indexing and search workflows
-- [ ] **Fuzz Testing** - Fuzz testing for robust input handling
-- [ ] **Performance Regression Tests** - Automated performance tracking in CI
+- [ ] **Multi-Version Indexes** - Keep historical indexes
+  - Git commit-based snapshots
+  - Time-travel search ("Find in version X")
 
+---
+
+## Version 1.3 - AI Agent Integration (Target: Q4 2025)
+
+**Goal:** Best-in-class integration with AI coding agents (Cursor, Copilot, Claude Code, etc.)
+
+### 1.3.0 - API Server
+- [ ] **HTTP API Server** - `sgrep serve`
+  ```bash
+  sgrep serve --port 8080
+  # GET /search?q=auth&limit=10
+  # POST /index
+  # GET /health
+  ```
+
+- [ ] **WebSocket Support** - Real-time search streaming
+
+- [ ] **gRPC API** - High-performance RPC interface
+
+- [ ] **Rate Limiting** - Protect against abuse
+
+### 1.3.1 - Agent Protocol
+- [ ] **MCP Server** - Model Context Protocol integration
+  - Native Cursor/Claude integration
+  - Tool definitions for search, index, watch
+
+- [ ] **LSP Extension** - Language Server Protocol support
+  - Inline semantic search in editors
+  - Hover definitions with semantic context
+
+- [ ] **OpenAPI Spec** - Full API documentation
+  - Swagger UI for testing
+  - Client library generation
+
+### 1.3.2 - Agent Features
+- [ ] **Contextual Search** - Search with conversation context
+  - Accept conversation history
+  - Personalized results based on context
+
+- [ ] **Code Explanation** - Semantic code documentation
+  - "Explain this function"
+  - Generate docstrings from code
+
+- [ ] **Diff-Aware Search** - Search in uncommitted changes
+  - Index working directory changes
+  - Find modified code semantically
+
+---
+
+## Version 1.4 - Multi-Modal Search (Target: Q1 2026)
+
+**Goal:** Search beyond code - documentation, images, diagrams.
+
+### 1.4.0 - Documentation Search
+- [ ] **Markdown Embedding** - Semantic search in docs
+  - README, wikis, documentation sites
+  - Code-doc alignment (link functions to docs)
+
+- [ ] **Comment Extraction** - Index inline comments
+  - Docstrings, JSDoc, Rustdoc
+  - Link comments to code semantically
+
+### 1.4.1 - Visual Search
+- [ ] **Image Search** - Find diagrams, screenshots
+  - Use CLIP for image-text embeddings
+  - "Find architecture diagram"
+
+- [ ] **Code Screenshot OCR** - Index code from images
+  - Extract code from screenshots
+  - Useful for tutorial/book content
+
+### 1.4.2 - Cross-Modal Search
+- [ ] **Unified Search** - Query across all modalities
+  - "Show me auth code and its documentation"
+  - "Find diagram explaining this function"
+
+---
+
+## Version 2.0 - Enterprise Features (Target: Q2 2026)
+
+**Goal:** Team collaboration, security, and compliance features.
+
+### 2.0.0 - Team Features
+- [ ] **Shared Indexes** - Team-wide index sharing
+  - Central index server
+  - Push/pull index updates
+  - Conflict resolution
+
+- [ ] **Access Control** - Permission-based search
+  - Respect repository permissions
+  - Filter results by access level
+
+- [ ] **Analytics** - Search usage tracking
+  - Popular queries
+  - Slow searches
+  - Index health metrics
+
+### 2.0.1 - Security
+- [ ] **Secret Detection** - Never index secrets
+  - Detect API keys, tokens, passwords
+  - Redact from embeddings
+  - Alert on sensitive code patterns
+
+- [ ] **Compliance** - GDPR, SOC2 support
+  - Data retention policies
+  - Right to deletion
+  - Audit logs
+
+### 2.0.2 - Cloud Integration
+- [ ] **Cloud Sync** - Sync indexes to S3/GCS
+  - Backup and restore
+  - Cross-device sync
+
+- [ ] **Managed Service** - Hosted sgrep (optional)
+  - No local setup required
+  - Always-on indexing
+  - API access from anywhere
+
+---
+
+## Performance Targets
+
+| Repository Size | Index Time | Search Latency | Memory Usage |
+|-----------------|------------|----------------|--------------|
+| Small (<1K files) | <10s | <50ms | <100MB |
+| Medium (1K-10K) | <1min | <100ms | <500MB |
+| Large (10K-100K) | <10min | <200ms | <2GB |
+| Massive (100K+) | <30min | <500ms | <5GB |
+
+## Model Roadmap
+
+| Version | Model | Size | Speed | Quality | Status |
+|---------|-------|------|-------|---------|--------|
+| 0.1.6 | BGE-small-en-v1.5-q | 24MB | Fast | Good | ✅ Current |
+| 1.1.0 | Nomic-embed-code | 140MB | Medium | Excellent | 📋 Code-specific |
+| 1.2.0 | Custom-trained | 50MB | Fast | Excellent | 🔍 Research |
+| 1.4.0 | CLIP (multi-modal) | 350MB | Medium | Good | 📋 Images+code |
+
+## Architecture Evolution
+
+### Current (0.1.6)
+```
+File → Tree-sitter → Chunks → Batch Embed → Index → Linear Search
+```
+
+### Near Future (1.0.x)
+```
+File → Tree-sitter → Chunks → Parallel Batch Embed → mmap Index → SIMD Search
+```
+
+### Advanced (1.2.x)
+```
+File → Tree-sitter → Chunks → GPU Batch Embed → HNSW Index → ANN Search
+```
+
+### Enterprise (2.0.x)
+```
+File → Multi-modal Parse → Distributed Embed → Sharded Index → Cloud Sync
+```
+
+---
+
+## Contributing
+
+We welcome contributions! Priority areas:
+
+1. **Performance** - Make indexing and search faster
+2. **Model Research** - Test and benchmark new embedding models
+3. **Language Support** - Add tree-sitter parsers
+4. **Agent Integration** - Build agent protocol implementations
+5. **Testing** - Expand test coverage
+
+## Community Feedback
+
+Have ideas? Open an issue or discussion:
+- **Feature Requests:** [GitHub Issues](https://github.com/rika-labs/sgrep/issues)
+- **Performance Ideas:** Tag with `performance`
+- **Integration Requests:** Tag with `agents` or `api`
+
+---
+
+**Last Updated:** November 2025
+**Next Review:** Q1 2025
