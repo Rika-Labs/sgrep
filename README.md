@@ -100,12 +100,6 @@ sgrep watch                 # Watch current repo
 sgrep watch ../service --debounce-ms 200
 ```
 
-### Upcoming
-
-- `sgrep serve` – hot HTTP endpoint for <50 ms responses.
-- `sgrep list` – view indexed repos, sizes, last update.
-- `sgrep doctor` – verify model paths and index health.
-
 ## Performance & Architecture
 
 sgrep is designed to be a "good citizen" on your machine:
@@ -166,6 +160,10 @@ cargo clippy
 - **Weird results?** Clear `~/.sgrep/indexes/<repo>` and re-index to reset caches.
 - **Slow indexing?** Set `RAYON_NUM_THREADS=4` to limit concurrency on thermally constrained laptops.
 - **No index found?** Run `sgrep index` (auto-detects repo path if omitted).
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for a comprehensive list of implemented and planned features.
 
 ## Attribution
 
