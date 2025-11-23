@@ -150,7 +150,12 @@ fn build_chunk(
 ) -> CodeChunk {
     let mut text = snippet.trim().to_string();
     if text.len() > MAX_SNIPPET_CHARS {
-        text.truncate(MAX_SNIPPET_CHARS);
+        // Find a valid UTF-8 char boundary at or before MAX_SNIPPET_CHARS
+        let mut new_len = MAX_SNIPPET_CHARS;
+        while new_len > 0 && !text.is_char_boundary(new_len) {
+            new_len -= 1;
+        }
+        text.truncate(new_len);
     }
     let mut hasher = Hasher::new();
     hasher.update(text.as_bytes());
@@ -331,5 +336,70 @@ mod tests {
     fn detect_language_handles_rust_extension() {
         let lang = detect_language(Path::new("main.rs"));
         assert!(matches!(lang, Some(LanguageKind::Rust)));
+    }
+
+    #[test]
+    fn build_chunk_handles_utf8_multibyte_characters() {
+        // Create a string with multibyte UTF-8 characters (emoji, unicode, etc.)
+        // Each emoji is typically 4 bytes
+        let emoji_str = "🚀".repeat(600); // 4 bytes * 600 = 2400 bytes
+        let chunk = build_chunk(
+            Path::new("test.txt"),
+            &emoji_str,
+            1,
+            1,
+            "plain".to_string(),
+            Utc::now(),
+        );
+        // Should truncate at a valid char boundary, not panic
+        assert!(chunk.text.len() <= MAX_SNIPPET_CHARS);
+        assert!(chunk.text.is_char_boundary(chunk.text.len()));
+    }
+
+    #[test]
+    fn build_chunk_handles_mixed_utf8_characters() {
+        // Mix of ASCII and multibyte characters near the truncation boundary
+        let mut content = "x".repeat(MAX_SNIPPET_CHARS - 10);
+        content.push_str("🎉🎊🎈🎁🎀"); // Add emojis that will push it over the limit
+        let chunk = build_chunk(
+            Path::new("test.txt"),
+            &content,
+            1,
+            1,
+            "plain".to_string(),
+            Utc::now(),
+        );
+        assert!(chunk.text.len() <= MAX_SNIPPET_CHARS);
+        assert!(chunk.text.is_char_boundary(chunk.text.len()));
+    }
+
+    #[test]
+    fn build_chunk_preserves_text_under_limit() {
+        let content = "Hello, world! 🌍";
+        let chunk = build_chunk(
+            Path::new("test.txt"),
+            content,
+            1,
+            1,
+            "plain".to_string(),
+            Utc::now(),
+        );
+        assert_eq!(chunk.text, content);
+    }
+
+    #[test]
+    fn build_chunk_handles_chinese_characters() {
+        // Chinese characters are typically 3 bytes in UTF-8
+        let chinese = "你好世界".repeat(700); // Should exceed MAX_SNIPPET_CHARS
+        let chunk = build_chunk(
+            Path::new("test.txt"),
+            &chinese,
+            1,
+            1,
+            "plain".to_string(),
+            Utc::now(),
+        );
+        assert!(chunk.text.len() <= MAX_SNIPPET_CHARS);
+        assert!(chunk.text.is_char_boundary(chunk.text.len()));
     }
 }
