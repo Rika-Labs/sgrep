@@ -90,7 +90,8 @@ impl Indexer {
         pb.reset_elapsed();
         pb.set_message("embedding");
 
-        let batch_size = determine_batch_size(request.batch_size);
+        let base_batch_size = determine_batch_size(request.batch_size);
+        let batch_size = adjust_batch_size_for_progress(base_batch_size, chunks.len());
         let mut vectors = Vec::with_capacity(chunks.len());
 
         for batch_start in (0..chunks.len()).step_by(batch_size) {
@@ -254,6 +255,22 @@ fn determine_batch_size(override_val: Option<usize>) -> usize {
     }
 }
 
+fn adjust_batch_size_for_progress(base: usize, total_chunks: usize) -> usize {
+    if total_chunks == 0 {
+        return base;
+    }
+
+    let estimated_batches = (total_chunks + base - 1) / base;
+    if estimated_batches >= 4 {
+        return base;
+    }
+
+    let desired_batches = total_chunks.min(4);
+    let progress_friendly = (total_chunks + desired_batches - 1) / desired_batches;
+
+    progress_friendly.max(1).min(base)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +426,23 @@ mod tests {
         env::set_var("SGREP_BATCH_SIZE", "64");
         assert_eq!(determine_batch_size(Some(512)), 512);
         env::remove_var("SGREP_BATCH_SIZE");
+    }
+
+    #[test]
+    fn adjust_batch_size_reduces_single_batch_case() {
+        // 95 chunks with a 256 base batch size would normally be a single batch.
+        // We want to split this so the progress bar can show movement.
+        let adjusted = adjust_batch_size_for_progress(256, 95);
+        assert!(adjusted < 256);
+        let batches = (95 + adjusted - 1) / adjusted;
+        assert!(batches >= 2);
+    }
+
+    #[test]
+    fn adjust_batch_size_keeps_large_jobs_intact() {
+        // When we already have plenty of batches, don't shrink the size.
+        let adjusted = adjust_batch_size_for_progress(256, 10_000);
+        assert_eq!(adjusted, 256);
     }
 
     #[derive(Clone, Default)]
