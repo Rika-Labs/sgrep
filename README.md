@@ -48,7 +48,7 @@ Natural-language search that works like `grep`. Fast, local, and works with codi
 **Automatic integration with Claude Code!** Install the official sgrep plugin for seamless semantic search:
 
 ```bash
-/plugin marketplace add rika-labs/sgrep-claude-plugin
+/plugin marketplace add rika-labs/sgrep
 /plugin install sgrep
 ```
 
