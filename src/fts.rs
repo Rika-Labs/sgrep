@@ -1,119 +1,124 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::path::Path;
 
-use anyhow::{Context, Result};
-use tantivy::collector::TopDocs;
-use tantivy::directory::MmapDirectory;
-use tantivy::schema::document::TantivyDocument;
-use tantivy::schema::{STORED, Schema, TEXT, Value};
-use tantivy::{Index, doc};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use once_cell::sync::Lazy;
 
-use crate::store::{ChunkRecord, resolve_paths};
+use crate::chunker::CodeChunk;
 
-fn fts_dir_for_root(root: &Path) -> Result<PathBuf> {
-    let paths = resolve_paths(root)?;
-    Ok(paths.fts_path)
-}
+static STOPWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    [
+        "the", "and", "for", "but", "with", "from", "this", "that", "into", "when", "what",
+        "where", "how", "why", "does", "are", "our", "your", "their", "then",
+    ]
+    .into_iter()
+    .collect()
+});
 
-fn schema() -> Schema {
-    let mut builder = Schema::builder();
-    builder.add_i64_field("id", STORED);
-    builder.add_text_field("path", STORED);
-    builder.add_text_field("body", TEXT | STORED);
-    builder.build()
-}
-
-pub fn index_chunks(root: &Path, chunks: &[ChunkRecord]) -> Result<()> {
-    if chunks.is_empty() {
-        return Ok(());
-    }
-    let dir_path = fts_dir_for_root(root)?;
-    if dir_path.exists() {
-        std::fs::remove_dir_all(&dir_path)
-            .with_context(|| format!("failed to clear {}", dir_path.display()))?;
-    }
-    std::fs::create_dir_all(&dir_path)
-        .with_context(|| format!("failed to create {}", dir_path.display()))?;
-    let schema = schema();
-    let directory = MmapDirectory::open(&dir_path)
-        .with_context(|| format!("failed to open {}", dir_path.display()))?;
-    let settings = tantivy::IndexSettings::default();
-    let index =
-        Index::create(directory, schema.clone(), settings).context("failed to create index")?;
-    let mut writer = index
-        .writer(32 * 1024 * 1024)
-        .context("failed to create index writer")?;
-    let id_field = schema.get_field("id").unwrap();
-    let path_field = schema.get_field("path").unwrap();
-    let body_field = schema.get_field("body").unwrap();
-    for chunk in chunks.iter() {
-        let document = doc!(
-            id_field => chunk.id as i64,
-            path_field => chunk.path.clone(),
-            body_field => chunk.text.clone(),
-        );
-        writer
-            .add_document(document)
-            .context("failed to add document")?;
-    }
-    writer.commit().context("failed to commit index")?;
-    Ok(())
-}
-
-pub fn keyword_scores(root: &Path, query: &str, limit: usize) -> Result<HashMap<u64, f32>> {
-    if query.trim().is_empty() {
-        return Ok(HashMap::new());
-    }
-    let dir_path = fts_dir_for_root(root)?;
-    if !dir_path.exists() {
-        return Ok(HashMap::new());
-    }
-    let schema = schema();
-    let directory = MmapDirectory::open(&dir_path)
-        .with_context(|| format!("failed to open {}", dir_path.display()))?;
-    let index = Index::open(directory).context("failed to open index")?;
-    let reader = index.reader().context("failed to create reader")?;
-    let searcher = reader.searcher();
-    let body_field = schema.get_field("body").unwrap();
-    let id_field = schema.get_field("id").unwrap();
-    let parser = tantivy::query::QueryParser::for_index(&index, vec![body_field]);
-    let query = parser.parse_query(query).context("failed to parse query")?;
-    let top_docs = searcher
-        .search(&query, &TopDocs::with_limit(limit))
-        .context("failed to run search")?;
-    let mut scores: HashMap<u64, f32> = HashMap::new();
-    for (score, address) in top_docs.into_iter() {
-        let doc = searcher
-            .doc::<TantivyDocument>(address)
-            .context("failed to load document")?;
-        let mut id_value: Option<u64> = None;
-        for field_value in doc.get_all(id_field) {
-            if let Some(v) = field_value.as_i64() {
-                if v >= 0 {
-                    id_value = Some(v as u64);
-                }
+pub fn extract_keywords(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter_map(|token| {
+            let token = token.trim().to_lowercase();
+            if token.len() < 3 || STOPWORDS.contains(token.as_str()) {
+                None
+            } else {
+                Some(token)
             }
-        }
-        let id = match id_value {
-            Some(v) => v,
-            None => continue,
-        };
-        let existing = scores.get(&id).copied().unwrap_or(0.0);
-        if score > existing {
-            scores.insert(id, score as f32);
+        })
+        .collect()
+}
+
+pub fn keyword_score(keywords: &[String], text: &str) -> f32 {
+    if keywords.is_empty() {
+        return 0.0;
+    }
+    let haystack = text.to_lowercase();
+    let hits = keywords
+        .iter()
+        .filter(|kw| haystack.contains(kw.as_str()))
+        .count();
+    hits as f32 / keywords.len() as f32
+}
+
+pub fn matches_filters(filters: &[String], chunk: &CodeChunk) -> bool {
+    filters.iter().all(|filter| match filter.split_once('=') {
+        Some((key, value)) => match key {
+            "lang" | "language" => chunk.language.eq_ignore_ascii_case(value),
+            "path" | "file" => chunk
+                .path
+                .to_string_lossy()
+                .to_lowercase()
+                .contains(&value.to_lowercase()),
+            _ => true,
+        },
+        None => true,
+    })
+}
+
+pub fn build_globset(patterns: &[String]) -> Option<GlobSet> {
+    if patterns.is_empty() {
+        return None;
+    }
+    let mut builder = GlobSetBuilder::new();
+    let mut added = false;
+    for pattern in patterns {
+        if let Ok(glob) = Glob::new(pattern) {
+            builder.add(glob);
+            added = true;
         }
     }
-    Ok(scores)
+    if !added {
+        None
+    } else {
+        builder.build().ok()
+    }
+}
+
+pub fn glob_matches(globset: Option<&GlobSet>, path: &Path) -> bool {
+    globset.map(|set| set.is_match(path)).unwrap_or(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn sample_chunk(language: &str, path: &str) -> CodeChunk {
+        CodeChunk {
+            id: Uuid::new_v4(),
+            path: PathBuf::from(path),
+            language: language.to_string(),
+            start_line: 1,
+            end_line: 5,
+            text: "fn auth_logic() {}".into(),
+            hash: String::new(),
+            modified_at: Utc::now(),
+        }
+    }
 
     #[test]
-    fn empty_query_gives_no_scores() {
-        let root = Path::new(".");
-        let scores = keyword_scores(root, "", 10).unwrap();
-        assert!(scores.is_empty());
+    fn extracts_keywords_and_scores() {
+        let keywords = extract_keywords("where is the auth logic?");
+        assert!(keywords.contains(&"auth".into()));
+        let score = keyword_score(&keywords, "auth logic lives here");
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn filters_match_language_and_path() {
+        let chunk = sample_chunk("rust", "src/lib.rs");
+        assert!(matches_filters(&["lang=rust".into()], &chunk));
+        assert!(!matches_filters(&["lang=python".into()], &chunk));
+        assert!(matches_filters(&["path=src".into()], &chunk));
+    }
+
+    #[test]
+    fn glob_patterns_match_paths() {
+        let globset = build_globset(&["src/**/*.rs".into()]);
+        assert!(glob_matches(globset.as_ref(), Path::new("src/main.rs")));
+        assert!(!glob_matches(globset.as_ref(), Path::new("tests/data.txt")));
     }
 }

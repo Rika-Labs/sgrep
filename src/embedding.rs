@@ -1,126 +1,83 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::convert::TryInto;
+use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
-use reqwest::blocking::Client;
-use serde::Deserialize;
+use anyhow::Result;
+use blake3::Hasher;
+use moka::sync::Cache;
 
-pub const EMBEDDING_DIM: usize = 256;
+const DEFAULT_MAX_CACHE: u64 = 50_000;
+pub const DEFAULT_VECTOR_DIM: usize = 512;
 
-#[derive(Debug, Clone)]
-pub enum EmbeddingSource {
-    LocalHash,
-    RemoteHttp(String),
-}
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Embedder {
-    client: Option<Client>,
-    source: EmbeddingSource,
+    cache: Cache<u64, Arc<Vec<f32>>>,
 }
 
-#[derive(Deserialize)]
-struct RemoteEmbeddingResponse {
-    embedding: Vec<f32>,
+impl Default for Embedder {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_CACHE)
+    }
 }
 
 impl Embedder {
-    pub fn from_env() -> Result<Self> {
-        let remote = std::env::var("SGREP_EMBEDDING_URL").ok();
-        Self::with_remote(remote)
-    }
-
-    pub fn with_remote(remote: Option<String>) -> Result<Self> {
-        let source = match remote {
-            Some(url) => EmbeddingSource::RemoteHttp(url),
-            None => EmbeddingSource::LocalHash,
-        };
-        let client = match &source {
-            EmbeddingSource::RemoteHttp(_) => Some(Client::builder().build()?),
-            EmbeddingSource::LocalHash => None,
-        };
-        Ok(Self { client, source })
+    pub fn new(max_cache: u64) -> Self {
+        Self {
+            cache: Cache::builder().max_capacity(max_cache).build(),
+        }
     }
 
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        if text.trim().is_empty() {
-            return Ok(hash_embed(text));
+        let key = hash_key(text);
+        if let Some(vec) = self.cache.get(&key) {
+            return Ok(vec.as_ref().clone());
         }
-        match &self.source {
-            EmbeddingSource::LocalHash => Ok(hash_embed(text)),
-            EmbeddingSource::RemoteHttp(url) => {
-                let vector = self.remote_embed(url, text)?;
-                Ok(vector)
-            }
-        }
+        let vector = hashed_embedding(text.as_bytes());
+        self.cache.insert(key, Arc::new(vector.clone()));
+        Ok(vector)
     }
 
-    fn remote_embed(&self, url: &str, text: &str) -> Result<Vec<f32>> {
-        let client = match &self.client {
-            Some(c) => c,
-            None => return Err(anyhow!("remote embedding client unavailable")),
-        };
-        let body = serde_json::json!({ "text": text });
-        let response = client.post(url).json(&body).send()?;
-        if !response.status().is_success() {
-            return Err(anyhow!("remote embedding request failed"));
-        }
-        let parsed: RemoteEmbeddingResponse = response.json()?;
-        if parsed.embedding.is_empty() {
-            return Err(anyhow!("remote embedding vector is empty"));
-        }
-        Ok(parsed.embedding)
+    pub fn dimension(&self) -> usize {
+        DEFAULT_VECTOR_DIM
     }
 }
 
-fn hash_embed(text: &str) -> Vec<f32> {
-    if text.is_empty() {
-        return vec![0.0; EMBEDDING_DIM];
+fn hashed_embedding(bytes: &[u8]) -> Vec<f32> {
+    let mut hasher = Hasher::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let mut seed = u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap());
+    let mut vector = vec![0.0f32; DEFAULT_VECTOR_DIM];
+    for value in &mut vector {
+        seed = splitmix64(seed);
+        let sample = (seed as f64 / u64::MAX as f64) as f32;
+        *value = sample * 2.0 - 1.0;
     }
-    let mut values = vec![0.0f32; EMBEDDING_DIM];
-    let mut count = 0usize;
-    for token in text.split_whitespace() {
-        let mut hasher = DefaultHasher::new();
-        token.hash(&mut hasher);
-        let hash = hasher.finish() as usize;
-        let index = hash % EMBEDDING_DIM;
-        values[index] += 1.0;
-        count += 1;
-        if count >= 1024 {
-            break;
-        }
-    }
-    let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
-    if norm == 0.0 {
-        return values;
-    }
-    for value in &mut values {
-        *value /= norm;
-    }
-    values
+    normalize(&mut vector);
+    vector
 }
 
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        return 0.0;
+fn normalize(vector: &mut [f32]) {
+    let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for value in vector {
+            *value /= norm;
+        }
     }
-    let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
-    let len = a.len();
-    let mut i = 0usize;
-    while i < len {
-        let av = a[i];
-        let bv = b[i];
-        dot += av * bv;
-        norm_a += av * av;
-        norm_b += bv * bv;
-        i += 1;
-    }
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-    dot / (norm_a.sqrt() * norm_b.sqrt())
+}
+
+fn splitmix64(mut state: u64) -> u64 {
+    state = state.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+fn hash_key(text: &str) -> u64 {
+    let mut hasher = Hasher::new();
+    hasher.update(text.as_bytes());
+    let digest = hasher.finalize();
+    u64::from_le_bytes(digest.as_bytes()[..8].try_into().unwrap())
 }
 
 #[cfg(test)]
@@ -128,17 +85,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedding_has_expected_length() {
-        let embedder = Embedder::from_env().unwrap();
-        let v = embedder.embed("fn main() {}").unwrap();
-        assert_eq!(v.len(), EMBEDDING_DIM);
+    fn embeddings_are_normalized_to_expected_dimension() {
+        let embedder = Embedder::default();
+        let vec = embedder.embed("fn login() {}").unwrap();
+        assert_eq!(vec.len(), DEFAULT_VECTOR_DIM);
+        let norm = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-3);
     }
 
     #[test]
-    fn cosine_similarity_of_identical_is_positive() {
-        let embedder = Embedder::from_env().unwrap();
-        let v = embedder.embed("test content").unwrap();
-        let s = cosine_similarity(&v, &v);
-        assert!(s > 0.0);
+    fn identical_inputs_share_cache() {
+        let embedder = Embedder::default();
+        let v1 = embedder.embed("auth logic").unwrap();
+        let v2 = embedder.embed("auth logic").unwrap();
+        assert_eq!(v1, v2);
     }
 }

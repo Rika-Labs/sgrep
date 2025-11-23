@@ -1,2 +1,10 @@
-/target
-.data/*
+target/
+**/*.rs.bk
+**/*.swp
+.DS_Store
+/.sgrep/
+/.cache/
+/.idea/
+/.vscode/
+/indexes/
+/models/
