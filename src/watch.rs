@@ -11,6 +11,7 @@ use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::{info, warn};
 
 use crate::indexer::{DirtySet, IndexRequest, Indexer};
+use crate::store::IndexStore;
 
 pub struct WatchService {
     indexer: Indexer,
@@ -28,6 +29,33 @@ impl WatchService {
     }
 
     pub fn run(&mut self, path: &Path) -> Result<()> {
+        let store = IndexStore::new(path)?;
+        if store.load()?.is_none() {
+            info!("Creating initial index: {}", path.display());
+            let result = self.indexer.build_index(crate::indexer::IndexRequest {
+                path: path.to_path_buf(),
+                force: false,
+                batch_size: self.batch_size,
+                profile: false,
+                dirty: None,
+            });
+            match result {
+                Ok(report) => {
+                    info!(
+                        "Initial index created: {} files, {} chunks in {:.1}s",
+                        report.files_indexed,
+                        report.chunks_indexed,
+                        report.duration.as_secs_f64()
+                    );
+                }
+                Err(e) => {
+                    warn!("error" = %e, "msg" = "failed to create initial index, will retry on first change");
+                }
+            }
+        } else {
+            info!("Using existing index for incremental updates: {}", path.display());
+        }
+
         let (tx, rx) = channel();
         let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
         watcher.watch(path, RecursiveMode::Recursive)?;
@@ -93,9 +121,9 @@ impl WatchService {
 
             if ready {
                 info!(
-                    "msg" = "incremental re-indexing",
-                    "dirty" = dirty_paths.len(),
-                    "deleted" = deleted_paths.len()
+                    "Updating index: {} changed, {} deleted",
+                    dirty_paths.len(),
+                    deleted_paths.len()
                 );
                 let indexer = self.indexer.clone();
                 let path = path.to_path_buf();

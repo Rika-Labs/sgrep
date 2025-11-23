@@ -18,7 +18,7 @@ mod search;
 mod store;
 mod watch;
 
-use embedding::Embedder;
+use embedding::{Embedder, PooledEmbedder};
 
 #[derive(Serialize)]
 struct JsonResponse {
@@ -103,7 +103,15 @@ fn main() -> Result<()> {
         env::set_var("SGREP_DEVICE", device);
     }
 
-    let embedder = Arc::new(Embedder::default());
+    let use_pooled = env::var("SGREP_USE_POOLED_EMBEDDER")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    
+    let embedder: Arc<dyn embedding::BatchEmbedder> = if use_pooled {
+        Arc::new(PooledEmbedder::default())
+    } else {
+        Arc::new(Embedder::default())
+    };
 
     match cli.command {
         Commands::Index {
@@ -303,7 +311,7 @@ fn resolve_repo_path(path: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-fn load_or_index(path: &Path, embedder: Arc<Embedder>) -> Result<store::RepositoryIndex> {
+fn load_or_index(path: &Path, embedder: Arc<dyn embedding::BatchEmbedder>) -> Result<store::RepositoryIndex> {
     let store = store::IndexStore::new(path)?;
     match store.load() {
         Ok(Some(index)) => {
@@ -336,7 +344,7 @@ fn load_or_index(path: &Path, embedder: Arc<Embedder>) -> Result<store::Reposito
     }
 }
 
-fn rebuild_index(path: &Path, embedder: Arc<Embedder>) -> Result<store::RepositoryIndex> {
+fn rebuild_index(path: &Path, embedder: Arc<dyn embedding::BatchEmbedder>) -> Result<store::RepositoryIndex> {
     eprintln!(
         "{} Building index for {} (this happens once per repo)",
         style("ℹ").cyan(),

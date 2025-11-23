@@ -16,7 +16,7 @@ use rayon::prelude::*;
 use tracing::{info, warn};
 
 use crate::chunker::{self, CodeChunk};
-use crate::embedding::{BatchEmbedder, Embedder};
+use crate::embedding::BatchEmbedder;
 use crate::store::{IndexMetadata, IndexStore, RepositoryIndex};
 
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024; // skip very large assets
@@ -68,14 +68,22 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    pub fn new<E: BatchEmbedder + 'static>(embedder: Arc<E>) -> Self {
+    pub fn new(embedder: Arc<dyn BatchEmbedder>) -> Self {
+        Self { embedder }
+    }
+    
+    pub fn new_concrete<E: BatchEmbedder + 'static>(embedder: Arc<E>) -> Self {
         Self { embedder }
     }
 
     pub fn build_index(&self, request: IndexRequest) -> Result<IndexReport> {
         let total_start = Instant::now();
         let root = canonical(&request.path);
-        info!("indexing" = %root.display(), "force" = request.force);
+        if request.force {
+            info!("Full indexing: {}", root.display());
+        } else {
+            info!("Indexing: {}", root.display());
+        }
         let store = IndexStore::new(&root)?;
         let existing_index = if request.force {
             None
@@ -87,6 +95,11 @@ impl Indexer {
             let reusable = index.metadata.vector_dim == self.embedder.dimension()
                 && index.metadata.version == env!("CARGO_PKG_VERSION");
             if reusable && !dirty.is_empty() {
+                info!(
+                    "Incremental indexing: {} changed, {} deleted",
+                    dirty.touched.len(),
+                    dirty.deleted.len()
+                );
                 return self.build_incremental(
                     &root,
                     index,
@@ -95,6 +108,18 @@ impl Indexer {
                     &request,
                     total_start,
                 );
+            } else if !dirty.is_empty() {
+                if !reusable {
+                    warn!(
+                        "Index incompatible (dim: {} vs {}, version: {} vs {}), doing full reindex",
+                        index.metadata.vector_dim,
+                        self.embedder.dimension(),
+                        index.metadata.version,
+                        env!("CARGO_PKG_VERSION")
+                    );
+                } else {
+                    info!("No changes detected, skipping incremental");
+                }
             }
         }
 
@@ -114,18 +139,12 @@ impl Indexer {
         let walk_duration = walk_start.elapsed();
 
         let cancelled = Arc::new(AtomicBool::new(false));
-        let cancel_flag = cancelled.clone();
-        if let Err(err) = ctrlc::set_handler(move || {
-            cancel_flag.store(true, Ordering::SeqCst);
-        }) {
-            warn!("ctrlc_handler" = %err, "msg" = "could not install; continuing");
-        }
 
         let pb =
             ProgressBar::with_draw_target(Some(files.len() as u64), ProgressDrawTarget::stderr());
         pb.set_style(
             ProgressStyle::with_template(
-                "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg} (eta {eta})",
+                "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}",
             )
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
         );
@@ -175,11 +194,15 @@ impl Indexer {
         }
 
         let embed_start = Instant::now();
-        let mut cache_hits: usize = 0;
-        let mut cache_misses: usize = 0;
-        let mut processed_count: usize = 0;
-
         let token_budget = determine_token_budget();
+
+        struct Batch {
+            indices: Vec<usize>,
+            texts: Vec<String>,
+            hashes: Vec<String>,
+        }
+
+        let mut batches: Vec<Batch> = Vec::new();
         let mut batch_start = 0usize;
 
         while batch_start < chunks.len() {
@@ -205,44 +228,93 @@ impl Indexer {
 
             let mut batch_texts: Vec<String> = Vec::new();
             let mut batch_indices: Vec<usize> = Vec::new();
+            let mut batch_hashes: Vec<String> = Vec::new();
 
             for idx in batch_start..batch_end {
-                if let Some(vec) = cache.get(&chunks[idx].hash) {
-                    vectors[idx] = Some(vec.clone());
-                    cache_hits += 1;
-                    processed_count += 1;
-                    pb.set_position(processed_count.min(chunks.len()) as u64);
+                if cache.get(&chunks[idx].hash).is_some() {
                     continue;
                 }
-                cache_misses += 1;
                 batch_indices.push(idx);
                 batch_texts.push(chunks[idx].text.clone());
+                batch_hashes.push(chunks[idx].hash.clone());
             }
 
-            if batch_texts.is_empty() {
-                continue;
-            }
-
-            match self.embed_batch_with_retry(&batch_texts) {
-                Ok(batch_vectors) => {
-                    for (vec, original_idx) in batch_vectors.into_iter().zip(batch_indices.iter()) {
-                        cache.insert(chunks[*original_idx].hash.clone(), vec.clone());
-                        vectors[*original_idx] = Some(vec);
-                        processed_count += 1;
-                        pb.set_position(processed_count.min(chunks.len()) as u64);
-                    }
-                }
-                Err(err) => {
-                    pb.finish_and_clear();
-                    return Err(anyhow!(
-                        "Embedding failed for batch starting at {}: {}",
-                        batch_start,
-                        err
-                    ));
-                }
+            if !batch_texts.is_empty() {
+                batches.push(Batch {
+                    indices: batch_indices,
+                    texts: batch_texts,
+                    hashes: batch_hashes,
+                });
             }
 
             batch_start = batch_end;
+        }
+
+        let cache_hits = chunks.len() - batches.iter().map(|b| b.indices.len()).sum::<usize>();
+        let cache_misses: usize = batches.iter().map(|b| b.indices.len()).sum();
+
+        for idx in 0..chunks.len() {
+            if let Some(vec) = cache.get(&chunks[idx].hash) {
+                vectors[idx] = Some(vec.clone());
+            }
+        }
+
+        pb.set_position(cache_hits.min(chunks.len()) as u64);
+
+        let cache = Arc::new(std::sync::Mutex::new(cache));
+        let embedder = self.embedder.clone();
+        let cancelled_clone = cancelled.clone();
+
+        let batch_results: Result<Vec<(Vec<usize>, Vec<Vec<f32>>)>> = batches
+            .into_par_iter()
+            .map(|batch| {
+                if cancelled_clone.load(Ordering::SeqCst) {
+                    return Err(anyhow!("Indexing cancelled"));
+                }
+
+                let texts: Vec<String> = batch.texts;
+                let hashes = batch.hashes;
+                match embedder.embed_batch(&texts) {
+                    Ok(batch_vectors) => {
+                        let mut cache_guard = cache.lock().unwrap();
+                        for (vec, hash) in batch_vectors.iter().zip(hashes.iter()) {
+                            cache_guard.insert(hash.clone(), vec.clone());
+                        }
+                        Ok((batch.indices, batch_vectors))
+                    }
+                    Err(err) => {
+                        let mut last_err = err;
+                        for attempt in 2..=3 {
+                            if cancelled_clone.load(Ordering::SeqCst) {
+                                return Err(anyhow!("Indexing cancelled"));
+                            }
+                            thread::sleep(Duration::from_millis((attempt * 150) as u64));
+                            match embedder.embed_batch(&texts) {
+                                Ok(batch_vectors) => {
+                                    let mut cache_guard = cache.lock().unwrap();
+                                    for (vec, hash) in batch_vectors.iter().zip(hashes.iter()) {
+                                        cache_guard.insert(hash.clone(), vec.clone());
+                                    }
+                                    return Ok((batch.indices, batch_vectors));
+                                }
+                                Err(e) => last_err = e,
+                            }
+                        }
+                        Err(anyhow!("Embedding failed after retries: {}", last_err))
+                    }
+                }
+            })
+            .collect();
+
+        let batch_results = batch_results?;
+
+        let mut processed_count = cache_hits;
+        for (indices, batch_vectors) in batch_results {
+            for (vec, idx) in batch_vectors.into_iter().zip(indices.iter()) {
+                vectors[*idx] = Some(vec);
+                processed_count += 1;
+                pb.set_position(processed_count.min(chunks.len()) as u64);
+            }
         }
 
         let vectors: Vec<Vec<f32>> = vectors
@@ -711,6 +783,7 @@ fn estimate_tokens(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embedding::Embedder;
     use std::fs;
     use uuid::Uuid;
     use serial_test::serial;
@@ -744,7 +817,7 @@ mod tests {
     #[serial]
     fn indexer_creates_report() {
         let embedder = Arc::new(Embedder::default());
-        let indexer = Indexer::new(embedder);
+        let indexer = Indexer::new_concrete(embedder);
 
         let _home = set_test_home();
         let test_repo = create_test_repo();
@@ -769,7 +842,7 @@ mod tests {
     #[serial]
     fn indexer_saves_to_store() {
         let embedder = Arc::new(Embedder::default());
-        let indexer = Indexer::new(embedder);
+        let indexer = Indexer::new_concrete(embedder);
 
         let _home = set_test_home();
         let test_repo = create_test_repo();

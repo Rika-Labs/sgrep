@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
@@ -18,6 +19,10 @@ pub const DEFAULT_VECTOR_DIM: usize = 384;
 
 /// Minimal interface so the indexer can be tested with stub embedders.
 pub trait BatchEmbedder: Send + Sync {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let results = self.embed_batch(&[text.to_string()])?;
+        results.into_iter().next().ok_or_else(|| anyhow::anyhow!("No embedding generated"))
+    }
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
     fn dimension(&self) -> usize;
 }
@@ -124,6 +129,87 @@ impl BatchEmbedder for Embedder {
 
     fn dimension(&self) -> usize {
         Embedder::dimension(self)
+    }
+}
+
+pub struct PooledEmbedder {
+    pool: Vec<Embedder>,
+    counter: AtomicUsize,
+    cache: Cache<String, Arc<Vec<f32>>>,
+}
+
+impl PooledEmbedder {
+    pub fn new(pool_size: usize, max_cache: u64) -> Self {
+        let execution_providers = select_execution_providers();
+        let show_progress = pool_size == 1;
+
+        info!(
+            "Initializing embedder pool with {} instances",
+            pool_size
+        );
+
+        let mut pool = Vec::with_capacity(pool_size);
+        let cache = Cache::builder().max_capacity(max_cache).build();
+
+        for i in 0..pool_size {
+            let _init_guard = INIT_LOCK.lock().unwrap();
+            let _cache_guard = setup_fastembed_cache_dir();
+
+            let model = TextEmbedding::try_new(
+                InitOptions::new(EmbeddingModel::BGESmallENV15Q)
+                    .with_execution_providers(execution_providers.clone())
+                    .with_show_download_progress(show_progress && i == 0),
+            )
+            .expect("Failed to initialize embedding model");
+            drop(_cache_guard);
+
+            let embedder = Embedder {
+                cache: cache.clone(),
+                model: Arc::new(Mutex::new(model)),
+            };
+            pool.push(embedder);
+        }
+
+        info!("Embedder pool initialized with {} instances", pool_size);
+
+        Self {
+            pool,
+            counter: AtomicUsize::new(0),
+            cache,
+        }
+    }
+
+    fn get_embedder(&self) -> &Embedder {
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.pool.len();
+        &self.pool[idx]
+    }
+}
+
+impl BatchEmbedder for PooledEmbedder {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        self.get_embedder().embed(text)
+    }
+
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.get_embedder().embed_batch(texts)
+    }
+
+    fn dimension(&self) -> usize {
+        DEFAULT_VECTOR_DIM
+    }
+}
+
+impl Default for PooledEmbedder {
+    fn default() -> Self {
+        let pool_size = env::var("SGREP_EMBEDDER_POOL_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|p| p.get().min(8).max(1))
+                    .unwrap_or(4)
+            });
+        Self::new(pool_size, DEFAULT_MAX_CACHE)
     }
 }
 
