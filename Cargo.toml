@@ -4,6 +4,14 @@ version = "0.1.4"
 edition = "2021"
 rust-version = "1.75"
 description = "Lightning-fast local-first semantic code search"
+include = [
+    "src/**/*",
+    "default-ignore.txt",
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE",
+    "README.md"
+]
 
 
 [dependencies]

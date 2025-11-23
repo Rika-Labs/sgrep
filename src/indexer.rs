@@ -3,7 +3,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
+
+const DEFAULT_IGNORE: &str = include_str!("../default-ignore.txt");
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use tracing::{info, warn};
@@ -95,6 +98,8 @@ impl Indexer {
 }
 
 fn collect_files(root: &Path) -> Vec<PathBuf> {
+    let default_excludes = build_default_excludes();
+
     WalkBuilder::new(root)
         .hidden(true)
         .ignore(true)
@@ -110,17 +115,46 @@ fn collect_files(root: &Path) -> Vec<PathBuf> {
                     return None;
                 }
                 let path = e.path();
-                if path.components().any(|c| {
-                    let name = c.as_os_str().to_string_lossy();
-                    name == ".git" || name == ".fastembed_cache" || name == "node_modules"
-                }) {
+                let relative_path = path.strip_prefix(root).unwrap_or(path);
+
+                if default_excludes.is_match(relative_path) {
                     return None;
                 }
+
                 Some(e.into_path())
             }
             _ => None,
         })
         .collect()
+}
+
+fn build_default_excludes() -> globset::GlobSet {
+    let mut builder = GlobSetBuilder::new();
+
+    for line in DEFAULT_IGNORE.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Ok(glob) = Glob::new(line) {
+            builder.add(glob);
+        }
+
+        let pattern_without_slash = line.trim_end_matches('/');
+        if pattern_without_slash != line {
+            if let Ok(glob) = Glob::new(&format!("**/{}", pattern_without_slash)) {
+                builder.add(glob);
+            }
+            if let Ok(glob) = Glob::new(&format!("{}/**", pattern_without_slash)) {
+                builder.add(glob);
+            }
+        }
+    }
+
+    builder.build().unwrap_or_else(|_| {
+        GlobSetBuilder::new().build().unwrap()
+    })
 }
 
 fn canonical(path: &Path) -> PathBuf {
