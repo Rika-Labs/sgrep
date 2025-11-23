@@ -95,6 +95,10 @@ fn main() -> Result<()> {
     setup_tracing();
     let cli = Cli::parse();
 
+    if env::var("TOKENIZERS_PARALLELISM").is_err() {
+        env::set_var("TOKENIZERS_PARALLELISM", "true");
+    }
+
     if let Some(device) = &cli.device {
         env::set_var("SGREP_DEVICE", device);
     }
@@ -106,6 +110,7 @@ fn main() -> Result<()> {
             path,
             force,
             batch_size,
+            profile,
         } => {
             let path = resolve_repo_path(path)?;
             let indexer = indexer::Indexer::new(embedder.clone());
@@ -114,6 +119,8 @@ fn main() -> Result<()> {
                     path: path.clone(),
                     force,
                     batch_size,
+                    profile,
+                    dirty: None,
                 })
                 .context("Failed to build index")?;
 
@@ -124,6 +131,30 @@ fn main() -> Result<()> {
                 report.chunks_indexed,
                 HumanDuration(report.duration)
             );
+
+            if profile {
+                if let Some(t) = report.timings {
+                    println!(
+                        "  walk: {} | chunk: {} | embed: {} | write: {}",
+                        HumanDuration(t.walk),
+                        HumanDuration(t.chunk),
+                        HumanDuration(t.embed),
+                        HumanDuration(t.write)
+                    );
+                }
+                println!(
+                    "  cache hits: {} | cache misses: {} | hit rate: {:.1}%",
+                    report.cache_hits,
+                    report.cache_misses,
+                    if report.cache_hits + report.cache_misses == 0 {
+                        0.0
+                    } else {
+                        (report.cache_hits as f64
+                            / (report.cache_hits + report.cache_misses) as f64)
+                            * 100.0
+                    }
+                );
+            }
         }
         Commands::Search {
             query,
@@ -247,6 +278,9 @@ enum Commands {
         /// Override embedding batch size (16-2048). Also reads SGREP_BATCH_SIZE.
         #[arg(long, env = "SGREP_BATCH_SIZE", value_parser = clap::value_parser!(usize), help = "Override embedding batch size (16-2048). Also reads SGREP_BATCH_SIZE.")]
         batch_size: Option<usize>,
+        /// Emit per-phase timings and throughput stats
+        #[arg(long, default_value_t = false)]
+        profile: bool,
     },
     /// Watch a repository and keep the index fresh
     Watch {
@@ -315,6 +349,8 @@ fn rebuild_index(path: &Path, embedder: Arc<Embedder>) -> Result<store::Reposito
             path: path.to_path_buf(),
             force: true,
             batch_size: None,
+            profile: false,
+            dirty: None,
         })
         .with_context(|| format!("Index build failed for {}", path.display()))?;
 
