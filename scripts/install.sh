@@ -3,6 +3,15 @@ set -euo pipefail
 
 REPO=${SGREP_REPO:-"rika-labs/sgrep"}
 INSTALL_DIR=${INSTALL_DIR:-"/usr/local/bin"}
+TMP_DIR=""
+
+cleanup() {
+  if [ -n "${TMP_DIR:-}" ] && [ -d "${TMP_DIR:-}" ]; then
+    rm -rf "${TMP_DIR:-}"
+  fi
+}
+
+trap cleanup EXIT
 
 detect_os_arch() {
   local os arch
@@ -26,22 +35,20 @@ download_and_install() {
   platform=$(detect_os_arch)
   local asset="sgrep-${platform}.tar.gz"
   local url="https://github.com/${REPO}/releases/latest/download/${asset}"
-  local tmp=""
-  tmp=$(mktemp -d)
-  trap 'if [ -n "$tmp" ] && [ -d "$tmp" ]; then rm -rf "$tmp"; fi' EXIT
+  TMP_DIR=$(mktemp -d)
 
   echo "Downloading $asset ..."
-  curl -fsSL "$url" -o "$tmp/$asset"
+  curl -fsSL "$url" -o "$TMP_DIR/$asset"
 
   echo "Extracting..."
-  tar -C "$tmp" -xzf "$tmp/$asset"
+  tar -C "$TMP_DIR" -xzf "$TMP_DIR/$asset"
 
   if [ ! -d "$INSTALL_DIR" ]; then
     mkdir -p "$INSTALL_DIR"
   fi
 
   echo "Installing to $INSTALL_DIR (may require sudo)..."
-  install -m 0755 "$tmp/sgrep" "$INSTALL_DIR/sgrep"
+  install -m 0755 "$TMP_DIR/sgrep" "$INSTALL_DIR/sgrep"
 
   echo "sgrep installed at $(command -v sgrep)"
   sgrep --version || true
