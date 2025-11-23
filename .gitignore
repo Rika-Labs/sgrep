@@ -4,6 +4,7 @@ target/
 .DS_Store
 /.sgrep/
 /.cache/
+/.fastembed_cache/
 /.idea/
 /.vscode/
 /indexes/
