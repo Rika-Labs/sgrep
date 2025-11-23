@@ -183,8 +183,6 @@ fn detect_language(path: &Path) -> Option<LanguageKind> {
         "rb" => Some(LanguageKind::Ruby),
         "md" | "markdown" => Some(LanguageKind::Markdown),
         "json" => Some(LanguageKind::Json),
-        "yaml" | "yml" => Some(LanguageKind::Yaml),
-        "toml" => Some(LanguageKind::Toml),
         "html" | "htm" => Some(LanguageKind::Html),
         "css" => Some(LanguageKind::Css),
         "sh" | "bash" => Some(LanguageKind::Bash),
@@ -256,8 +254,6 @@ enum LanguageKind {
     Ruby,
     Markdown,
     Json,
-    Yaml,
-    Toml,
     Html,
     Css,
     Bash,
@@ -279,8 +275,6 @@ impl LanguageKind {
             LanguageKind::Ruby => "ruby",
             LanguageKind::Markdown => "markdown",
             LanguageKind::Json => "json",
-            LanguageKind::Yaml => "yaml",
-            LanguageKind::Toml => "toml",
             LanguageKind::Html => "html",
             LanguageKind::Css => "css",
             LanguageKind::Bash => "bash",
@@ -302,14 +296,6 @@ impl LanguageKind {
             LanguageKind::Ruby => Some(tree_sitter_ruby::LANGUAGE.into()),
             LanguageKind::Markdown => Some(tree_sitter_md::LANGUAGE.into()),
             LanguageKind::Json => Some(tree_sitter_json::LANGUAGE.into()),
-            LanguageKind::Yaml => {
-                let lang = tree_sitter_yaml::language();
-                Some(unsafe { std::mem::transmute(lang) })
-            }
-            LanguageKind::Toml => {
-                let lang = tree_sitter_toml::language();
-                Some(unsafe { std::mem::transmute(lang) })
-            }
             LanguageKind::Html => Some(tree_sitter_html::LANGUAGE.into()),
             LanguageKind::Css => Some(tree_sitter_css::LANGUAGE.into()),
             LanguageKind::Bash => Some(tree_sitter_bash::LANGUAGE.into()),
