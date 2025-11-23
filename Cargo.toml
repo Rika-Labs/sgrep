@@ -1,14 +1,10 @@
 [package]
 name = "sgrep"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.75"
 description = "Lightning-fast local-first semantic code search"
 
-[features]
-default = ["hashed-embedder"]
-hashed-embedder = []
-onnx-embedder = ["dep:ort", "dep:tokenizers"]
 
 [dependencies]
 anyhow = "1.0"
@@ -51,6 +47,4 @@ once_cell = "1.19"
 uuid = { version = "1.8", features = ["v4", "serde"] }
 ctrlc = "3.4"
 
-# Optional advanced embedding support
-ort = { version = "2.0.0-rc.3", optional = true }
-tokenizers = { version = "0.19", optional = true, default-features = false }
+fastembed = { version = "5", default-features = false, features = ["online", "ort-download-binaries"] }
