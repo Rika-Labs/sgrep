@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
+use simsimd::SpatialSimilarity;
 
 use crate::chunker::CodeChunk;
 use crate::embedding::Embedder;
@@ -91,14 +92,7 @@ impl SearchResult {
 }
 
 fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
-    let dot = lhs.iter().zip(rhs).map(|(l, r)| l * r).sum::<f32>();
-    let lhs_norm = lhs.iter().map(|v| v * v).sum::<f32>().sqrt();
-    let rhs_norm = rhs.iter().map(|v| v * v).sum::<f32>().sqrt();
-    if lhs_norm == 0.0 || rhs_norm == 0.0 {
-        0.0
-    } else {
-        dot / (lhs_norm * rhs_norm)
-    }
+    (1.0 - f32::cosine(lhs, rhs).unwrap_or(1.0)) as f32
 }
 
 fn recency_boost(chunk: &CodeChunk) -> f32 {

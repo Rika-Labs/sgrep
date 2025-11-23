@@ -66,14 +66,23 @@ impl Indexer {
             .collect();
         pb.finish_with_message("embedding");
 
-        let vectors: Vec<Vec<f32>> = chunks
-            .par_iter()
-            .map(|chunk| {
-                self.embedder
-                    .embed(&chunk.text)
-                    .unwrap_or_else(|_| vec![0.0; self.embedder.dimension()])
-            })
-            .collect();
+        const BATCH_SIZE: usize = 256;
+        let mut vectors = Vec::with_capacity(chunks.len());
+
+        for batch_start in (0..chunks.len()).step_by(BATCH_SIZE) {
+            let batch_end = (batch_start + BATCH_SIZE).min(chunks.len());
+            let batch_texts: Vec<String> = chunks[batch_start..batch_end]
+                .iter()
+                .map(|chunk| chunk.text.clone())
+                .collect();
+
+            match self.embedder.embed_batch(&batch_texts) {
+                Ok(batch_vectors) => vectors.extend(batch_vectors),
+                Err(_) => {
+                    vectors.extend(vec![vec![0.0; self.embedder.dimension()]; batch_texts.len()]);
+                }
+            }
+        }
 
         let store = IndexStore::new(&root)?;
         let metadata = IndexMetadata {
