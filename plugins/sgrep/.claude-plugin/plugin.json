@@ -17,8 +17,7 @@
     "productivity",
     "search"
   ],
-  "category": "search",
-  "skills": "skills",
-  "hooks": "hooks/hooks.json"
+  "skills": "./skills",
+  "hooks": "./hooks/hooks.json"
 }
 
