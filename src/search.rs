@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
-use simsimd::SpatialSimilarity;
+use serde::Serialize;
 
 use crate::chunker::CodeChunk;
 use crate::embedding::Embedder;
@@ -67,7 +67,7 @@ impl SearchEngine {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct SearchResult {
     pub chunk: CodeChunk,
     pub score: f32,
@@ -92,7 +92,13 @@ impl SearchResult {
 }
 
 fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
-    (1.0 - f32::cosine(lhs, rhs).unwrap_or(1.0)) as f32
+    let dot: f32 = lhs.iter().zip(rhs).map(|(a, b)| a * b).sum();
+    let norm_l: f32 = lhs.iter().map(|v| v * v).sum::<f32>().sqrt();
+    let norm_r: f32 = rhs.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm_l == 0.0 || norm_r == 0.0 {
+        return 0.0;
+    }
+    (dot / (norm_l * norm_r)).clamp(-1.0, 1.0)
 }
 
 fn recency_boost(chunk: &CodeChunk) -> f32 {
@@ -121,7 +127,7 @@ mod tests {
 
     fn create_test_index(chunks: Vec<CodeChunk>, vectors: Vec<Vec<f32>>) -> RepositoryIndex {
         use crate::store::IndexMetadata;
-        
+
         let metadata = IndexMetadata {
             version: "0.1.0".to_string(),
             repo_path: PathBuf::from("/test"),
@@ -131,7 +137,7 @@ mod tests {
             total_files: 1,
             total_chunks: chunks.len(),
         };
-        
+
         RepositoryIndex::new(metadata, chunks, vectors)
     }
 
@@ -170,7 +176,7 @@ mod tests {
     fn search_returns_limited_results() {
         let embedder = Arc::new(Embedder::default());
         let engine = SearchEngine::new(embedder.clone());
-        
+
         let chunks = vec![
             create_test_chunk("fn authenticate() {}", "rust", "auth.rs"),
             create_test_chunk("fn validate() {}", "rust", "validate.rs"),
@@ -182,14 +188,14 @@ mod tests {
             embedder.embed("login").unwrap(),
         ];
         let index = create_test_index(chunks, vectors);
-        
+
         let options = SearchOptions {
             limit: 2,
             include_context: false,
             glob: vec![],
             filters: vec![],
         };
-        
+
         let results = engine.search(&index, "authentication", options).unwrap();
         assert_eq!(results.len(), 2);
     }
@@ -198,7 +204,7 @@ mod tests {
     fn search_respects_glob_filters() {
         let embedder = Arc::new(Embedder::default());
         let engine = SearchEngine::new(embedder.clone());
-        
+
         let chunks = vec![
             create_test_chunk("fn test1() {}", "rust", "src/auth.rs"),
             create_test_chunk("fn test2() {}", "rust", "tests/auth.rs"),
@@ -208,14 +214,14 @@ mod tests {
             embedder.embed("test").unwrap(),
         ];
         let index = create_test_index(chunks, vectors);
-        
+
         let options = SearchOptions {
             limit: 10,
             include_context: false,
             glob: vec!["src/**/*.rs".to_string()],
             filters: vec![],
         };
-        
+
         let results = engine.search(&index, "test", options).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].chunk.path.to_string_lossy().contains("src"));
@@ -225,7 +231,7 @@ mod tests {
     fn search_respects_language_filters() {
         let embedder = Arc::new(Embedder::default());
         let engine = SearchEngine::new(embedder.clone());
-        
+
         let chunks = vec![
             create_test_chunk("fn test() {}", "rust", "test.rs"),
             create_test_chunk("def test():", "python", "test.py"),
@@ -235,14 +241,14 @@ mod tests {
             embedder.embed("test").unwrap(),
         ];
         let index = create_test_index(chunks, vectors);
-        
+
         let options = SearchOptions {
             limit: 10,
             include_context: false,
             glob: vec![],
             filters: vec!["lang=rust".to_string()],
         };
-        
+
         let results = engine.search(&index, "test", options).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.language, "rust");
@@ -255,7 +261,7 @@ mod tests {
             "rust",
             "test.rs"
         );
-        
+
         let result_no_context = SearchResult {
             chunk: chunk.clone(),
             score: 0.5,
@@ -263,10 +269,10 @@ mod tests {
             keyword_score: 0.0,
             show_full_context: false,
         };
-        
+
         let snippet = result_no_context.render_snippet();
         assert_eq!(snippet.lines().count(), 12);
-        
+
         let result_with_context = SearchResult {
             chunk,
             score: 0.5,
@@ -274,7 +280,7 @@ mod tests {
             keyword_score: 0.0,
             show_full_context: true,
         };
-        
+
         let full = result_with_context.render_snippet();
         assert_eq!(full.lines().count(), 14);
     }
@@ -291,7 +297,7 @@ mod tests {
             hash: "hash".to_string(),
             modified_at: Utc::now(),
         };
-        
+
         let old = CodeChunk {
             id: Uuid::new_v4(),
             path: PathBuf::from("test.rs"),
@@ -302,10 +308,10 @@ mod tests {
             hash: "hash".to_string(),
             modified_at: Utc::now() - chrono::Duration::days(30),
         };
-        
+
         let recent_boost = recency_boost(&recent);
         let old_boost = recency_boost(&old);
-        
+
         assert!(recent_boost > old_boost);
         assert!(recent_boost <= 1.0);
         assert!(old_boost > 0.0);

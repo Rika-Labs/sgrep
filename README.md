@@ -14,7 +14,7 @@ Natural-language search that works like `grep`. Fast, local, and works with codi
 - **Local & Private:** Real ML embeddings powered by BGE-small-en-v1.5-q (quantized, 384-dim, runs locally via ONNX).
 - **Auto-Isolated:** Every repository transparently receives its own index under `~/.sgrep/indexes/<hash>`.
 - **Adaptive:** Rayon-powered chunking/indexing automatically scales across cores while keeping laptops cool.
-- **Agent-Ready:** Designed for coding agents: stable CLI surface, structured JSON output coming soon.
+- **Agent-Ready:** Designed for coding agents: stable CLI surface, structured JSON output via `--json`.
 
 ## Quick Start
 
@@ -39,13 +39,34 @@ Natural-language search that works like `grep`. Fast, local, and works with codi
    sgrep search "where do we handle authentication?"
    ```
 
-   **Your first search will automatically index the repository.** Each repository is automatically isolated with its own index. Switching between repos "just works" — no manual configuration needed.
+   **Your first search will automatically index the repository.** Each repository is automatically isolated with its own index. Switching between repos "just works" — no manual configuration needed. If an index is missing or corrupted, `sgrep` will rebuild it automatically with retries and clear progress reporting.
 
 ## Coding Agent Integration
 
+### Claude Code Plugin
+
+**Automatic integration with Claude Code!** Install the official sgrep plugin for seamless semantic search:
+
+```bash
+/plugin marketplace add rika-labs/sgrep-claude-plugin
+/plugin install sgrep
+```
+
+The plugin automatically:
+- Starts `sgrep watch` when Claude sessions begin
+- Provides a skill that enables Claude to use sgrep via CLI
+- Stops `sgrep watch` when sessions end
+- Creates indexes automatically if needed
+
+See [plugins/sgrep/README.md](plugins/sgrep/README.md) for detailed documentation.
+
+### Manual Agent Integration
+
+For other coding agents:
+
 1. Install `sgrep` globally and add it to your agent's PATH.
 2. Run `sgrep watch` before starting the agent session.
-3. Teach the agent to run `sgrep search --json "query"` (JSON output lands in v0.2.0).
+3. Teach the agent to run `sgrep search --json "query"` (structured output available now).
 
 Agents benefit from consistent result ordering, semantic understanding, score telemetry, and chunk-level metadata (path, lines, language, timestamp).
 
@@ -68,6 +89,7 @@ sgrep search "how is the database connection pooled?"
 | `-p, --path <dir>` | Repository root to search. | `.` |
 | `--glob <pattern>` | Include-only glob (repeatable). | — |
 | `--filters key=value` | Language/path filters (repeatable). | — |
+| `--json` | Emit structured JSON (agent-friendly). | `false` |
 
 **Examples:**
 
@@ -75,6 +97,37 @@ sgrep search "how is the database connection pooled?"
 sgrep search "API rate limiting"
 sgrep search "error handling" --glob "src/**/*.rs" -n 20
 sgrep search "database pooling" --filters lang=rust --context
+sgrep search --json "retry logic" | jq
+
+**JSON schema (stable)**
+
+```jsonc
+{
+  "query": "retry logic",
+  "limit": 10,
+  "duration_ms": 42,
+  "index": {
+    "repo_path": "/path/to/repo",
+    "repo_hash": "<blake3>",
+    "vector_dim": 384,
+    "indexed_at": "2025-11-23T05:00:00Z",
+    "total_files": 123,
+    "total_chunks": 456
+  },
+  "results": [
+    {
+      "path": "src/lib.rs",
+      "start_line": 10,
+      "end_line": 42,
+      "language": "rust",
+      "score": 0.92,
+      "semantic_score": 0.88,
+      "keyword_score": 0.55,
+      "snippet": "fn retry(...) { … }"
+    }
+  ]
+}
+```
 ```
 
 ### `sgrep index`
@@ -140,12 +193,20 @@ Stores are isolated automatically — no manual configuration needed!
 
 - **Data location:** `~/.sgrep/` (configurable via `SGREP_HOME`)
 - **Model cache:** `~/.cache/fastembed/` (embedding models downloaded once on first use)
+- **Hardware choice:** sgrep auto-detects CoreML on Apple Silicon and CUDA on NVIDIA. Override with `--device cpu|cuda|coreml` or `SGREP_DEVICE=cpu|cuda|coreml`.
+- **Batch size:** Auto-tunes (CPU 256, GPU 512). Override with `--batch-size N` or `SGREP_BATCH_SIZE=N` (16–2048). Larger batches improve throughput; smaller batches reduce memory.
 - **Env Vars:**
   - `SGREP_HOME`: Override default data directory
   - `RUST_LOG=sgrep=debug`: Enable tracing spans for chunking, embedding, and storage
   - `RAYON_NUM_THREADS=4`: Limit concurrency on thermally constrained laptops
 
 Upcoming `sgrep.toml` will let you pin exclusions and concurrency limits.
+
+### CLI Help Quick Reference
+
+- `sgrep --help` — global flags (including `--device`).
+- `sgrep index --help` — indexing options (`--batch-size`, `--force`).
+- `sgrep watch --help` — watch options (`--batch-size`, `--debounce-ms`).
 
 ## Development
 
@@ -162,10 +223,6 @@ cargo clippy
 - **Weird results?** Clear `~/.sgrep/indexes/<repo>` and re-index to reset caches.
 - **Slow indexing?** Set `RAYON_NUM_THREADS=4` to limit concurrency on thermally constrained laptops.
 - **No index found?** Run `sgrep index` (auto-detects repo path if omitted).
-
-## Roadmap
-
-See [ROADMAP.md](ROADMAP.md) for a comprehensive list of implemented and planned features.
 
 ## Attribution
 
