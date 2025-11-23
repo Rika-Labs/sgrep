@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -84,6 +85,10 @@ impl RepositoryIndex {
 }
 
 fn data_dir() -> PathBuf {
+    if let Ok(home) = env::var("SGREP_HOME") {
+        return PathBuf::from(home);
+    }
+
     if let Some(dirs) = ProjectDirs::from("dev", "RikaLabs", "sgrep") {
         dirs.data_local_dir().to_path_buf()
     } else {
@@ -110,6 +115,13 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    fn set_test_home() -> PathBuf {
+        let temp_dir = std::env::temp_dir().join(format!("sgrep_test_home_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::env::set_var("SGREP_HOME", &temp_dir);
+        temp_dir
+    }
 
     fn create_sample_chunk() -> CodeChunk {
         CodeChunk {
@@ -152,7 +164,7 @@ mod tests {
             total_files: 1,
             total_chunks: 1,
         };
-        
+
         let index = RepositoryIndex::new(metadata, vec![chunk], vec![vector]);
         assert_eq!(index.chunks.len(), index.vectors.len());
         assert_eq!(index.chunks.len(), 1);
@@ -160,22 +172,24 @@ mod tests {
 
     #[test]
     fn index_store_creates_deterministic_hash() {
+        let _home = set_test_home();
         let temp_dir = std::env::temp_dir().join("sgrep_test_repo");
         std::fs::create_dir_all(&temp_dir).unwrap();
-        
+
         let store1 = IndexStore::new(&temp_dir).unwrap();
         let store2 = IndexStore::new(&temp_dir).unwrap();
-        
+
         assert_eq!(store1.repo_hash(), store2.repo_hash());
-        
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
     fn save_and_load_roundtrip() {
+        let _home = set_test_home();
         let temp_dir = std::env::temp_dir().join(format!("sgrep_test_{}", Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
-        
+
         let store = IndexStore::new(&temp_dir).unwrap();
         let chunk = create_sample_chunk();
         let vector = vec![0.1, 0.2, 0.3];
@@ -188,31 +202,33 @@ mod tests {
             total_files: 1,
             total_chunks: 1,
         };
-        
-        let original_index = RepositoryIndex::new(metadata, vec![chunk.clone()], vec![vector.clone()]);
+
+        let original_index =
+            RepositoryIndex::new(metadata, vec![chunk.clone()], vec![vector.clone()]);
         store.save(&original_index).unwrap();
-        
+
         let loaded_index = store.load().unwrap();
         assert!(loaded_index.is_some());
-        
+
         let loaded = loaded_index.unwrap();
         assert_eq!(loaded.chunks.len(), 1);
         assert_eq!(loaded.vectors.len(), 1);
         assert_eq!(loaded.chunks[0].text, chunk.text);
         assert_eq!(loaded.vectors[0], vector);
-        
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
     #[test]
     fn load_returns_none_for_nonexistent_index() {
+        let _home = set_test_home();
         let temp_dir = std::env::temp_dir().join(format!("sgrep_test_empty_{}", Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
-        
+
         let store = IndexStore::new(&temp_dir).unwrap();
         let result = store.load().unwrap();
         assert!(result.is_none());
-        
+
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 }
