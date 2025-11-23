@@ -1,0 +1,24 @@
+{
+  "name": "sgrep",
+  "description": "Lightning-fast semantic code search with auto-indexing. Automatically manages sgrep watch during Claude sessions.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Rika Labs"
+  },
+  "homepage": "https://github.com/Rika-Labs/sgrep",
+  "repository": "https://github.com/Rika-Labs/sgrep",
+  "license": "Apache-2.0",
+  "keywords": [
+    "semantic-search",
+    "code-search",
+    "ai",
+    "embeddings",
+    "developer-tools",
+    "productivity",
+    "search"
+  ],
+  "category": "search",
+  "skills": "skills",
+  "hooks": "hooks/hooks.json"
+}
+
