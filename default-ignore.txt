@@ -1,0 +1,73 @@
+# sgrep default ignore patterns
+# These patterns are always excluded from indexing
+
+# Version control
+.git/
+.hg/
+.svn/
+
+# Dependencies
+node_modules/
+vendor/
+target/
+dist/
+build/
+out/
+.next/
+.nuxt/
+venv/
+env/
+.env/
+__pycache__/
+*.pyc
+
+# IDE and editors
+.idea/
+.vscode/
+.vs/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Cache and temporary files
+.cache/
+.tmp/
+tmp/
+temp/
+*.log
+*.tmp
+
+# Model and data directories
+.fastembed_cache/
+models/
+.models/
+data/
+.data/
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+*.class
+*.jar
+*.war
+
+# Package manager locks (large files)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+Cargo.lock
+poetry.lock
+Pipfile.lock
+Gemfile.lock
+
+# Minified and generated files
+*.min.js
+*.min.css
+*.bundle.js
+*-min.js
