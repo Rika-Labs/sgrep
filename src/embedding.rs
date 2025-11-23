@@ -47,6 +47,33 @@ impl Embedder {
         Ok(vector)
     }
 
+    pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let mut uncached = Vec::new();
+        let mut uncached_indices = Vec::new();
+        let mut results = vec![Vec::new(); texts.len()];
+
+        for (i, text) in texts.iter().enumerate() {
+            if let Some(vec) = self.cache.get(text) {
+                results[i] = vec.as_ref().clone();
+            } else {
+                uncached.push(text.as_str());
+                uncached_indices.push(i);
+            }
+        }
+
+        if !uncached.is_empty() {
+            let mut model = self.model.lock().unwrap();
+            let embeddings = model.embed(uncached.clone(), None)?;
+
+            for (embedding, &idx) in embeddings.iter().zip(&uncached_indices) {
+                results[idx] = embedding.clone();
+                self.cache.insert(texts[idx].clone(), Arc::new(embedding.clone()));
+            }
+        }
+
+        Ok(results)
+    }
+
     pub fn dimension(&self) -> usize {
         DEFAULT_VECTOR_DIM
     }
