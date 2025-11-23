@@ -24,7 +24,7 @@ A Claude Code plugin that integrates [sgrep](https://github.com/rika-labs/sgrep)
 ### From GitHub Marketplace
 
 ```bash
-/plugin marketplace add rika-labs/sgrep-claude-plugin
+/plugin marketplace add rika-labs/sgrep
 /plugin install sgrep
 ```
 
