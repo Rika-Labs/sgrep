@@ -115,6 +115,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use uuid::Uuid;
+    use serial_test::serial;
 
     fn set_test_home() -> PathBuf {
         let temp_dir = std::env::temp_dir().join(format!("sgrep_test_home_{}", Uuid::new_v4()));
@@ -137,6 +138,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn hash_path_is_deterministic() {
         let path = Path::new("/test/path");
         let hash1 = hash_path(path);
@@ -145,6 +147,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn hash_path_differs_for_different_paths() {
         let hash1 = hash_path(Path::new("/path/one"));
         let hash2 = hash_path(Path::new("/path/two"));
@@ -152,6 +155,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn repository_index_maintains_chunk_vector_correspondence() {
         let chunk = create_sample_chunk();
         let vector = vec![0.1, 0.2, 0.3];
@@ -171,6 +175,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn index_store_creates_deterministic_hash() {
         let _home = set_test_home();
         let temp_dir = std::env::temp_dir().join("sgrep_test_repo");
@@ -185,6 +190,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn save_and_load_roundtrip() {
         let _home = set_test_home();
         let temp_dir = std::env::temp_dir().join(format!("sgrep_test_{}", Uuid::new_v4()));
@@ -220,6 +226,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn load_returns_none_for_nonexistent_index() {
         let _home = set_test_home();
         let temp_dir = std::env::temp_dir().join(format!("sgrep_test_empty_{}", Uuid::new_v4()));
