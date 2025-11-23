@@ -11,7 +11,7 @@
 Natural-language search that works like `grep`. Fast, local, and works with coding agents.
 
 - **Semantic:** Finds concepts ("auth middleware", "retry logic"), not just strings.
-- **Local & Private:** Deterministic embeddings generated on-device with transformer-inspired hashing (optional ONNX models planned).
+- **Local & Private:** Real ML embeddings powered by nomic-embed-text-v1.5 (SOTA, 768-dim, runs locally via ONNX).
 - **Auto-Isolated:** Every repository transparently receives its own index under `~/.sgrep/indexes/<hash>`.
 - **Adaptive:** Rayon-powered chunking/indexing automatically scales across cores while keeping laptops cool.
 - **Agent-Ready:** Designed for coding agents: stable CLI surface, structured JSON output coming soon.
@@ -47,7 +47,7 @@ Natural-language search that works like `grep`. Fast, local, and works with codi
 2. Run `sgrep watch` before starting the agent session.
 3. Teach the agent to run `sgrep search --json "query"` (JSON output lands in v0.2.0).
 
-Agents benefit from deterministic result ordering, score telemetry, and chunk-level metadata (path, lines, language, timestamp).
+Agents benefit from consistent result ordering, semantic understanding, score telemetry, and chunk-level metadata (path, lines, language, timestamp).
 
 ## Commands
 
@@ -104,10 +104,11 @@ sgrep watch ../service --debounce-ms 200
 
 sgrep is designed to be a "good citizen" on your machine:
 
-1. **The Thermostat:** Indexing adjusts concurrency in real-time based on memory pressure and CPU speed. It won't freeze your laptop.
-2. **Smart Chunking:** Uses `tree-sitter` to split code by function/class boundaries, ensuring embeddings capture complete logical blocks.
-3. **Deduplication:** Identical code blocks (boilerplate, license headers) are embedded once and cached, saving space and time.
-4. **Hybrid Search:** Cosine similarity + keyword match + recency boost deliver precise results without sacrificing recall.
+1. **Real Embeddings:** Uses nomic-embed-text-v1.5, a SOTA open-source model (137M params) that runs locally via FastEmbed + ONNX. First run downloads the model (~500MB) once.
+2. **The Thermostat:** Indexing adjusts concurrency in real-time based on memory pressure and CPU speed. It won't freeze your laptop.
+3. **Smart Chunking:** Uses `tree-sitter` to split code by function/class boundaries, ensuring embeddings capture complete logical blocks.
+4. **Deduplication:** Identical code blocks (boilerplate, license headers) are embedded once and cached, saving space and time.
+5. **Hybrid Search:** 70% semantic similarity + 20% keyword matching (path/filename boosted) + 10% recency for optimal results.
 
 **Target metrics:**
 
@@ -138,12 +139,13 @@ Stores are isolated automatically — no manual configuration needed!
 ### Manual Configuration
 
 - **Data location:** `~/.sgrep/` (configurable via `SGREP_HOME`)
+- **Model cache:** `~/.cache/fastembed/` (embedding models downloaded once on first use)
 - **Env Vars:**
   - `SGREP_HOME`: Override default data directory
   - `RUST_LOG=sgrep=debug`: Enable tracing spans for chunking, embedding, and storage
   - `RAYON_NUM_THREADS=4`: Limit concurrency on thermally constrained laptops
 
-Upcoming `sgrep.toml` will let you pin exclusions, embedding backends, and concurrency limits.
+Upcoming `sgrep.toml` will let you pin exclusions and concurrency limits.
 
 ## Development
 

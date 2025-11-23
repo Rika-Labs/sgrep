@@ -43,9 +43,9 @@ impl SearchEngine {
             .filter(|(chunk, _)| fts::matches_filters(&options.filters, chunk))
             .map(|(chunk, vector)| {
                 let semantic = cosine_similarity(&query_vec, vector);
-                let keyword = fts::keyword_score(&keywords, &chunk.text);
+                let keyword = fts::keyword_score(&keywords, &chunk.text, &chunk.path);
                 let recency = recency_boost(chunk);
-                let final_score = 0.6 * semantic + 0.3 * keyword + 0.1 * recency;
+                let final_score = 0.7 * semantic + 0.2 * keyword + 0.1 * recency;
                 SearchResult {
                     chunk: chunk.clone(),
                     score: final_score,

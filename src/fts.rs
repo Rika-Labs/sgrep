@@ -9,7 +9,8 @@ use crate::chunker::CodeChunk;
 static STOPWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
         "the", "and", "for", "but", "with", "from", "this", "that", "into", "when", "what",
-        "how", "why", "does", "are", "our", "your", "their", "then",
+        "how", "why", "does", "are", "our", "your", "their", "then", "where", "located",
+        "find", "show", "get", "can", "will", "should", "would", "could",
     ]
     .into_iter()
     .collect()
@@ -29,16 +30,31 @@ pub fn extract_keywords(query: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn keyword_score(keywords: &[String], text: &str) -> f32 {
+pub fn keyword_score(keywords: &[String], text: &str, path: &Path) -> f32 {
     if keywords.is_empty() {
         return 0.0;
     }
+
     let haystack = text.to_lowercase();
-    let hits = keywords
-        .iter()
-        .filter(|kw| haystack.contains(kw.as_str()))
-        .count();
-    hits as f32 / keywords.len() as f32
+    let path_str = path.to_string_lossy().to_lowercase();
+    let filename = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let mut score = 0.0;
+    for kw in keywords {
+        let kw_lower = kw.as_str();
+        if filename.contains(kw_lower) {
+            score += 3.0;
+        } else if path_str.contains(kw_lower) {
+            score += 2.0;
+        } else if haystack.contains(kw_lower) {
+            score += 1.0;
+        }
+    }
+    score / keywords.len() as f32
 }
 
 pub fn matches_filters(filters: &[String], chunk: &CodeChunk) -> bool {
@@ -103,7 +119,7 @@ mod tests {
     fn extracts_keywords_and_scores() {
         let keywords = extract_keywords("where is the auth logic?");
         assert!(keywords.contains(&"auth".into()));
-        let score = keyword_score(&keywords, "auth logic lives here");
+        let score = keyword_score(&keywords, "auth logic lives here", Path::new("test.rs"));
         assert!(score > 0.0);
     }
 
