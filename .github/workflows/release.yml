@@ -2,8 +2,9 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -56,17 +57,31 @@ jobs:
         with:
           path: dist
 
-      - name: Determine version
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Determine version and tag
         id: version
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          cargo_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "cargo_version=$cargo_version" >> "$GITHUB_OUTPUT"
+          
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            tag_name="${GITHUB_REF#refs/tags/}"
+            echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+            echo "release_name=sgrep $tag_name" >> "$GITHUB_OUTPUT"
+          else
+            build_number=${{ github.run_number }}
+            tag_name="v${cargo_version}-${build_number}"
+            echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+            echo "release_name=sgrep v${cargo_version} build ${build_number}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}-${{ github.run_number }}
-          name: sgrep v${{ steps.version.outputs.version }} build ${{ github.run_number }}
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          name: ${{ steps.version.outputs.release_name }}
           draft: false
           prerelease: false
           files: dist/**/*.tar.gz

@@ -26,9 +26,9 @@ download_and_install() {
   platform=$(detect_os_arch)
   local asset="sgrep-${platform}.tar.gz"
   local url="https://github.com/${REPO}/releases/latest/download/${asset}"
-  local tmp
+  local tmp=""
   tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' EXIT
+  trap 'if [ -n "$tmp" ] && [ -d "$tmp" ]; then rm -rf "$tmp"; fi' EXIT
 
   echo "Downloading $asset ..."
   curl -fsSL "$url" -o "$tmp/$asset"
