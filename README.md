@@ -11,7 +11,7 @@
 Natural-language search that works like `grep`. Fast, local, and works with coding agents.
 
 - **Semantic:** Finds concepts ("auth middleware", "retry logic"), not just strings.
-- **Local & Private:** Real ML embeddings powered by nomic-embed-text-v1.5 (SOTA, 768-dim, runs locally via ONNX).
+- **Local & Private:** Real ML embeddings powered by BGE-small-en-v1.5-q (quantized, 384-dim, runs locally via ONNX).
 - **Auto-Isolated:** Every repository transparently receives its own index under `~/.sgrep/indexes/<hash>`.
 - **Adaptive:** Rayon-powered chunking/indexing automatically scales across cores while keeping laptops cool.
 - **Agent-Ready:** Designed for coding agents: stable CLI surface, structured JSON output coming soon.
@@ -104,7 +104,7 @@ sgrep watch ../service --debounce-ms 200
 
 sgrep is designed to be a "good citizen" on your machine:
 
-1. **Real Embeddings:** Uses nomic-embed-text-v1.5, a SOTA open-source model (137M params) that runs locally via FastEmbed + ONNX. First run downloads the model (~500MB) once.
+1. **Real Embeddings:** Uses BGE-small-en-v1.5-q, a quantized SOTA model (33M params) that runs locally via FastEmbed + ONNX. First run downloads the model (~24MB) once.
 2. **The Thermostat:** Indexing adjusts concurrency in real-time based on memory pressure and CPU speed. It won't freeze your laptop.
 3. **Smart Chunking:** Uses `tree-sitter` to split code by function/class boundaries, ensuring embeddings capture complete logical blocks.
 4. **Deduplication:** Identical code blocks (boilerplate, license headers) are embedded once and cached, saving space and time.

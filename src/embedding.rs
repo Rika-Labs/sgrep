@@ -5,7 +5,7 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use moka::sync::Cache;
 
 const DEFAULT_MAX_CACHE: u64 = 50_000;
-pub const DEFAULT_VECTOR_DIM: usize = 768;
+pub const DEFAULT_VECTOR_DIM: usize = 384;
 
 #[derive(Clone)]
 pub struct Embedder {
@@ -21,12 +21,12 @@ impl Default for Embedder {
 
 impl Embedder {
     pub fn new(max_cache: u64) -> Self {
-        tracing::info!("Initializing nomic-embed-text-v1.5 model...");
+        tracing::info!("Initializing BGE-small-en-v1.5-q (quantized, fast)...");
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::NomicEmbedTextV15)
+            InitOptions::new(EmbeddingModel::BGESmallENV15Q)
                 .with_show_download_progress(true)
         ).expect("Failed to initialize embedding model");
-        tracing::info!("✓ Embedding model loaded");
+        tracing::info!("✓ Fast embedding model loaded");
         Self {
             cache: Cache::builder().max_capacity(max_cache).build(),
             model: Arc::new(std::sync::Mutex::new(model)),
