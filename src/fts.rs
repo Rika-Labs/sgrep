@@ -10,11 +10,9 @@ use tantivy::{Index, doc};
 
 use crate::store::{ChunkRecord, resolve_paths};
 
-const FTS_DIR_NAME: &str = "fts";
-
 fn fts_dir_for_root(root: &Path) -> Result<PathBuf> {
     let paths = resolve_paths(root)?;
-    Ok(paths.base_dir.join(FTS_DIR_NAME))
+    Ok(paths.fts_path)
 }
 
 fn schema() -> Schema {

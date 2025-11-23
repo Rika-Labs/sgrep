@@ -15,6 +15,8 @@ pub struct ChunkRecord {
     pub end_line: u32,
     pub text: String,
     pub embedding: Vec<f32>,
+    #[serde(default)]
+    pub file_type: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -25,7 +27,6 @@ pub struct StoreSummary {
 
 #[derive(Debug, Clone)]
 pub struct StorePaths {
-    pub base_dir: PathBuf,
     pub index_path: PathBuf,
     pub fts_path: PathBuf,
 }
@@ -34,6 +35,15 @@ const DATA_DIR_NAME: &str = ".sgrep";
 const STORES_DIR_NAME: &str = "stores";
 const INDEX_FILE_NAME: &str = "index.jsonl";
 const FTS_DIR_NAME: &str = "fts";
+const META_FILE_NAME: &str = "index_meta.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FileMetadata {
+    pub path: String,
+    pub content_hash: String,
+    pub indexed_at: u64,
+    pub chunk_ids: Vec<u64>,
+}
 
 fn data_root() -> Result<PathBuf> {
     if let Ok(custom) = std::env::var("SGREP_DATA_DIR") {
@@ -73,7 +83,6 @@ pub fn resolve_paths(root: &Path) -> Result<StorePaths> {
     let index_path = base_dir.join(INDEX_FILE_NAME);
     let fts_path = base_dir.join(FTS_DIR_NAME);
     Ok(StorePaths {
-        base_dir,
         index_path,
         fts_path,
     })
@@ -132,6 +141,56 @@ pub fn load_index(root: &Path) -> Result<Vec<ChunkRecord>> {
     Ok(chunks)
 }
 
+fn meta_path_for_root(root: &Path) -> Result<PathBuf> {
+    let paths = resolve_paths(root)?;
+    Ok(paths.index_path.with_file_name(META_FILE_NAME))
+}
+
+pub fn load_metadata(root: &Path) -> Result<Vec<FileMetadata>> {
+    let path = meta_path_for_root(root)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file = File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut items = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let meta: FileMetadata = serde_json::from_str(&line)?;
+        items.push(meta);
+    }
+    Ok(items)
+}
+
+pub fn save_metadata(root: &Path, items: &[FileMetadata]) -> Result<()> {
+    let path = meta_path_for_root(root)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let tmp_path = path.with_extension("tmp");
+    let file = File::create(&tmp_path)
+        .with_context(|| format!("failed to create {}", tmp_path.display()))?;
+    let mut writer = BufWriter::new(file);
+    for meta in items {
+        let line = serde_json::to_string(meta)?;
+        writer.write_all(line.as_bytes())?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()?;
+    std::fs::rename(&tmp_path, &path).with_context(|| {
+        format!(
+            "failed to move {} to {}",
+            tmp_path.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
 pub fn list_stores() -> Result<Vec<StoreSummary>> {
     let dir = stores_dir()?;
     if !dir.exists() {
@@ -173,7 +232,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let data_root = dir.path().join("data");
         let original_data = std::env::var("SGREP_DATA_DIR").ok();
-        unsafe { std::env::set_var("SGREP_DATA_DIR", &data_root); }
+        unsafe {
+            std::env::set_var("SGREP_DATA_DIR", &data_root);
+        }
 
         let root = dir.path().join("proj");
         std::fs::create_dir_all(&root).unwrap();
@@ -182,9 +243,13 @@ mod tests {
         assert!(paths.fts_path.ends_with("fts"));
 
         if let Some(data) = original_data {
-            unsafe { std::env::set_var("SGREP_DATA_DIR", data); }
+            unsafe {
+                std::env::set_var("SGREP_DATA_DIR", data);
+            }
         } else {
-            unsafe { std::env::remove_var("SGREP_DATA_DIR"); }
+            unsafe {
+                std::env::remove_var("SGREP_DATA_DIR");
+            }
         }
     }
 }

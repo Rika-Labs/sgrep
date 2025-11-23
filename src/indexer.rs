@@ -1,19 +1,19 @@
-use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use blake3::Hasher as Blake3;
 use ignore::WalkBuilder;
 
+use crate::chunker::{FileType, chunk_file};
 use crate::embedding::Embedder;
 use crate::fts;
-use crate::store::{ChunkRecord, index_exists, save_index};
-
-const CHUNK_MAX_LINES: usize = 40;
-const CHUNK_OVERLAP_LINES: usize = 8;
+use crate::store::{
+    ChunkRecord, FileMetadata, load_index, load_metadata, save_index, save_metadata,
+};
 const MAX_CHUNKS_PER_FILE: usize = 256;
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -21,6 +21,7 @@ pub struct IndexOptions {
     pub root: PathBuf,
     pub force_reindex: bool,
     pub dry_run: bool,
+    pub include_markdown: bool,
 }
 
 #[derive(Debug, Default)]
@@ -28,6 +29,7 @@ pub struct IndexStats {
     pub chunks: usize,
     pub files: usize,
     pub skipped_existing: bool,
+    pub reused_files: usize,
 }
 
 pub fn index_repository(embedder: &Embedder, options: IndexOptions) -> Result<IndexStats> {
@@ -36,15 +38,17 @@ pub fn index_repository(embedder: &Embedder, options: IndexOptions) -> Result<In
     } else {
         options.root.clone()
     };
-    if !options.force_reindex && index_exists(&path)? {
-        return Ok(IndexStats {
-            skipped_existing: true,
-            ..Default::default()
-        });
-    }
+    let existing_chunks = load_index(&path).unwrap_or_default();
+    let existing_meta = load_metadata(&path).unwrap_or_default();
     let mut chunks: Vec<ChunkRecord> = Vec::new();
     let mut stats = IndexStats::default();
     let mut seen_chunk_ids: HashSet<u64> = HashSet::new();
+    let mut meta_map: HashMap<String, FileMetadata> = HashMap::new();
+    for m in existing_meta.into_iter() {
+        meta_map.insert(m.path.clone(), m);
+    }
+    let mut reused = 0usize;
+    let mut hash_by_path: HashMap<String, String> = HashMap::new();
     let walker = WalkBuilder::new(&path)
         .hidden(false)
         .ignore(true)
@@ -57,15 +61,50 @@ pub fn index_repository(embedder: &Embedder, options: IndexOptions) -> Result<In
         if !should_index_path(file_path) {
             continue;
         }
+        if !options.include_markdown {
+            if let Some(ext) = file_path.extension().and_then(|s| s.to_str()) {
+                if ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("mdx") {
+                    continue;
+                }
+            }
+        }
         if skip_large_file(file_path) {
             continue;
         }
-        index_file(file_path, &mut chunks, embedder, &mut seen_chunk_ids, &mut stats)?;
+        let content_hash = hash_file(file_path)?;
+        if !options.force_reindex {
+            if let Some(meta) = meta_map.get(file_path.to_string_lossy().as_ref()) {
+                if meta.content_hash == content_hash {
+                    for chunk in existing_chunks
+                        .iter()
+                        .filter(|c| c.path == file_path.to_string_lossy())
+                    {
+                        chunks.push(chunk.clone());
+                        seen_chunk_ids.insert(chunk.id);
+                    }
+                    stats.files += 1;
+                    reused += 1;
+                    hash_by_path.insert(file_path.to_string_lossy().to_string(), content_hash);
+                    continue;
+                }
+            }
+        }
+        index_file(
+            file_path,
+            &mut chunks,
+            embedder,
+            &mut seen_chunk_ids,
+            &mut stats,
+        )?;
+        hash_by_path.insert(file_path.to_string_lossy().to_string(), content_hash);
     }
+    stats.reused_files = reused;
     if options.dry_run {
         return Ok(stats);
     }
     save_index(&path, &chunks)?;
+    let metas = build_metadata(&chunks, &hash_by_path);
+    save_metadata(&path, &metas)?;
     fts::index_chunks(&path, &chunks)?;
     stats.chunks = chunks.len();
     Ok(stats)
@@ -97,6 +136,32 @@ fn skip_large_file(path: &Path) -> bool {
     }
 }
 
+fn hash_file(path: &Path) -> Result<String> {
+    let mut hasher = Blake3::new();
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn build_metadata(chunks: &[ChunkRecord], hashes: &HashMap<String, String>) -> Vec<FileMetadata> {
+    let mut map: HashMap<String, FileMetadata> = HashMap::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    for chunk in chunks {
+        let entry = map.entry(chunk.path.clone()).or_insert(FileMetadata {
+            path: chunk.path.clone(),
+            content_hash: hashes.get(&chunk.path).cloned().unwrap_or_default(),
+            indexed_at: now,
+            chunk_ids: Vec::new(),
+        });
+        entry.chunk_ids.push(chunk.id);
+    }
+    map.into_values().collect()
+}
+
 fn index_file(
     path: &Path,
     out: &mut Vec<ChunkRecord>,
@@ -104,56 +169,27 @@ fn index_file(
     seen_chunk_ids: &mut HashSet<u64>,
     stats: &mut IndexStats,
 ) -> Result<()> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut buffer: Vec<String> = Vec::new();
-    let mut start_line = 1u32;
-    let mut current_line = 1u32;
-    let mut chunks_emitted = 0usize;
-    for line in reader.lines() {
-        let line = line?;
-        if buffer.is_empty() {
-            start_line = current_line;
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let chunked = chunk_file(path, &contents)?;
+    let mut emitted = 0usize;
+    for chunk in chunked.chunks.into_iter() {
+        if emitted >= MAX_CHUNKS_PER_FILE {
+            break;
         }
-        buffer.push(line);
-        if buffer.len() >= CHUNK_MAX_LINES {
-            emit_chunk(
-                path,
-                start_line,
-                current_line,
-                &mut buffer,
-                out,
-                embedder,
-                seen_chunk_ids,
-            )?;
-            chunks_emitted += 1;
-            if CHUNK_OVERLAP_LINES > 0 {
-                let overlap = buffer
-                    .split_off(buffer.len().saturating_sub(CHUNK_OVERLAP_LINES));
-                buffer = overlap;
-                start_line = current_line.saturating_sub(buffer.len() as u32 - 1);
-            } else {
-                buffer.clear();
-            }
-            if chunks_emitted >= MAX_CHUNKS_PER_FILE {
-                stats.files += 1;
-                return Ok(());
-            }
-        }
-        current_line += 1;
+        let slice = &contents[chunk.start_byte..chunk.end_byte];
+        emit_chunk(
+            path,
+            chunk.start_line,
+            chunk.end_line,
+            slice,
+            chunked.file_type,
+            out,
+            embedder,
+            seen_chunk_ids,
+        )?;
+        emitted += 1;
     }
-    if buffer.is_empty() {
-        return Ok(());
-    }
-    emit_chunk(
-        path,
-        start_line,
-        current_line.saturating_sub(1),
-        &mut buffer,
-        out,
-        embedder,
-        seen_chunk_ids,
-    )?;
     stats.files += 1;
     Ok(())
 }
@@ -162,21 +198,16 @@ fn emit_chunk(
     path: &Path,
     start_line: u32,
     end_line: u32,
-    buffer: &mut Vec<String>,
+    text: &str,
+    file_type: FileType,
     out: &mut Vec<ChunkRecord>,
     embedder: &Embedder,
     seen_chunk_ids: &mut HashSet<u64>,
 ) -> Result<()> {
-    if buffer.is_empty() {
-        return Ok(());
-    }
-    let text = buffer.join("\n");
     if text.trim().is_empty() {
-        buffer.clear();
         return Ok(());
     }
-    buffer.clear();
-    let embedding = embedder.embed(&text)?;
+    let embedding = embedder.embed(text)?;
     let mut hasher = DefaultHasher::new();
     path.to_string_lossy().hash(&mut hasher);
     start_line.hash(&mut hasher);
@@ -191,8 +222,15 @@ fn emit_chunk(
         path: path.to_string_lossy().to_string(),
         start_line,
         end_line,
-        text,
+        text: text.to_string(),
         embedding,
+        file_type: match file_type {
+            FileType::Code => "code".to_string(),
+            FileType::Documentation => "doc".to_string(),
+            FileType::Config => "config".to_string(),
+            FileType::Data => "data".to_string(),
+            FileType::Other => "other".to_string(),
+        },
     };
     out.push(record);
     Ok(())
