@@ -96,15 +96,28 @@ impl Indexer {
 
 fn collect_files(root: &Path) -> Vec<PathBuf> {
     WalkBuilder::new(root)
-        .hidden(false)
+        .hidden(true)
         .ignore(true)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .follow_links(false)
+        .add_custom_ignore_filename(".sgrepignore")
         .build()
         .filter_map(|entry| match entry {
-            Ok(e) if e.file_type().map(|ft| ft.is_file()).unwrap_or(false) => Some(e.into_path()),
+            Ok(e) => {
+                if !e.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                    return None;
+                }
+                let path = e.path();
+                if path.components().any(|c| {
+                    let name = c.as_os_str().to_string_lossy();
+                    name == ".git" || name == ".fastembed_cache" || name == "node_modules"
+                }) {
+                    return None;
+                }
+                Some(e.into_path())
+            }
             _ => None,
         })
         .collect()
