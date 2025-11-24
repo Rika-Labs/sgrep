@@ -1,0 +1,164 @@
+name: Performance Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # Allow manual triggers
+
+jobs:
+  benchmark:
+    name: Run Performance Benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Generate test repositories
+        run: |
+          cd benches/repos
+          chmod +x generate_synthetic.py download_repos.sh
+
+          # Generate synthetic repos (faster than cloning large repos)
+          echo "Generating synthetic repos for benchmarking..."
+          ./generate_synthetic.py 1000
+          ./generate_synthetic.py 10000
+          ./generate_synthetic.py 50000
+
+          # Clone small real repos (optional, for variety)
+          # git clone --depth 1 https://github.com/actix/actix-web.git || true
+
+      - name: Build sgrep in release mode
+        run: cargo build --release
+
+      - name: Run SLA tests
+        run: |
+          echo "🎯 Running Performance SLA Tests"
+          cargo test --release --test performance_sla -- --ignored --nocapture
+        continue-on-error: true # Don't fail CI yet, collect data first
+
+      - name: Run criterion benchmarks
+        run: |
+          echo "📊 Running Criterion Benchmarks"
+          cargo bench --bench bench_indexing -- --output-format bencher | tee output.txt
+        continue-on-error: true
+
+      - name: Extract and display results
+        run: |
+          echo "📈 Benchmark Results Summary"
+          echo "================================"
+
+          if [ -f output.txt ]; then
+            cat output.txt
+          fi
+
+          echo ""
+          echo "For detailed results, check the workflow logs above."
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: |
+            target/criterion/
+            output.txt
+          retention-days: 30
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let comment = '## 📊 Performance Benchmark Results\n\n';
+
+            if (fs.existsSync('output.txt')) {
+              const output = fs.readFileSync('output.txt', 'utf8');
+              comment += '```\n' + output + '\n```\n';
+            } else {
+              comment += 'Benchmark output not found. Check workflow logs for details.\n';
+            }
+
+            comment += '\n🔗 [View full report in Actions artifacts](' +
+                       `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  # Optional: Run on different hardware configurations
+  benchmark-matrix:
+    name: Benchmark on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # Could add: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Generate test repos
+        run: |
+          cd benches/repos
+          chmod +x generate_synthetic.py
+          ./generate_synthetic.py 10000
+
+      - name: Build and test
+        run: |
+          cargo build --release
+          cargo test --release --test performance_sla sla_10k_synthetic_under_15s -- --ignored --nocapture
+
+      - name: Display system info
+        run: |
+          echo "OS: ${{ matrix.os }}"
+          echo "CPU cores: $(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+          echo "Memory: $(free -h 2>/dev/null || vm_stat | head -5)"

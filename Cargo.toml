@@ -62,3 +62,13 @@ simsimd = "6"
 
 [dev-dependencies]
 serial_test = "3.2"
+criterion = { version = "0.5", features = ["html_reports"] }
+walkdir = "2.4"
+
+[[bench]]
+name = "bench_indexing"
+harness = false
+
+[[bench]]
+name = "bench_search"
+harness = false
