@@ -1,7 +1,7 @@
 ---
 name: sgrep
 description: Use sgrep for semantic code search. Use when you need to find code by meaning rather than exact text matching. Perfect for finding concepts like "authentication logic", "error handling patterns", or "database connection pooling".
-tools: Bash
+allowed-tools: Bash
 ---
 
 # sgrep - Semantic Code Search
