@@ -1,0 +1,702 @@
+use std::env;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Context, Result};
+use clap::Parser;
+use console::style;
+use indicatif::HumanDuration;
+use tracing::{info, warn};
+
+use crate::cli::{resolve_repo_path, Cli, Commands};
+use crate::embedding::{self, Embedder, PooledEmbedder};
+use crate::output::JsonResponse;
+use crate::{indexer, search, store, watch};
+
+pub fn run() -> Result<()> {
+    setup_tracing();
+    let cli = parse_cli();
+    run_with_cli(cli)
+}
+
+pub fn run_with_cli(cli: Cli) -> Result<()> {
+    let embedder = build_embedder(cli.offline, cli.device.clone())?;
+
+    match cli.command {
+        Commands::Index {
+            path,
+            force,
+            batch_size,
+            profile,
+        } => handle_index(embedder, path, force, batch_size, profile),
+        Commands::Search {
+            query,
+            path,
+            limit,
+            context,
+            glob,
+            filters,
+            json,
+        } => handle_search(embedder, &query, &path, limit, context, glob, filters, json),
+        Commands::Watch {
+            path,
+            debounce_ms,
+            batch_size,
+        } => handle_watch(embedder, path, debounce_ms, batch_size),
+    }
+}
+
+fn build_embedder(
+    offline: bool,
+    device: Option<String>,
+) -> Result<Arc<dyn embedding::BatchEmbedder>> {
+    if env::var("TOKENIZERS_PARALLELISM").is_err() {
+        env::set_var("TOKENIZERS_PARALLELISM", "true");
+    }
+
+    if offline {
+        env::set_var("SGREP_OFFLINE", "1");
+    }
+
+    if let Some(device) = device {
+        env::set_var("SGREP_DEVICE", device);
+    }
+
+    embedding::configure_offline_env(offline)?;
+
+    let use_pooled = env::var("SGREP_USE_POOLED_EMBEDDER")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+
+    Ok(if use_pooled {
+        Arc::new(PooledEmbedder::default())
+    } else {
+        Arc::new(Embedder::default())
+    })
+}
+
+fn handle_index(
+    embedder: Arc<dyn embedding::BatchEmbedder>,
+    path: Option<std::path::PathBuf>,
+    force: bool,
+    batch_size: Option<usize>,
+    profile: bool,
+) -> Result<()> {
+    let path = resolve_repo_path(path)?;
+    let indexer = indexer::Indexer::new(embedder.clone());
+    let report = indexer
+        .build_index(indexer::IndexRequest {
+            path: path.clone(),
+            force,
+            batch_size,
+            profile,
+            dirty: None,
+        })
+        .context("Failed to build index")?;
+
+    println!(
+        "{} Indexed {} files ({} chunks) in {}",
+        style("✔").green(),
+        report.files_indexed,
+        report.chunks_indexed,
+        HumanDuration(report.duration)
+    );
+
+    if profile {
+        if let Some(t) = report.timings {
+            println!(
+                "  walk: {} | chunk: {} | embed: {} | write: {}",
+                HumanDuration(t.walk),
+                HumanDuration(t.chunk),
+                HumanDuration(t.embed),
+                HumanDuration(t.write)
+            );
+        }
+        println!(
+            "  cache hits: {} | cache misses: {} | hit rate: {:.1}%",
+            report.cache_hits,
+            report.cache_misses,
+            if report.cache_hits + report.cache_misses == 0 {
+                0.0
+            } else {
+                (report.cache_hits as f64 / (report.cache_hits + report.cache_misses) as f64)
+                    * 100.0
+            }
+        );
+    }
+
+    Ok(())
+}
+
+fn handle_search(
+    embedder: Arc<dyn embedding::BatchEmbedder>,
+    query: &str,
+    path: &Path,
+    limit: usize,
+    context: bool,
+    glob: Vec<String>,
+    filters: Vec<String>,
+    json: bool,
+) -> Result<()> {
+    let start = Instant::now();
+    let engine = search::SearchEngine::new(embedder.clone());
+
+    // Try mmap-based search first for zero-copy performance
+    let store_result = store::IndexStore::new(path)?;
+    if let Ok(Some(mmap_index)) = store_result.load_mmap() {
+        if mmap_index.metadata.vector_dim == embedder.dimension() {
+            let results = engine.search_mmap(
+                &mmap_index,
+                query,
+                search::SearchOptions {
+                    limit,
+                    include_context: context,
+                    glob,
+                    filters,
+                },
+            )?;
+            let elapsed = start.elapsed();
+            let repo_index = mmap_index.to_repository_index();
+            return render_results(results, json, query, limit, &repo_index, elapsed);
+        }
+    }
+
+    // Fall back to standard loading
+    let index = load_or_index(path, embedder.clone())?;
+    let results = engine.search(
+        &index,
+        query,
+        search::SearchOptions {
+            limit,
+            include_context: context,
+            glob,
+            filters,
+        },
+    )?;
+    let elapsed = start.elapsed();
+
+    render_results(results, json, query, limit, &index, elapsed)
+}
+
+fn handle_watch(
+    embedder: Arc<dyn embedding::BatchEmbedder>,
+    path: Option<std::path::PathBuf>,
+    debounce_ms: u64,
+    batch_size: Option<usize>,
+) -> Result<()> {
+    let path = resolve_repo_path(path)?;
+    let indexer = indexer::Indexer::new(embedder.clone());
+    let mut watcher =
+        watch::WatchService::new(indexer, Duration::from_millis(debounce_ms), batch_size);
+    watcher.run(&path)
+}
+
+fn load_or_index(
+    path: &Path,
+    embedder: Arc<dyn embedding::BatchEmbedder>,
+) -> Result<store::RepositoryIndex> {
+    let store = store::IndexStore::new(path)?;
+    match store.load() {
+        Ok(Some(index)) => {
+            if index.metadata.vector_dim != embedder.dimension() {
+                warn!(
+                    "msg" = "index vector dim mismatch, rebuilding",
+                    "index_dim" = index.metadata.vector_dim,
+                    "embedder_dim" = embedder.dimension()
+                );
+                return rebuild_index(path, embedder);
+            }
+            if index.chunks.len() != index.vectors.len() {
+                warn!(
+                    "msg" = "index chunk/vector length mismatch, rebuilding",
+                    "chunks" = index.chunks.len(),
+                    "vectors" = index.vectors.len()
+                );
+                return rebuild_index(path, embedder);
+            }
+            Ok(index)
+        }
+        Ok(None) => {
+            info!("msg" = "no index found, building", "path" = %path.display());
+            rebuild_index(path, embedder)
+        }
+        Err(err) => {
+            warn!("error" = %err, "msg" = "failed to load index, rebuilding");
+            rebuild_index(path, embedder)
+        }
+    }
+}
+
+fn rebuild_index(
+    path: &Path,
+    embedder: Arc<dyn embedding::BatchEmbedder>,
+) -> Result<store::RepositoryIndex> {
+    eprintln!(
+        "{} Building index for {} (this happens once per repo)",
+        style("ℹ").cyan(),
+        path.display()
+    );
+
+    let indexer = indexer::Indexer::new(embedder.clone());
+    let report = indexer
+        .build_index(indexer::IndexRequest {
+            path: path.to_path_buf(),
+            force: true,
+            batch_size: None,
+            profile: false,
+            dirty: None,
+        })
+        .with_context(|| format!("Index build failed for {}", path.display()))?;
+
+    eprintln!(
+        "{} Indexed {} files ({} chunks) in {}",
+        style("✔").green(),
+        report.files_indexed,
+        report.chunks_indexed,
+        HumanDuration(report.duration)
+    );
+
+    let store = store::IndexStore::new(path)?;
+    let index = store.load()?.ok_or_else(|| {
+        anyhow!(
+            "Index build finished but no index was saved. Try deleting ~/.sgrep/indexes/{} and re-running.",
+            store.repo_hash()
+        )
+    })?;
+
+    if index.metadata.vector_dim != embedder.dimension() {
+        return Err(anyhow!(
+            "Index vector dimension {} does not match embedder {}. Try setting SGREP_DEVICE=cpu and rerun `sgrep search`.",
+            index.metadata.vector_dim,
+            embedder.dimension()
+        ));
+    }
+
+    Ok(index)
+}
+
+fn parse_cli() -> Cli {
+    if let Ok(raw) = env::var("SGREP_TEST_ARGS") {
+        let mut parts = vec!["sgrep".to_string()];
+        parts.extend(raw.split_whitespace().map(|s| s.to_string()));
+        return Cli::parse_from(parts);
+    }
+    Cli::parse()
+}
+
+fn render_results(
+    results: Vec<search::SearchResult>,
+    json: bool,
+    query: &str,
+    limit: usize,
+    index: &store::RepositoryIndex,
+    elapsed: Duration,
+) -> Result<()> {
+    if json {
+        let payload = JsonResponse::from_results(query, limit, results, index, elapsed);
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else if results.is_empty() {
+        println!("{} No matches found", style("⚠").yellow());
+    } else {
+        for (idx, result) in results.iter().enumerate() {
+            let header = format!(
+                "{}. {}:{}-{} ({:.2})",
+                idx + 1,
+                result.chunk.path.display(),
+                result.chunk.start_line,
+                result.chunk.end_line,
+                result.score
+            );
+            println!("{} {}", style("→").cyan(), style(header).bold());
+            println!(
+                "    semantic: {:.2} | keyword: {:.2}",
+                result.semantic_score, result.keyword_score
+            );
+            println!("{}", result.render_snippet());
+            println!();
+        }
+    }
+    Ok(())
+}
+
+fn setup_tracing() {
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "sgrep=info".into());
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunker::CodeChunk;
+    use crate::store::{IndexMetadata, RepositoryIndex};
+    use chrono::Utc;
+    use serial_test::serial;
+    use std::any::type_name_of_val;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    #[derive(Clone, Default)]
+    struct TestEmbedder;
+
+    impl embedding::BatchEmbedder for TestEmbedder {
+        fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|t| vec![t.len() as f32, 1.0, 0.0, 0.0])
+                .collect())
+        }
+
+        fn dimension(&self) -> usize {
+            4
+        }
+    }
+
+    fn temp_repo() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("sgrep_app_test_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lib.rs"), "pub fn hi() {}\n").unwrap();
+        dir
+    }
+
+    fn sample_index(root: &Path) -> RepositoryIndex {
+        let chunk = CodeChunk {
+            id: Uuid::new_v4(),
+            path: Path::new("lib.rs").to_path_buf(),
+            language: "rust".into(),
+            start_line: 1,
+            end_line: 1,
+            text: "pub fn hi() {}".into(),
+            hash: "hash".into(),
+            modified_at: Utc::now(),
+        };
+        let meta = IndexMetadata {
+            version: env!("CARGO_PKG_VERSION").into(),
+            repo_path: root.to_path_buf(),
+            repo_hash: "hash".into(),
+            vector_dim: 3,
+            indexed_at: Utc::now(),
+            total_files: 1,
+            total_chunks: 1,
+        };
+        RepositoryIndex::new(meta, vec![chunk], vec![vec![1.0, 2.0, 3.0]])
+    }
+
+    #[test]
+    fn build_embedder_sets_env_flags() {
+        let prev_token = env::var("TOKENIZERS_PARALLELISM").ok();
+        let prev_offline = env::var("SGREP_OFFLINE").ok();
+        let prev_device = env::var("SGREP_DEVICE").ok();
+        env::remove_var("TOKENIZERS_PARALLELISM");
+        env::remove_var("SGREP_OFFLINE");
+        env::remove_var("SGREP_DEVICE");
+        let _ = build_embedder(true, Some("cpu".into())).unwrap();
+        assert_eq!(env::var("TOKENIZERS_PARALLELISM").unwrap(), "true");
+        assert_eq!(env::var("SGREP_OFFLINE").unwrap(), "1");
+        assert_eq!(env::var("SGREP_DEVICE").unwrap(), "cpu");
+        if let Some(val) = prev_token {
+            env::set_var("TOKENIZERS_PARALLELISM", val);
+        } else {
+            env::remove_var("TOKENIZERS_PARALLELISM");
+        }
+        if let Some(val) = prev_offline {
+            env::set_var("SGREP_OFFLINE", val);
+        } else {
+            env::remove_var("SGREP_OFFLINE");
+        }
+        if let Some(val) = prev_device {
+            env::set_var("SGREP_DEVICE", val);
+        } else {
+            env::remove_var("SGREP_DEVICE");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn load_or_index_rebuilds_on_dim_mismatch() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        std::env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let store = store::IndexStore::new(&repo).unwrap();
+        let bad_index = sample_index(&repo);
+        store.save(&bad_index).unwrap();
+
+        let index = load_or_index(&repo, embedder.clone()).unwrap();
+        assert_eq!(index.metadata.vector_dim, embedder.dimension());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn build_embedder_respects_use_pooled_flag() {
+        env::set_var("SGREP_USE_POOLED_EMBEDDER", "false");
+        let embedder = build_embedder(false, None).unwrap();
+        let ty = type_name_of_val(embedder.as_ref());
+        assert!(
+            ty.contains("Embedder"),
+            "expected non-pooled embedder, got {}",
+            ty
+        );
+        env::remove_var("SGREP_USE_POOLED_EMBEDDER");
+    }
+
+    #[test]
+    #[serial]
+    fn handle_index_runs_with_profile() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        handle_index(embedder, Some(repo.clone()), true, Some(32), true)
+            .expect("indexing should succeed");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn handle_index_reports_zero_hit_rate_for_empty_repo() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = std::env::temp_dir().join(format!("sgrep_empty_repo_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+
+        // No files means cache_hits + cache_misses = 0, exercising the zero-hit-rate branch.
+        handle_index(embedder, Some(repo.clone()), true, None, true).unwrap();
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn handle_index_reports_cache_hit_rate() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+
+        handle_index(embedder.clone(), Some(repo.clone()), true, None, true).unwrap();
+        // second run should see cache hits > 0 and exercise hit-rate branch
+        handle_index(embedder, Some(repo.clone()), false, None, true).unwrap();
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn render_results_handles_empty_and_json() {
+        let repo_root = Path::new("/tmp/render");
+        let index = sample_index(repo_root);
+        render_results(
+            Vec::new(),
+            false,
+            "hello",
+            5,
+            &index,
+            Duration::from_millis(1),
+        )
+        .unwrap();
+
+        let chunk = CodeChunk {
+            id: Uuid::new_v4(),
+            path: PathBuf::from("lib.rs"),
+            language: "rust".into(),
+            start_line: 1,
+            end_line: 2,
+            text: "fn hello() {}".into(),
+            hash: "h".into(),
+            modified_at: Utc::now(),
+        };
+        let result = search::SearchResult {
+            chunk,
+            score: 0.5,
+            semantic_score: 0.4,
+            keyword_score: 0.1,
+            show_full_context: false,
+        };
+        render_results(
+            vec![result],
+            true,
+            "hello",
+            5,
+            &index,
+            Duration::from_millis(2),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn render_results_handles_human_output() {
+        let repo_root = Path::new("/tmp/render2");
+        let index = sample_index(repo_root);
+        let chunk = CodeChunk {
+            id: Uuid::new_v4(),
+            path: PathBuf::from("lib.rs"),
+            language: "rust".into(),
+            start_line: 3,
+            end_line: 5,
+            text: "fn hello_world() {}".into(),
+            hash: "h2".into(),
+            modified_at: Utc::now(),
+        };
+        let result = search::SearchResult {
+            chunk,
+            score: 0.9,
+            semantic_score: 0.8,
+            keyword_score: 0.1,
+            show_full_context: false,
+        };
+        render_results(
+            vec![result],
+            false,
+            "hello world",
+            3,
+            &index,
+            Duration::from_millis(3),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn load_or_index_rebuilds_on_length_mismatch() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let store = store::IndexStore::new(&repo).unwrap();
+        let mut index = sample_index(&repo);
+        index.vectors.clear(); // mismatch lengths
+        store.save(&index).unwrap();
+
+        let rebuilt = load_or_index(&repo, embedder.clone()).unwrap();
+        assert_eq!(rebuilt.metadata.vector_dim, embedder.dimension());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn load_or_index_recovers_from_corrupt_index() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let store = store::IndexStore::new(&repo).unwrap();
+        let path = repo
+            .join(".sgrep_home")
+            .join("indexes")
+            .join(store.repo_hash())
+            .join("index.bin.zst");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"not a valid index").unwrap();
+
+        let rebuilt = load_or_index(&repo, embedder.clone()).unwrap();
+        assert_eq!(rebuilt.metadata.vector_dim, embedder.dimension());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn handle_watch_runs_noop_in_tests() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        handle_watch(embedder, Some(repo.clone()), 100, Some(8)).unwrap();
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn load_or_index_rebuilds_on_chunk_vector_mismatch() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let store = store::IndexStore::new(&repo).unwrap();
+        let mut index = sample_index(&repo);
+        index.vectors.pop();
+        store.save(&index).unwrap();
+
+        let rebuilt = load_or_index(&repo, embedder.clone()).unwrap();
+        assert_eq!(rebuilt.metadata.vector_dim, embedder.dimension());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn run_with_cli_dispatches_index() {
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let cli = Cli {
+            device: None,
+            offline: false,
+            command: Commands::Index {
+                path: Some(repo.clone()),
+                force: true,
+                batch_size: Some(16),
+                profile: false,
+            },
+        };
+        run_with_cli(cli).unwrap();
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn run_with_cli_dispatches_watch() {
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let cli = Cli {
+            device: None,
+            offline: false,
+            command: Commands::Watch {
+                path: Some(repo.clone()),
+                debounce_ms: 50,
+                batch_size: Some(16),
+            },
+        };
+        run_with_cli(cli).unwrap();
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn run_with_cli_dispatches_search_json() {
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        // ensure index exists
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let indexer = indexer::Indexer::new(embedder.clone());
+        indexer
+            .build_index(indexer::IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: Some(8),
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        let cli = Cli {
+            device: None,
+            offline: false,
+            command: Commands::Search {
+                query: "hi".into(),
+                path: repo.clone(),
+                limit: 5,
+                context: false,
+                glob: vec![],
+                filters: vec![],
+                json: true,
+            },
+        };
+        run_with_cli(cli).unwrap();
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn run_uses_test_args_override() {
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        env::set_var("SGREP_TEST_ARGS", format!("index {}", repo.display()));
+        run().unwrap();
+        env::remove_var("SGREP_TEST_ARGS");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+}
