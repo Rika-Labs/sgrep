@@ -160,14 +160,15 @@ impl Indexer {
 
         let pb =
             ProgressBar::with_draw_target(Some(files.len() as u64), ProgressDrawTarget::stderr());
-        pb.enable_steady_tick(Duration::from_millis(150));
+        pb.enable_steady_tick(Duration::from_millis(100));
         pb.set_style(
             ProgressStyle::with_template(
-                "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}",
+                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%) {msg}",
             )
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("█▓▒░  "),
         );
-        pb.set_message("chunking");
+        pb.set_message("parsing files...");
 
         let chunk_start = Instant::now();
         let chunks: Vec<CodeChunk> = files
@@ -195,8 +196,15 @@ impl Indexer {
         pb.set_length(chunks.len() as u64);
         pb.set_position(0);
         pb.reset_elapsed();
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%) ~{eta} remaining | {msg}",
+            )
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("█▓▒░  "),
+        );
         pb.set_message("embedding");
-        pb.enable_steady_tick(Duration::from_millis(150));
+        pb.enable_steady_tick(Duration::from_millis(100));
 
         let base_batch_size = determine_batch_size(request.batch_size);
         let batch_size = adjust_batch_size_for_progress(base_batch_size, chunks.len());
@@ -289,6 +297,13 @@ impl Indexer {
         let pb_clone = pb.clone();
         let progress_clone = progress_counter.clone();
 
+        if !batches.is_empty() {
+            pb.set_message("loading AI model (first run may take 30s)...");
+            let warmup_text = batches[0].texts.first().cloned().unwrap_or_default();
+            let _ = self.embedder.embed(&warmup_text);
+            pb.set_message("embedding");
+        }
+
         let batch_results: Result<Vec<(Vec<usize>, Vec<Vec<f32>>)>> = batches
             .into_par_iter()
             .map(|batch| {
@@ -309,6 +324,7 @@ impl Indexer {
                             }
                             let new_count = progress_clone.fetch_add(batch_size, Ordering::SeqCst) + batch_size;
                             pb_clone.set_position(new_count as u64);
+                            pb_clone.tick();
                             return Ok((batch.indices, batch_vectors));
                         }
                         Err(_err) if attempt < max_attempts => {
