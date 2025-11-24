@@ -2917,6 +2917,7 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-yaml",
+ "ureq 2.12.1",
  "usearch",
  "uuid",
  "zstd",

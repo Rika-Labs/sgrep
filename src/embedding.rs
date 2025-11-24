@@ -11,11 +11,18 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 #[cfg(not(test))]
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{InitOptionsUserDefined, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel};
 #[cfg(not(test))]
 use moka::sync::Cache;
 #[cfg(not(test))]
 use once_cell::sync::Lazy;
+#[cfg(not(test))]
+use std::io::Write;
+
+#[cfg(not(test))]
+const MXBAI_MODEL_NAME: &str = "mxbai-embed-xsmall-v1";
+#[cfg(not(test))]
+const MXBAI_BASE_URL: &str = "https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/resolve/main";
 use ort::execution_providers::{
     CPUExecutionProvider, CUDAExecutionProvider, CoreMLExecutionProvider, ExecutionProviderDispatch,
 };
@@ -406,6 +413,98 @@ fn optimized_cpu_provider() -> ExecutionProviderDispatch {
 }
 
 #[cfg(not(test))]
+fn get_mxbai_cache_dir() -> PathBuf {
+    get_fastembed_cache_dir().join(MXBAI_MODEL_NAME)
+}
+
+#[cfg(not(test))]
+fn download_file(url: &str, path: &Path, show_progress: bool) -> Result<()> {
+    use std::io::Read;
+
+    if path.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    if show_progress {
+        eprintln!("Downloading {}...", path.file_name().unwrap_or_default().to_string_lossy());
+    }
+
+    let response = ureq::get(url)
+        .call()
+        .map_err(|e| anyhow!("Failed to download {}: {}", url, e))?;
+
+    let mut bytes = Vec::new();
+    response.into_reader().read_to_end(&mut bytes)?;
+
+    let mut file = fs::File::create(path)?;
+    file.write_all(&bytes)?;
+
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn load_mxbai_model(show_download_progress: bool) -> Result<UserDefinedEmbeddingModel> {
+    let cache_dir = get_mxbai_cache_dir();
+
+    let onnx_path = cache_dir.join("model_quantized.onnx");
+    let tokenizer_path = cache_dir.join("tokenizer.json");
+    let config_path = cache_dir.join("config.json");
+    let special_tokens_path = cache_dir.join("special_tokens_map.json");
+    let tokenizer_config_path = cache_dir.join("tokenizer_config.json");
+
+    download_file(
+        &format!("{}/onnx/model_quantized.onnx", MXBAI_BASE_URL),
+        &onnx_path,
+        show_download_progress,
+    )?;
+    download_file(
+        &format!("{}/tokenizer.json", MXBAI_BASE_URL),
+        &tokenizer_path,
+        show_download_progress,
+    )?;
+    download_file(
+        &format!("{}/config.json", MXBAI_BASE_URL),
+        &config_path,
+        show_download_progress,
+    )?;
+    download_file(
+        &format!("{}/special_tokens_map.json", MXBAI_BASE_URL),
+        &special_tokens_path,
+        show_download_progress,
+    )?;
+    download_file(
+        &format!("{}/tokenizer_config.json", MXBAI_BASE_URL),
+        &tokenizer_config_path,
+        show_download_progress,
+    )?;
+
+    let onnx_file = fs::read(&onnx_path)
+        .with_context(|| format!("Failed to read {}", onnx_path.display()))?;
+    let tokenizer_file = fs::read(&tokenizer_path)
+        .with_context(|| format!("Failed to read {}", tokenizer_path.display()))?;
+    let config_file = fs::read(&config_path)
+        .with_context(|| format!("Failed to read {}", config_path.display()))?;
+    let special_tokens_map_file = fs::read(&special_tokens_path)
+        .with_context(|| format!("Failed to read {}", special_tokens_path.display()))?;
+    let tokenizer_config_file = fs::read(&tokenizer_config_path)
+        .with_context(|| format!("Failed to read {}", tokenizer_config_path.display()))?;
+
+    Ok(UserDefinedEmbeddingModel::new(
+        onnx_file,
+        TokenizerFiles {
+            tokenizer_file,
+            config_file,
+            special_tokens_map_file,
+            tokenizer_config_file,
+        },
+    ))
+}
+
+#[cfg(not(test))]
 fn init_model_with_timeout(
     execution_providers: Vec<ExecutionProviderDispatch>,
     show_download_progress: bool,
@@ -417,11 +516,16 @@ fn init_model_with_timeout(
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        let result = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::BGESmallENV15Q)
-                .with_execution_providers(execution_providers)
-                .with_show_download_progress(show_download_progress),
-        );
+        let result = (|| {
+            let model_data = load_mxbai_model(show_download_progress)?;
+            let _ = show_download_progress;
+            TextEmbedding::try_new_from_user_defined(
+                model_data,
+                InitOptionsUserDefined::default()
+                    .with_execution_providers(execution_providers),
+            )
+            .map_err(|e| anyhow!("{}", e))
+        })();
         let _ = tx.send(result);
     });
 
