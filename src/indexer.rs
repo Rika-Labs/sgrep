@@ -177,6 +177,7 @@ impl Indexer {
         let embed_start = Instant::now();
         let mut cache_hits: usize = 0;
         let mut cache_misses: usize = 0;
+        let mut processed_count: usize = 0;
 
         let token_budget = determine_token_budget();
         let mut batch_start = 0usize;
@@ -209,7 +210,8 @@ impl Indexer {
                 if let Some(vec) = cache.get(&chunks[idx].hash) {
                     vectors[idx] = Some(vec.clone());
                     cache_hits += 1;
-                    pb.inc(1);
+                    processed_count += 1;
+                    pb.set_position(processed_count.min(chunks.len()) as u64);
                     continue;
                 }
                 cache_misses += 1;
@@ -226,7 +228,8 @@ impl Indexer {
                     for (vec, original_idx) in batch_vectors.into_iter().zip(batch_indices.iter()) {
                         cache.insert(chunks[*original_idx].hash.clone(), vec.clone());
                         vectors[*original_idx] = Some(vec);
-                        pb.inc(1);
+                        processed_count += 1;
+                        pb.set_position(processed_count.min(chunks.len()) as u64);
                     }
                 }
                 Err(err) => {
