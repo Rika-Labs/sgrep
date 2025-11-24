@@ -2870,7 +2870,7 @@ dependencies = [
 
 [[package]]
 name = "sgrep"
-version = "0.1.13"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "bincode",

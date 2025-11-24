@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(not(test))]
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 #[cfg(not(test))]
@@ -117,12 +118,17 @@ impl Embedder {
 
         let _cache_guard = setup_fastembed_cache_dir();
         let execution_providers = select_execution_providers();
-        let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::BGESmallENV15Q)
-                .with_execution_providers(execution_providers.clone())
-                .with_show_download_progress(show_download_progress),
-        )
-        .expect("Failed to initialize embedding model");
+
+        // Initialize model with timeout protection
+        let init_timeout = Duration::from_secs(
+            env::var("SGREP_INIT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
+        );
+
+        let model = init_model_with_timeout(execution_providers, show_download_progress, init_timeout)
+            .expect("Failed to initialize embedding model (try increasing SGREP_INIT_TIMEOUT_SECS)");
         drop(_cache_guard);
 
         Self {
@@ -228,6 +234,13 @@ impl PooledEmbedder {
         let execution_providers = select_execution_providers();
         let show_progress = pool_size == 1;
 
+        let init_timeout = Duration::from_secs(
+            env::var("SGREP_INIT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
+        );
+
         let mut pool = Vec::with_capacity(pool_size);
         let cache = Cache::builder().max_capacity(max_cache).build();
 
@@ -235,12 +248,12 @@ impl PooledEmbedder {
             let _init_guard = INIT_LOCK.lock().unwrap();
             let _cache_guard = setup_fastembed_cache_dir();
 
-            let model = TextEmbedding::try_new(
-                InitOptions::new(EmbeddingModel::BGESmallENV15Q)
-                    .with_execution_providers(execution_providers.clone())
-                    .with_show_download_progress(show_progress && i == 0),
+            let model = init_model_with_timeout(
+                execution_providers.clone(),
+                show_progress && i == 0,
+                init_timeout,
             )
-            .expect("Failed to initialize embedding model");
+            .expect("Failed to initialize embedding model (try increasing SGREP_INIT_TIMEOUT_SECS)");
             drop(_cache_guard);
 
             let embedder = Embedder {
@@ -281,14 +294,12 @@ impl BatchEmbedder for PooledEmbedder {
 #[cfg(not(test))]
 impl Default for PooledEmbedder {
     fn default() -> Self {
+        // Default to single embedder to minimize memory usage
+        // Each ONNX model instance uses ~200-400MB RAM
         let pool_size = env::var("SGREP_EMBEDDER_POOL_SIZE")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or_else(|| {
-                std::thread::available_parallelism()
-                    .map(|p| p.get().clamp(1, 8))
-                    .unwrap_or(4)
-            });
+            .unwrap_or(1);
         Self::new(pool_size, DEFAULT_MAX_CACHE)
     }
 }
@@ -394,6 +405,42 @@ fn optimized_cpu_provider() -> ExecutionProviderDispatch {
     CPUExecutionProvider::default().with_arena_allocator(true).into()
 }
 
+#[cfg(not(test))]
+fn init_model_with_timeout(
+    execution_providers: Vec<ExecutionProviderDispatch>,
+    show_download_progress: bool,
+    timeout: Duration,
+) -> Result<TextEmbedding> {
+    use std::sync::mpsc;
+    use std::thread;
+
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let result = TextEmbedding::try_new(
+            InitOptions::new(EmbeddingModel::BGESmallENV15Q)
+                .with_execution_providers(execution_providers)
+                .with_show_download_progress(show_download_progress),
+        );
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(model)) => Ok(model),
+        Ok(Err(e)) => Err(anyhow!("Model initialization failed: {}", e)),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(anyhow!(
+                "Model initialization timed out after {:?}. This may happen on first run while downloading the model. \
+                Try again or increase timeout with SGREP_INIT_TIMEOUT_SECS=300",
+                timeout
+            ))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(anyhow!("Model initialization thread crashed unexpectedly"))
+        }
+    }
+}
+
 pub(crate) fn select_execution_providers() -> Vec<ExecutionProviderDispatch> {
     configure_onnx_threading();
 
@@ -408,10 +455,10 @@ pub(crate) fn select_execution_providers() -> Vec<ExecutionProviderDispatch> {
 }
 
 fn auto_detect_providers() -> Vec<ExecutionProviderDispatch> {
-    if is_apple_silicon() {
-        return vec![CoreMLExecutionProvider::default().into(), optimized_cpu_provider()];
-    }
-
+    // Default to CPU for all platforms - it's faster and more reliable for small
+    // embedding models like BGE-small-en-v1.5-q. CoreML has significant compilation
+    // overhead (30-120s) that makes it slower for typical use cases.
+    // Users can override with SGREP_DEVICE=coreml or SGREP_DEVICE=cuda if desired.
     if has_nvidia_gpu() {
         return vec![CUDAExecutionProvider::default().into(), optimized_cpu_provider()];
     }
@@ -424,13 +471,18 @@ fn configure_onnx_threading() {
         .map(|p| p.get())
         .unwrap_or(4);
 
+    // Use physical cores only (half of logical cores on hyperthreaded systems)
+    // Cap at 8 threads to avoid diminishing returns and thread contention
+    let optimal_threads = (parallelism / 2).max(2).min(8);
+
     if env::var_os("ORT_NUM_THREADS").is_none() {
-        env::set_var("ORT_NUM_THREADS", parallelism.to_string());
+        env::set_var("ORT_NUM_THREADS", optimal_threads.to_string());
     }
 
+    // For embedding models (sequential operations), use 1 inter-op thread
+    // This reduces thread contention and synchronization overhead
     if env::var_os("ORT_INTER_OP_NUM_THREADS").is_none() {
-        let inter_threads = (parallelism / 2).max(1);
-        env::set_var("ORT_INTER_OP_NUM_THREADS", inter_threads.to_string());
+        env::set_var("ORT_INTER_OP_NUM_THREADS", "1");
     }
 }
 
@@ -680,14 +732,17 @@ mod tests {
 
     #[test]
     #[serial]
-    fn select_execution_providers_prefers_test_apple_override() {
+    fn select_execution_providers_defaults_to_cpu() {
+        // We default to CPU for all platforms now (faster for small embedding models)
         env::remove_var("SGREP_DEVICE");
         env::set_var("SGREP_TEST_APPLE", "1");
+        env::set_var("SGREP_TEST_NVIDIA", "0");
         let eps = select_execution_providers();
         env::remove_var("SGREP_TEST_APPLE");
+        env::remove_var("SGREP_TEST_NVIDIA");
         let joined = format!("{:?}", eps);
-        assert!(joined.contains("CoreMLExecutionProvider"));
         assert!(joined.contains("CPUExecutionProvider"));
+        assert!(!joined.contains("CoreMLExecutionProvider"));
     }
 
     #[test]
