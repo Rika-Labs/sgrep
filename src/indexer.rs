@@ -193,24 +193,28 @@ impl Indexer {
             .collect();
         let chunk_duration = chunk_start.elapsed();
 
-        pb.set_length(chunks.len() as u64);
+        let mut file_to_chunks: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+        for (idx, chunk) in chunks.iter().enumerate() {
+            file_to_chunks.entry(chunk.path.clone()).or_default().push(idx);
+        }
+        let total_files = file_to_chunks.len();
+
+        pb.set_length(total_files as u64);
         pb.set_position(0);
         pb.reset_elapsed();
         pb.set_style(
             ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%) ~{eta} remaining | {msg}",
+                "{spinner:.green} Indexing files ({pos}/{len}) • {msg}",
             )
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .progress_chars("█▓▒░  "),
+            .unwrap_or_else(|_| ProgressStyle::default_bar()),
         );
-        pb.set_message("embedding");
+        pb.set_message("starting...");
         pb.enable_steady_tick(Duration::from_millis(100));
 
         let base_batch_size = determine_batch_size(request.batch_size);
         let batch_size = adjust_batch_size_for_progress(base_batch_size, chunks.len());
         let mut vectors: Vec<Option<Vec<f32>>> = vec![None; chunks.len()];
 
-        // Use DashMap for lock-free concurrent access during parallel embedding
         let cache: Arc<DashMap<String, Vec<f32>>> = Arc::new(DashMap::new());
         if let Some(index) = existing_index {
             if index.metadata.vector_dim == self.embedder.dimension()
@@ -282,49 +286,63 @@ impl Indexer {
         let cache_hits = chunks.len() - batches.iter().map(|b| b.indices.len()).sum::<usize>();
         let cache_misses: usize = batches.iter().map(|b| b.indices.len()).sum();
 
+        let mut embedded_chunks: HashSet<usize> = HashSet::new();
         for idx in 0..chunks.len() {
             if let Some(vec) = cache.get(&chunks[idx].hash) {
                 vectors[idx] = Some(vec.value().clone());
+                embedded_chunks.insert(idx);
             }
         }
 
-        let progress_counter = Arc::new(AtomicUsize::new(cache_hits));
-        pb.set_position(cache_hits as u64);
+        let mut completed_files: HashSet<PathBuf> = HashSet::new();
+        let mut files_completed = 0usize;
 
-        if !batches.is_empty() {
-            pb.set_message("loading AI model (first run may take 30s)...");
-            let warmup_text = batches[0].texts.first().cloned().unwrap_or_default();
-            let _ = self.embedder.embed(&warmup_text);
-            pb.set_message("embedding");
+        for (file_path, chunk_indices) in &file_to_chunks {
+            if chunk_indices.iter().all(|idx| embedded_chunks.contains(idx)) {
+                completed_files.insert(file_path.clone());
+                files_completed += 1;
+            }
+        }
+        pb.set_position(files_completed as u64);
+        if files_completed > 0 {
+            pb.set_message(format!("indexed {} (cached)", files_completed));
         }
 
-        // Process batches sequentially to avoid ONNX thread contention
-        let mut batch_results: Vec<(Vec<usize>, Vec<Vec<f32>>)> = Vec::new();
+        let mut pending_chunks: Vec<(usize, String)> = Vec::new();
         for batch in batches.into_iter() {
-            if cancelled.load(Ordering::SeqCst) {
-                return Err(anyhow!("Indexing cancelled"));
+            for (idx, text) in batch.indices.into_iter().zip(batch.texts.into_iter()) {
+                pending_chunks.push((idx, text));
             }
-
-            let texts: Vec<String> = batch.texts;
-            let hashes = batch.hashes;
-            let batch_len = texts.len();
-
-            let batch_vectors = self.embedder.embed_batch(&texts)?;
-
-            for (vec, hash) in batch_vectors.iter().zip(hashes.iter()) {
-                cache.insert(hash.clone(), vec.clone());
-            }
-
-            let new_count = progress_counter.fetch_add(batch_len, Ordering::SeqCst) + batch_len;
-            pb.set_position(new_count as u64);
-            pb.tick();
-
-            batch_results.push((batch.indices, batch_vectors));
         }
 
-        for (indices, batch_vectors) in batch_results {
-            for (vec, idx) in batch_vectors.into_iter().zip(indices.iter()) {
-                vectors[*idx] = Some(vec);
+        if pending_chunks.is_empty() {
+            pb.set_position(total_files as u64);
+            pb.finish_with_message("all cached");
+        } else {
+            pb.set_message("loading AI model...");
+            let _ = self.embedder.embed(&pending_chunks[0].1);
+
+            for (idx, text) in pending_chunks.into_iter() {
+                if cancelled.load(Ordering::SeqCst) {
+                    return Err(anyhow!("Indexing cancelled"));
+                }
+
+                let vec = self.embedder.embed(&text)?;
+                vectors[idx] = Some(vec);
+                embedded_chunks.insert(idx);
+
+                for (file_path, chunk_indices) in &file_to_chunks {
+                    if !completed_files.contains(file_path)
+                        && chunk_indices.iter().all(|&i| embedded_chunks.contains(&i))
+                    {
+                        completed_files.insert(file_path.clone());
+                        files_completed += 1;
+                        pb.set_position(files_completed as u64);
+                        let display_path = file_path.strip_prefix(root).unwrap_or(file_path).display();
+                        pb.set_message(format!("{}", display_path));
+                    }
+                }
+                pb.tick();
             }
         }
 
@@ -1287,7 +1305,11 @@ mod tests {
 
         assert!(result.is_err());
         let msg = format!("{:?}", result.err().unwrap());
-        assert!(msg.contains("Missing vector"));
+        assert!(
+            msg.contains("No embedding generated") || msg.contains("Missing vector"),
+            "Expected error about missing embeddings, got: {}",
+            msg
+        );
 
         fs::remove_dir_all(&repo).ok();
     }
@@ -2000,19 +2022,19 @@ mod tests {
 
     #[test]
     #[serial]
-    fn progress_updates_during_parallel_embedding() {
+    fn chunks_embedded_one_at_a_time() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let embedder = Arc::new(ProgressTrackingEmbedder {
             call_count: call_count.clone(),
-            delay_ms: 10,
+            delay_ms: 1,
         });
         let indexer = Indexer::new(embedder);
 
         let _home = set_test_home();
-        let repo = std::env::temp_dir().join(format!("sgrep_progress_test_{}", Uuid::new_v4()));
+        let repo = std::env::temp_dir().join(format!("sgrep_one_at_a_time_{}", Uuid::new_v4()));
         fs::create_dir_all(&repo).unwrap();
 
-        for i in 0..20 {
+        for i in 0..5 {
             fs::write(repo.join(format!("file{}.rs", i)), format!("fn func{}() {{}}", i)).unwrap();
         }
 
@@ -2020,49 +2042,95 @@ mod tests {
             .build_index(IndexRequest {
                 path: repo.clone(),
                 force: true,
-                batch_size: Some(4),
+                batch_size: None,
                 profile: false,
                 dirty: None,
             })
             .unwrap();
 
-        assert!(report.chunks_indexed >= 20);
-        assert!(call_count.load(Ordering::SeqCst) >= 1);
+        assert!(report.chunks_indexed >= 5);
+        let calls = call_count.load(Ordering::SeqCst);
+        assert!(
+            calls >= report.chunks_indexed,
+            "Expected {} calls (one per chunk), got {}",
+            report.chunks_indexed,
+            calls
+        );
 
         fs::remove_dir_all(&repo).ok();
     }
 
     #[test]
     #[serial]
-    fn embedding_batches_are_processed_sequentially() {
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let embedder = Arc::new(ProgressTrackingEmbedder {
-            call_count: call_count.clone(),
-            delay_ms: 5,
-        });
-        let indexer = Indexer::new(embedder);
+    fn file_progress_tracks_completed_files() {
+        let embedder = Arc::new(DeterministicEmbedder::default());
+        let indexer = Indexer::new_concrete(embedder);
 
         let _home = set_test_home();
-        let repo = std::env::temp_dir().join(format!("sgrep_seq_test_{}", Uuid::new_v4()));
+        let repo = std::env::temp_dir().join(format!("sgrep_file_progress_{}", Uuid::new_v4()));
         fs::create_dir_all(&repo).unwrap();
 
-        for i in 0..8 {
-            fs::write(repo.join(format!("file{}.rs", i)), format!("fn func{}() {{}}", i)).unwrap();
-        }
+        fs::write(repo.join("a.rs"), "fn a() {}").unwrap();
+        fs::write(repo.join("b.rs"), "fn b() {}").unwrap();
+        fs::write(repo.join("c.rs"), "fn c() {}").unwrap();
 
         let report = indexer
             .build_index(IndexRequest {
                 path: repo.clone(),
                 force: true,
-                batch_size: Some(2),
+                batch_size: None,
                 profile: false,
                 dirty: None,
             })
             .unwrap();
 
-        assert!(report.chunks_indexed >= 8);
-        let calls = call_count.load(Ordering::SeqCst);
-        assert!(calls >= 1, "Expected at least 1 embedding call, got {}", calls);
+        assert_eq!(report.files_indexed, 3);
+        assert!(report.chunks_indexed >= 3);
+
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn cache_hits_skip_embedding() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let embedder = Arc::new(ProgressTrackingEmbedder {
+            call_count: call_count.clone(),
+            delay_ms: 0,
+        });
+        let indexer = Indexer::new(embedder);
+
+        let _home = set_test_home();
+        let repo = std::env::temp_dir().join(format!("sgrep_cache_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&repo).unwrap();
+
+        fs::write(repo.join("test.rs"), "fn test() {}").unwrap();
+
+        indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: None,
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        let first_calls = call_count.load(Ordering::SeqCst);
+        assert!(first_calls >= 1);
+
+        let report = indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: false,
+                batch_size: None,
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        assert!(report.cache_hits >= 1);
+        assert_eq!(report.cache_misses, 0);
 
         fs::remove_dir_all(&repo).ok();
     }

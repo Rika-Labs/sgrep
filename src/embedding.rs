@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(not(test))]
 use std::sync::{Arc, Mutex};
+#[cfg(not(test))]
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -485,6 +486,7 @@ fn configure_onnx_threading() {
     }
 }
 
+#[allow(dead_code)]
 fn is_apple_silicon() -> bool {
     #[cfg(test)]
     if let Ok(val) = std::env::var("SGREP_TEST_APPLE") {
