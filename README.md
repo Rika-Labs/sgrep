@@ -60,6 +60,28 @@ The plugin automatically:
 
 See [plugins/sgrep/README.md](plugins/sgrep/README.md) for detailed documentation.
 
+### Factory Droids Integration
+
+**Native support for Factory Droids!** sgrep includes a custom droid for semantic code search:
+
+1. **Enable Custom Droids** (one-time setup):
+   - Run `/settings` in Factory
+   - Navigate to Experimental → Custom Droids → Enable
+
+2. **Copy the droid to your project or personal droids:**
+   ```bash
+   # Project-wide (shared with team)
+   cp -r .factory/droids/ your-project/.factory/droids/
+
+   # Or personal (follows you across workspaces)
+   cp .factory/droids/sgrep.md ~/.factory/droids/
+   ```
+
+3. **Use in Factory:**
+   - The sgrep droid will automatically be available
+   - Factory will delegate semantic search tasks to it
+   - Works with any model (Claude, GPT, Gemini)
+
 ### Manual Agent Integration
 
 For other coding agents:
