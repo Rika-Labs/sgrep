@@ -56,6 +56,9 @@ once_cell = "1.19"
 uuid = { version = "1.8", features = ["v4", "serde"] }
 ctrlc = "3.4"
 num_cpus = "1.16"
+crossbeam = "0.8"
+cacache = { version = "13", default-features = false, features = ["mmap"] }
+hex = "0.4"
 
 fastembed = { version = "5", default-features = false, features = ["online", "ort-download-binaries"] }
 ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "download-binaries"] }
@@ -63,3 +66,4 @@ simsimd = "6"
 
 [dev-dependencies]
 serial_test = "3.2"
+tempfile = "3.12"

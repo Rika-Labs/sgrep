@@ -1,0 +1,34 @@
+# Configuration for cargo-tarpaulin code coverage
+#
+# Run with: cargo tarpaulin --out Html --out Xml --output-dir coverage --target-dir target-cov
+#
+# Install tarpaulin: cargo install cargo-tarpaulin
+
+[tarpaulin]
+# Only run tests, not benches or examples
+run-types = ["Tests"]
+
+# Minimum code coverage target
+min-coverage = 90.0
+
+# Exclude files from coverage
+exclude-files = [
+    "tests/*",
+    "benches/*",
+    "*/main.rs"
+]
+
+# Timeout for tests (in seconds)
+timeout = 300
+
+# Show output from tests
+verbose = true
+
+# Don't count untestable lines
+count-lines = "uncovered"
+
+# Output formats (can also be specified via CLI)
+out = ["Html", "Xml", "Stdout"]
+
+# Output directory
+output-dir = "coverage"

@@ -1,0 +1,7 @@
+# Configuration for cargo-tarpaulin (code coverage)
+[build]
+# No specific build config needed
+
+[env]
+# Disable persistent cache during tests to avoid flaky test results
+SGREP_DISABLE_PERSISTENT_CACHE = "1"
