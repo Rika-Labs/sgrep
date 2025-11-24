@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -280,11 +280,14 @@ impl Indexer {
             }
         }
 
-        pb.set_position(cache_hits.min(chunks.len()) as u64);
+        let progress_counter = Arc::new(AtomicUsize::new(cache_hits));
+        pb.set_position(cache_hits as u64);
 
         let embedder = self.embedder.clone();
         let cancelled_clone = cancelled.clone();
         let embed_timeout = determine_embed_timeout();
+        let pb_clone = pb.clone();
+        let progress_clone = progress_counter.clone();
 
         let batch_results: Result<Vec<(Vec<usize>, Vec<Vec<f32>>)>> = batches
             .into_par_iter()
@@ -295,15 +298,17 @@ impl Indexer {
 
                 let texts: Vec<String> = batch.texts;
                 let hashes = batch.hashes;
+                let batch_size = texts.len();
                 let mut attempt = 1;
                 let max_attempts = 3;
                 loop {
                     match embed_batch_with_timeout(embedder.clone(), texts.clone(), embed_timeout) {
                         Ok(batch_vectors) => {
-                            // DashMap provides lock-free concurrent insert
                             for (vec, hash) in batch_vectors.iter().zip(hashes.iter()) {
                                 cache.insert(hash.clone(), vec.clone());
                             }
+                            let new_count = progress_clone.fetch_add(batch_size, Ordering::SeqCst) + batch_size;
+                            pb_clone.set_position(new_count as u64);
                             return Ok((batch.indices, batch_vectors));
                         }
                         Err(_err) if attempt < max_attempts => {
@@ -328,24 +333,9 @@ impl Indexer {
 
         let batch_results = batch_results?;
 
-        let mut processed_count = cache_hits;
-        #[cfg(not(test))]
-        let mut last_log = Instant::now();
         for (indices, batch_vectors) in batch_results {
             for (vec, idx) in batch_vectors.into_iter().zip(indices.iter()) {
                 vectors[*idx] = Some(vec);
-                processed_count += 1;
-                pb.set_position(processed_count.min(chunks.len()) as u64);
-                #[cfg(not(test))]
-                if last_log.elapsed() >= Duration::from_secs(10) {
-                    eprintln!(
-                        "… embedding progress: {}/{} chunks (cache hits: {})",
-                        processed_count.min(chunks.len()),
-                        chunks.len(),
-                        cache_hits
-                    );
-                    last_log = Instant::now();
-                }
             }
         }
 
@@ -1943,5 +1933,104 @@ mod tests {
         assert!(!is_operator_or_punctuation('a'));
         assert!(!is_operator_or_punctuation(' '));
         assert!(!is_operator_or_punctuation('\n'));
+    }
+
+    #[derive(Clone)]
+    struct ProgressTrackingEmbedder {
+        call_count: Arc<AtomicUsize>,
+        delay_ms: u64,
+    }
+
+    impl BatchEmbedder for ProgressTrackingEmbedder {
+        fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            if self.delay_ms > 0 {
+                std::thread::sleep(StdDuration::from_millis(self.delay_ms));
+            }
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+        }
+
+        fn dimension(&self) -> usize {
+            4
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn progress_updates_during_parallel_embedding() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let embedder = Arc::new(ProgressTrackingEmbedder {
+            call_count: call_count.clone(),
+            delay_ms: 10,
+        });
+        let indexer = Indexer::new(embedder);
+
+        let _home = set_test_home();
+        let repo = std::env::temp_dir().join(format!("sgrep_progress_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&repo).unwrap();
+
+        for i in 0..20 {
+            fs::write(repo.join(format!("file{}.rs", i)), format!("fn func{}() {{}}", i)).unwrap();
+        }
+
+        let report = indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: Some(4),
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        assert!(report.chunks_indexed >= 20);
+        assert!(call_count.load(Ordering::SeqCst) >= 1);
+
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn embedding_batches_are_processed_in_parallel() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let embedder = Arc::new(ProgressTrackingEmbedder {
+            call_count: call_count.clone(),
+            delay_ms: 50,
+        });
+        let indexer = Indexer::new(embedder);
+
+        let _home = set_test_home();
+        let repo = std::env::temp_dir().join(format!("sgrep_parallel_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&repo).unwrap();
+
+        for i in 0..8 {
+            fs::write(repo.join(format!("file{}.rs", i)), format!("fn func{}() {{}}", i)).unwrap();
+        }
+
+        let start = Instant::now();
+        let report = indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: Some(2),
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(report.chunks_indexed >= 8);
+        let calls = call_count.load(Ordering::SeqCst);
+        assert!(calls >= 4);
+        let sequential_time = StdDuration::from_millis(50 * calls as u64);
+        assert!(
+            elapsed < sequential_time,
+            "Elapsed {:?} should be less than sequential {:?} (calls: {})",
+            elapsed,
+            sequential_time,
+            calls
+        );
+
+        fs::remove_dir_all(&repo).ok();
     }
 }
