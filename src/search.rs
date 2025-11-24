@@ -5,7 +5,7 @@ use chrono::Utc;
 use serde::Serialize;
 
 use crate::chunker::CodeChunk;
-use crate::embedding::Embedder;
+use crate::embedding::{BatchEmbedder, Embedder};
 use crate::fts;
 use crate::store::RepositoryIndex;
 
@@ -17,11 +17,11 @@ pub struct SearchOptions {
 }
 
 pub struct SearchEngine {
-    embedder: Arc<Embedder>,
+    embedder: Arc<dyn BatchEmbedder>,
 }
 
 impl SearchEngine {
-    pub fn new(embedder: Arc<Embedder>) -> Self {
+    pub fn new(embedder: Arc<dyn BatchEmbedder>) -> Self {
         Self { embedder }
     }
 
