@@ -294,8 +294,7 @@ impl BatchEmbedder for PooledEmbedder {
 #[cfg(not(test))]
 impl Default for PooledEmbedder {
     fn default() -> Self {
-        // Default to single embedder to minimize memory usage
-        // Each ONNX model instance uses ~200-400MB RAM
+        // Single embedder - sequential processing avoids ONNX thread contention
         let pool_size = env::var("SGREP_EMBEDDER_POOL_SIZE")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
