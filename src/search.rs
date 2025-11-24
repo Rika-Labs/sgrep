@@ -262,13 +262,19 @@ impl SearchEngine {
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
+        let shortlist_size = (limit * BINARY_SHORTLIST_FACTOR).min(index.len());
 
         let query_binary = quantize_to_binary(&query_vec);
-        let index_binary: Vec<Vec<u64>> = (0..index.len())
-            .map(|i| quantize_to_binary(index.get_vector(i)))
-            .collect();
-        let shortlist_size = (limit * BINARY_SHORTLIST_FACTOR).min(index.len());
-        let candidates = binary_shortlist(&query_binary, &index_binary, shortlist_size);
+
+        // Use pre-computed binary vectors if available, otherwise compute on the fly
+        let candidates = if index.has_binary_vectors() {
+            binary_shortlist_precomputed(&query_binary, index, shortlist_size)
+        } else {
+            let index_binary: Vec<Vec<u64>> = (0..index.len())
+                .map(|i| quantize_to_binary(index.get_vector(i)))
+                .collect();
+            binary_shortlist(&query_binary, &index_binary, shortlist_size)
+        };
 
         let mut matches: Vec<SearchResult> = candidates
             .into_iter()
@@ -423,6 +429,25 @@ fn binary_shortlist(
         .iter()
         .enumerate()
         .map(|(i, v)| (i, hamming_distance(query_binary, v)))
+        .collect();
+
+    if distances.len() > shortlist_size {
+        distances.select_nth_unstable_by_key(shortlist_size, |&(_, d)| d);
+        distances.truncate(shortlist_size);
+    }
+
+    distances.into_iter().map(|(i, _)| i).collect()
+}
+
+fn binary_shortlist_precomputed(
+    query_binary: &[u64],
+    index: &MmapIndex,
+    shortlist_size: usize,
+) -> Vec<usize> {
+    let mut distances: Vec<(usize, u32)> = (0..index.len())
+        .filter_map(|i| {
+            index.get_binary_vector(i).map(|v| (i, hamming_distance(query_binary, v)))
+        })
         .collect();
 
     if distances.len() > shortlist_size {

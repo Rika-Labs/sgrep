@@ -14,9 +14,24 @@ use crate::chunker::CodeChunk;
 
 const INDEX_FILE: &str = "index.bin.zst";
 const VECTORS_FILE: &str = "vectors.bin";
-const INDEX_FORMAT_VERSION: u32 = 2;
+const BINARY_VECTORS_FILE: &str = "binary_vectors.bin";
+const INDEX_FORMAT_VERSION: u32 = 3;
 const VECTOR_HEADER_SIZE: usize = 8;
 const BYTES_PER_F32: usize = 4;
+const BYTES_PER_U64: usize = 8;
+
+/// Quantize f32 vector to binary (1 bit per dimension)
+/// Each dimension becomes 1 if > 0.0, else 0
+fn quantize_to_binary(vector: &[f32]) -> Vec<u64> {
+    let num_words = vector.len().div_ceil(64);
+    let mut binary = vec![0u64; num_words];
+    for (i, &val) in vector.iter().enumerate() {
+        if val > 0.0 {
+            binary[i / 64] |= 1u64 << (i % 64);
+        }
+    }
+    binary
+}
 
 #[derive(Debug, Clone)]
 pub struct IndexStore {
@@ -53,9 +68,11 @@ impl IndexStore {
 
     pub fn save(&self, index: &RepositoryIndex) -> Result<()> {
         let vectors_path = self.root.join(VECTORS_FILE);
+        let binary_vectors_path = self.root.join(BINARY_VECTORS_FILE);
         let index_path = self.root.join(INDEX_FILE);
 
         self.write_vectors_file(&vectors_path, index)?;
+        self.write_binary_vectors_file(&binary_vectors_path, index)?;
         self.write_index_file(&index_path, index)?;
 
         Ok(())
@@ -63,6 +80,7 @@ impl IndexStore {
 
     pub fn load_mmap(&self) -> Result<Option<MmapIndex>> {
         let vectors_path = self.root.join(VECTORS_FILE);
+        let binary_vectors_path = self.root.join(BINARY_VECTORS_FILE);
         let index_path = self.root.join(INDEX_FILE);
 
         if !vectors_path.exists() || !index_path.exists() {
@@ -79,11 +97,30 @@ impl IndexStore {
 
         validate_vectors_size(&mmap, vector_dim, partial.chunks.len())?;
 
+        // Try to load binary vectors (optional - gracefully degrade if missing)
+        let (binary_mmap, binary_words) = if binary_vectors_path.exists() {
+            match self.open_vectors_mmap(&binary_vectors_path) {
+                Ok(bin_mmap) => {
+                    let (bin_version, num_words) = parse_binary_header(&bin_mmap)?;
+                    if bin_version == INDEX_FORMAT_VERSION {
+                        (Some(bin_mmap), num_words)
+                    } else {
+                        (None, 0)
+                    }
+                }
+                Err(_) => (None, 0),
+            }
+        } else {
+            (None, 0)
+        };
+
         Ok(Some(MmapIndex {
             metadata: partial.metadata,
             chunks: partial.chunks,
             mmap,
+            binary_mmap,
             vector_dim,
+            binary_words,
         }))
     }
 
@@ -145,6 +182,26 @@ impl IndexStore {
         Ok(())
     }
 
+    fn write_binary_vectors_file(&self, path: &Path, index: &RepositoryIndex) -> Result<()> {
+        let file = File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+
+        // Header: version (4 bytes) + num_words per vector (4 bytes)
+        let num_words = index.metadata.vector_dim.div_ceil(64) as u32;
+        writer.write_all(&INDEX_FORMAT_VERSION.to_le_bytes())?;
+        writer.write_all(&num_words.to_le_bytes())?;
+
+        // Write binary vectors
+        for vector in &index.vectors {
+            let binary = quantize_to_binary(vector);
+            for word in &binary {
+                writer.write_all(&word.to_le_bytes())?;
+            }
+        }
+        writer.flush()?;
+        Ok(())
+    }
+
     fn write_index_file(&self, path: &Path, index: &RepositoryIndex) -> Result<()> {
         let partial = PartialIndex {
             metadata: index.metadata.clone(),
@@ -164,6 +221,15 @@ fn parse_vectors_header(mmap: &Mmap) -> Result<(u32, usize)> {
     let format_version = u32::from_le_bytes([mmap[0], mmap[1], mmap[2], mmap[3]]);
     let vector_dim = u32::from_le_bytes([mmap[4], mmap[5], mmap[6], mmap[7]]) as usize;
     Ok((format_version, vector_dim))
+}
+
+fn parse_binary_header(mmap: &Mmap) -> Result<(u32, usize)> {
+    if mmap.len() < VECTOR_HEADER_SIZE {
+        return Err(anyhow::anyhow!("Invalid binary vectors file: too small"));
+    }
+    let format_version = u32::from_le_bytes([mmap[0], mmap[1], mmap[2], mmap[3]]);
+    let num_words = u32::from_le_bytes([mmap[4], mmap[5], mmap[6], mmap[7]]) as usize;
+    Ok((format_version, num_words))
 }
 
 fn validate_vectors_size(mmap: &Mmap, vector_dim: usize, num_vectors: usize) -> Result<()> {
@@ -227,7 +293,9 @@ pub struct MmapIndex {
     pub metadata: IndexMetadata,
     pub chunks: Vec<CodeChunk>,
     mmap: Mmap,
+    binary_mmap: Option<Mmap>,
     vector_dim: usize,
+    binary_words: usize,
 }
 
 impl MmapIndex {
@@ -237,6 +305,20 @@ impl MmapIndex {
         let offset = VECTOR_HEADER_SIZE + idx * vector_bytes;
         let slice = &self.mmap[offset..offset + vector_bytes];
         unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const f32, self.vector_dim) }
+    }
+
+    #[inline]
+    pub fn get_binary_vector(&self, idx: usize) -> Option<&[u64]> {
+        let mmap = self.binary_mmap.as_ref()?;
+        let binary_bytes = self.binary_words * BYTES_PER_U64;
+        let offset = VECTOR_HEADER_SIZE + idx * binary_bytes;
+        let slice = &mmap[offset..offset + binary_bytes];
+        Some(unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u64, self.binary_words) })
+    }
+
+    #[inline]
+    pub fn has_binary_vectors(&self) -> bool {
+        self.binary_mmap.is_some()
     }
 
     #[inline]
