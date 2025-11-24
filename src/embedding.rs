@@ -60,14 +60,6 @@ impl Embedder {
         .expect("Failed to initialize embedding model");
         drop(_cache_guard);
 
-        info!(
-            "Initialized embedder with providers: {}",
-            execution_providers
-                .iter()
-                .map(|ep| format!("{ep:?}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
         Self {
             cache: Cache::builder().max_capacity(max_cache).build(),
             model: Arc::new(std::sync::Mutex::new(model)),
@@ -143,10 +135,6 @@ impl PooledEmbedder {
         let execution_providers = select_execution_providers();
         let show_progress = pool_size == 1;
 
-        info!(
-            "Initializing embedder pool with {} instances",
-            pool_size
-        );
 
         let mut pool = Vec::with_capacity(pool_size);
         let cache = Cache::builder().max_capacity(max_cache).build();
@@ -170,7 +158,6 @@ impl PooledEmbedder {
             pool.push(embedder);
         }
 
-        info!("Embedder pool initialized with {} instances", pool_size);
 
         Self {
             pool,
