@@ -2,13 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use dashmap::DashMap;
 use globset::{Glob, GlobSetBuilder};
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, WalkState};
 
 const DEFAULT_IGNORE: &str = include_str!("../default-ignore.txt");
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -71,7 +73,7 @@ impl Indexer {
     pub fn new(embedder: Arc<dyn BatchEmbedder>) -> Self {
         Self { embedder }
     }
-    
+
     pub fn new_concrete<E: BatchEmbedder + 'static>(embedder: Arc<E>) -> Self {
         Self { embedder }
     }
@@ -138,10 +140,27 @@ impl Indexer {
         let files = collect_files(root);
         let walk_duration = walk_start.elapsed();
 
+        if files.is_empty() {
+            return Ok(IndexReport {
+                files_indexed: 0,
+                chunks_indexed: 0,
+                duration: total_start.elapsed(),
+                timings: request.profile.then_some(IndexTimings {
+                    walk: walk_duration,
+                    chunk: Duration::ZERO,
+                    embed: Duration::ZERO,
+                    write: Duration::ZERO,
+                }),
+                cache_hits: 0,
+                cache_misses: 0,
+            });
+        }
+
         let cancelled = Arc::new(AtomicBool::new(false));
 
         let pb =
             ProgressBar::with_draw_target(Some(files.len() as u64), ProgressDrawTarget::stderr());
+        pb.enable_steady_tick(Duration::from_millis(150));
         pb.set_style(
             ProgressStyle::with_template(
                 "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}",
@@ -177,12 +196,14 @@ impl Indexer {
         pb.set_position(0);
         pb.reset_elapsed();
         pb.set_message("embedding");
+        pb.enable_steady_tick(Duration::from_millis(150));
 
         let base_batch_size = determine_batch_size(request.batch_size);
         let batch_size = adjust_batch_size_for_progress(base_batch_size, chunks.len());
         let mut vectors: Vec<Option<Vec<f32>>> = vec![None; chunks.len()];
 
-        let mut cache: HashMap<String, Vec<f32>> = HashMap::new();
+        // Use DashMap for lock-free concurrent access during parallel embedding
+        let cache: Arc<DashMap<String, Vec<f32>>> = Arc::new(DashMap::new());
         if let Some(index) = existing_index {
             if index.metadata.vector_dim == self.embedder.dimension()
                 && index.metadata.version == env!("CARGO_PKG_VERSION")
@@ -231,7 +252,7 @@ impl Indexer {
             let mut batch_hashes: Vec<String> = Vec::new();
 
             for idx in batch_start..batch_end {
-                if cache.get(&chunks[idx].hash).is_some() {
+                if cache.contains_key(&chunks[idx].hash) {
                     continue;
                 }
                 batch_indices.push(idx);
@@ -255,15 +276,15 @@ impl Indexer {
 
         for idx in 0..chunks.len() {
             if let Some(vec) = cache.get(&chunks[idx].hash) {
-                vectors[idx] = Some(vec.clone());
+                vectors[idx] = Some(vec.value().clone());
             }
         }
 
         pb.set_position(cache_hits.min(chunks.len()) as u64);
 
-        let cache = Arc::new(std::sync::Mutex::new(cache));
         let embedder = self.embedder.clone();
         let cancelled_clone = cancelled.clone();
+        let embed_timeout = determine_embed_timeout();
 
         let batch_results: Result<Vec<(Vec<usize>, Vec<Vec<f32>>)>> = batches
             .into_par_iter()
@@ -274,33 +295,32 @@ impl Indexer {
 
                 let texts: Vec<String> = batch.texts;
                 let hashes = batch.hashes;
-                match embedder.embed_batch(&texts) {
-                    Ok(batch_vectors) => {
-                        let mut cache_guard = cache.lock().unwrap();
-                        for (vec, hash) in batch_vectors.iter().zip(hashes.iter()) {
-                            cache_guard.insert(hash.clone(), vec.clone());
+                let mut attempt = 1;
+                let max_attempts = 3;
+                loop {
+                    match embed_batch_with_timeout(embedder.clone(), texts.clone(), embed_timeout) {
+                        Ok(batch_vectors) => {
+                            // DashMap provides lock-free concurrent insert
+                            for (vec, hash) in batch_vectors.iter().zip(hashes.iter()) {
+                                cache.insert(hash.clone(), vec.clone());
+                            }
+                            return Ok((batch.indices, batch_vectors));
                         }
-                        Ok((batch.indices, batch_vectors))
-                    }
-                    Err(err) => {
-                        let mut last_err = err;
-                        for attempt in 2..=3 {
+                        Err(_err) if attempt < max_attempts => {
                             if cancelled_clone.load(Ordering::SeqCst) {
                                 return Err(anyhow!("Indexing cancelled"));
                             }
-                            thread::sleep(Duration::from_millis((attempt * 150) as u64));
-                            match embedder.embed_batch(&texts) {
-                                Ok(batch_vectors) => {
-                                    let mut cache_guard = cache.lock().unwrap();
-                                    for (vec, hash) in batch_vectors.iter().zip(hashes.iter()) {
-                                        cache_guard.insert(hash.clone(), vec.clone());
-                                    }
-                                    return Ok((batch.indices, batch_vectors));
-                                }
-                                Err(e) => last_err = e,
-                            }
+                            thread::sleep(Duration::from_millis((attempt * 200) as u64));
+                            attempt += 1;
+                            continue;
                         }
-                        Err(anyhow!("Embedding failed after retries: {}", last_err))
+                        Err(err) => {
+                            return Err(anyhow!(
+                                "Embedding failed after {} attempts: {}",
+                                attempt,
+                                err
+                            ));
+                        }
                     }
                 }
             })
@@ -309,11 +329,23 @@ impl Indexer {
         let batch_results = batch_results?;
 
         let mut processed_count = cache_hits;
+        #[cfg(not(test))]
+        let mut last_log = Instant::now();
         for (indices, batch_vectors) in batch_results {
             for (vec, idx) in batch_vectors.into_iter().zip(indices.iter()) {
                 vectors[*idx] = Some(vec);
                 processed_count += 1;
                 pb.set_position(processed_count.min(chunks.len()) as u64);
+                #[cfg(not(test))]
+                if last_log.elapsed() >= Duration::from_secs(10) {
+                    eprintln!(
+                        "… embedding progress: {}/{} chunks (cache hits: {})",
+                        processed_count.min(chunks.len()),
+                        chunks.len(),
+                        cache_hits
+                    );
+                    last_log = Instant::now();
+                }
             }
         }
 
@@ -433,116 +465,204 @@ impl Indexer {
             }
         }
 
-        let base_batch_size = determine_batch_size(request.batch_size);
-        let token_budget = determine_token_budget();
-
-        let mut chunk_duration = Duration::ZERO;
-        let mut embed_duration = Duration::ZERO;
-
-        for full_path in touched_paths {
-            let rel = normalize_to_relative(&full_path, root);
-
-            if is_probably_binary(&full_path) {
-                continue;
-            }
-
-            if let Ok(meta) = std::fs::metadata(&full_path) {
-                if meta.len() > MAX_FILE_BYTES {
-                    continue;
-                }
-            }
-
-            if default_excludes.is_match(rel.as_path()) {
-                continue;
-            }
-
+        for full_path in &touched_paths {
+            let rel = normalize_to_relative(full_path, root);
             if !full_path.exists() {
                 if by_path.remove(&rel).is_some() {
                     _deleted_files += 1;
                 }
-                continue;
+            } else {
+                by_path.remove(&rel);
             }
+        }
 
-            let chunk_start = Instant::now();
-            let chunks = match chunker::chunk_file(&full_path, root) {
-                Ok(ch) => ch,
-                Err(err) => {
-                    warn!("path" = %full_path.display(), "error" = %err, "msg" = "skipping");
-                    continue;
+        let base_batch_size = determine_batch_size(request.batch_size);
+        let token_budget = determine_token_budget();
+
+        let cache = Arc::new(std::sync::Mutex::new(cache));
+        let embedder = self.embedder.clone();
+        let embed_timeout = determine_embed_timeout();
+        let root = root.to_path_buf();
+
+        struct FileResult {
+            rel_path: PathBuf,
+            chunks: Vec<(CodeChunk, Vec<f32>)>,
+            cache_hits: usize,
+            cache_misses: usize,
+            chunk_duration: Duration,
+            embed_duration: Duration,
+        }
+
+        let file_results: Result<Vec<FileResult>> = touched_paths
+            .par_iter()
+            .filter_map(|full_path| {
+                let rel = normalize_to_relative(full_path, &root);
+
+                if is_probably_binary(full_path) {
+                    return None;
                 }
-            };
-            chunk_duration += chunk_start.elapsed();
 
-            by_path.remove(&rel); // clear any old entries for this path
-
-            if chunks.is_empty() {
-                continue;
-            }
-
-            let mut file_results: Vec<Option<(CodeChunk, Vec<f32>)>> = vec![None; chunks.len()];
-            let mut batch_texts: Vec<String> = Vec::new();
-            let mut batch_indices: Vec<usize> = Vec::new();
-            let mut batch_chunks: Vec<CodeChunk> = Vec::new();
-
-            for (idx, chunk) in chunks.into_iter().enumerate() {
-                if let Some(vec) = cache.get(&chunk.hash) {
-                    cache_hits += 1;
-                    file_results[idx] = Some((chunk, vec.clone()));
-                } else {
-                    cache_misses += 1;
-                    batch_indices.push(idx);
-                    batch_texts.push(chunk.text.clone());
-                    batch_chunks.push(chunk);
+                if let Ok(meta) = std::fs::metadata(full_path) {
+                    if meta.len() > MAX_FILE_BYTES {
+                        return None;
+                    }
                 }
-            }
 
-            if !batch_texts.is_empty() {
-                let embed_start = Instant::now();
-                let mut start = 0usize;
-                while start < batch_texts.len() {
-                    let mut end = start;
-                    let mut tokens = 0usize;
-                    while end < batch_texts.len() && (end - start) < base_batch_size {
-                        let est = estimate_tokens(&batch_texts[end]);
-                        if end > start && tokens + est > token_budget {
-                            break;
+                if default_excludes.is_match(rel.as_path()) {
+                    return None;
+                }
+
+                if !full_path.exists() {
+                    return None;
+                }
+
+                let chunk_start = Instant::now();
+                let chunks = match chunker::chunk_file(full_path, &root) {
+                    Ok(ch) => ch,
+                    Err(err) => {
+                        warn!("path" = %full_path.display(), "error" = %err, "msg" = "skipping");
+                        return None;
+                    }
+                };
+                let chunk_duration = chunk_start.elapsed();
+
+                if chunks.is_empty() {
+                    return Some(Ok(FileResult {
+                        rel_path: rel,
+                        chunks: Vec::new(),
+                        cache_hits: 0,
+                        cache_misses: 0,
+                        chunk_duration,
+                        embed_duration: Duration::ZERO,
+                    }));
+                }
+
+                let mut file_results: Vec<Option<(CodeChunk, Vec<f32>)>> = vec![None; chunks.len()];
+                let mut batch_texts: Vec<String> = Vec::new();
+                let mut batch_indices: Vec<usize> = Vec::new();
+                let mut batch_chunks: Vec<CodeChunk> = Vec::new();
+                let mut local_cache_hits = 0usize;
+                let mut local_cache_misses = 0usize;
+
+                {
+                    let cache_guard = cache.lock().unwrap();
+                    for (idx, chunk) in chunks.into_iter().enumerate() {
+                        if let Some(vec) = cache_guard.get(&chunk.hash) {
+                            local_cache_hits += 1;
+                            file_results[idx] = Some((chunk, vec.clone()));
+                        } else {
+                            local_cache_misses += 1;
+                            batch_indices.push(idx);
+                            batch_texts.push(chunk.text.clone());
+                            batch_chunks.push(chunk);
                         }
-                        tokens += est;
-                        end += 1;
                     }
-                    if end == start {
-                        end = (start + base_batch_size).min(batch_texts.len());
-                    }
-
-                    let slice = &batch_texts[start..end];
-                    let vectors = self.embed_batch_with_retry(slice)?;
-                    for (vec, idx_in_batch) in vectors.into_iter().zip(start..end) {
-                        let global_idx = batch_indices[idx_in_batch];
-                        let chunk = batch_chunks[idx_in_batch].clone();
-                        cache.insert(chunk.hash.clone(), vec.clone());
-                        file_results[global_idx] = Some((chunk, vec));
-                    }
-
-                    start = end;
                 }
-                embed_duration += embed_start.elapsed();
-            }
 
-            let ready: Vec<(CodeChunk, Vec<f32>)> = file_results
-                .into_iter()
-                .enumerate()
-                .map(|(idx, maybe)| {
-                    maybe.ok_or_else(|| {
-                        anyhow!(
-                            "Missing vector for chunk {} in {}",
-                            idx,
-                            full_path.display()
-                        )
+                let embed_duration = if !batch_texts.is_empty() {
+                    let embed_start = Instant::now();
+                    let mut start = 0usize;
+                    while start < batch_texts.len() {
+                        let mut end = start;
+                        let mut tokens = 0usize;
+                        while end < batch_texts.len() && (end - start) < base_batch_size {
+                            let est = estimate_tokens(&batch_texts[end]);
+                            if end > start && tokens + est > token_budget {
+                                break;
+                            }
+                            tokens += est;
+                            end += 1;
+                        }
+                        if end == start {
+                            end = (start + base_batch_size).min(batch_texts.len());
+                        }
+
+                        let slice = &batch_texts[start..end];
+                        let vectors = {
+                            let mut attempt = 1;
+                            let max_attempts = 3;
+                            loop {
+                                match embed_batch_with_timeout(
+                                    embedder.clone(),
+                                    slice.to_vec(),
+                                    embed_timeout,
+                                ) {
+                                    Ok(v) => break v,
+                                    Err(_err) if attempt < max_attempts => {
+                                        thread::sleep(Duration::from_millis(
+                                            (attempt * 200) as u64,
+                                        ));
+                                        attempt += 1;
+                                    }
+                                    Err(err) => {
+                                        return Some(Err(anyhow!(
+                                            "Embedding failed after {} attempts: {}",
+                                            attempt,
+                                            err
+                                        )))
+                                    }
+                                }
+                            }
+                        };
+
+                        {
+                            let mut cache_guard = cache.lock().unwrap();
+                            for (vec, idx_in_batch) in vectors.into_iter().zip(start..end) {
+                                let global_idx = batch_indices[idx_in_batch];
+                                let chunk = batch_chunks[idx_in_batch].clone();
+                                cache_guard.insert(chunk.hash.clone(), vec.clone());
+                                file_results[global_idx] = Some((chunk, vec));
+                            }
+                        }
+
+                        start = end;
+                    }
+                    embed_start.elapsed()
+                } else {
+                    Duration::ZERO
+                };
+
+                let ready: Result<Vec<(CodeChunk, Vec<f32>)>> = file_results
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, maybe)| {
+                        maybe.ok_or_else(|| {
+                            anyhow!(
+                                "Missing vector for chunk {} in {}",
+                                idx,
+                                full_path.display()
+                            )
+                        })
                     })
-                })
-                .collect::<Result<_>>()?;
+                    .collect();
 
-            by_path.insert(rel, ready);
+                match ready {
+                    Ok(chunks) => Some(Ok(FileResult {
+                        rel_path: rel,
+                        chunks,
+                        cache_hits: local_cache_hits,
+                        cache_misses: local_cache_misses,
+                        chunk_duration,
+                        embed_duration,
+                    })),
+                    Err(e) => Some(Err(e)),
+                }
+            })
+            .collect();
+
+        let file_results = file_results?;
+
+        let mut chunk_duration = Duration::ZERO;
+        let mut embed_duration = Duration::ZERO;
+
+        for result in file_results {
+            cache_hits += result.cache_hits;
+            cache_misses += result.cache_misses;
+            chunk_duration += result.chunk_duration;
+            embed_duration += result.embed_duration;
+            if !result.chunks.is_empty() {
+                by_path.insert(result.rel_path, result.chunks);
+            }
         }
 
         // Flatten and sort by path for determinism
@@ -592,6 +712,7 @@ impl Indexer {
         })
     }
 
+    #[allow(dead_code)]
     fn embed_batch_with_retry(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         const MAX_ATTEMPTS: usize = 3;
         let mut last_err = None;
@@ -619,7 +740,12 @@ impl Indexer {
 }
 
 fn collect_files(root: &Path) -> Vec<PathBuf> {
+    use std::sync::Mutex;
+
     let default_excludes = build_default_excludes();
+    let files = Arc::new(Mutex::new(Vec::new()));
+    let root_arc = Arc::new(root.to_path_buf());
+    let excludes_arc = Arc::new(default_excludes);
 
     WalkBuilder::new(root)
         .hidden(true)
@@ -629,35 +755,49 @@ fn collect_files(root: &Path) -> Vec<PathBuf> {
         .git_exclude(true)
         .follow_links(false)
         .add_custom_ignore_filename(".sgrepignore")
-        .build()
-        .filter_map(|entry| match entry {
-            Ok(e) => {
-                if !e.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-                    return None;
+        .threads(num_cpus::get().min(8)) // Parallel walk with up to 8 threads
+        .build_parallel()
+        .run(|| {
+            let files = Arc::clone(&files);
+            let root = Arc::clone(&root_arc);
+            let excludes = Arc::clone(&excludes_arc);
+
+            Box::new(move |entry| {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => return WalkState::Continue,
+                };
+
+                if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                    return WalkState::Continue;
                 }
 
-                if is_probably_binary(e.path()) {
-                    return None;
+                if is_probably_binary(entry.path()) {
+                    return WalkState::Continue;
                 }
 
-                if let Ok(meta) = e.metadata() {
+                if let Ok(meta) = entry.metadata() {
                     if meta.len() > MAX_FILE_BYTES {
-                        return None;
+                        return WalkState::Continue;
                     }
                 }
 
-                let path = e.path();
-                let relative_path = path.strip_prefix(root).unwrap_or(path);
+                let path = entry.path();
+                let relative_path = path.strip_prefix(root.as_path()).unwrap_or(path);
 
-                if default_excludes.is_match(relative_path) {
-                    return None;
+                if excludes.is_match(relative_path) {
+                    return WalkState::Continue;
                 }
 
-                Some(e.into_path())
-            }
-            _ => None,
-        })
-        .collect()
+                files.lock().unwrap().push(entry.into_path());
+                WalkState::Continue
+            })
+        });
+
+    Arc::try_unwrap(files)
+        .expect("All references should be dropped")
+        .into_inner()
+        .unwrap()
 }
 
 fn is_probably_binary(path: &Path) -> bool {
@@ -757,13 +897,13 @@ fn adjust_batch_size_for_progress(base: usize, total_chunks: usize) -> usize {
         return base;
     }
 
-    let estimated_batches = (total_chunks + base - 1) / base;
+    let estimated_batches = total_chunks.div_ceil(base);
     if estimated_batches >= 4 {
         return base;
     }
 
     let desired_batches = total_chunks.min(4);
-    let progress_friendly = (total_chunks + desired_batches - 1) / desired_batches;
+    let progress_friendly = total_chunks.div_ceil(desired_batches);
 
     progress_friendly.max(1).min(base)
 }
@@ -776,17 +916,89 @@ fn determine_token_budget() -> usize {
         .unwrap_or(6_000)
 }
 
+fn determine_embed_timeout() -> Duration {
+    env::var("SGREP_EMBED_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(45))
+}
+
+fn embed_batch_with_timeout(
+    embedder: Arc<dyn BatchEmbedder>,
+    texts: Vec<String>,
+    timeout: Duration,
+) -> Result<Vec<Vec<f32>>> {
+    let text_len = texts.len();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = embedder.embed_batch(&texts);
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(res) => res,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
+            "embedding batch timed out after {:?} ({} items)",
+            timeout,
+            text_len
+        )),
+        Err(err) => Err(anyhow!("embedding worker failed: {}", err)),
+    }
+}
+
 fn estimate_tokens(text: &str) -> usize {
-    std::cmp::max(1, text.len() / 4)
+    let mut token_count = 0usize;
+    let mut in_word = false;
+
+    for ch in text.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            if !in_word {
+                token_count += 1;
+                in_word = true;
+            }
+        } else {
+            in_word = false;
+            if is_operator_or_punctuation(ch) {
+                token_count += 1;
+            }
+        }
+    }
+
+    token_count.max(1)
+}
+
+fn is_operator_or_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ';' | ':' | ',' | '.' | '=' | '+' | '-'
+            | '*' | '/' | '%' | '!' | '&' | '|' | '^' | '~' | '?' | '@' | '#' | '$' | '\\'
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embedding::Embedder;
-    use std::fs;
-    use uuid::Uuid;
     use serial_test::serial;
+    use std::fs;
+    use std::time::Duration as StdDuration;
+    use uuid::Uuid;
+
+    #[derive(Clone, Default)]
+    struct DeterministicEmbedder;
+
+    impl BatchEmbedder for DeterministicEmbedder {
+        fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|t| vec![t.len() as f32, 1.0, 0.0, 0.0])
+                .collect())
+        }
+
+        fn dimension(&self) -> usize {
+            4
+        }
+    }
 
     fn set_test_home() -> PathBuf {
         let temp_dir = std::env::temp_dir().join(format!("sgrep_test_home_{}", Uuid::new_v4()));
@@ -816,7 +1028,7 @@ mod tests {
     #[test]
     #[serial]
     fn indexer_creates_report() {
-        let embedder = Arc::new(Embedder::default());
+        let embedder = Arc::new(DeterministicEmbedder::default());
         let indexer = Indexer::new_concrete(embedder);
 
         let _home = set_test_home();
@@ -841,7 +1053,7 @@ mod tests {
     #[test]
     #[serial]
     fn indexer_saves_to_store() {
-        let embedder = Arc::new(Embedder::default());
+        let embedder = Arc::new(DeterministicEmbedder::default());
         let indexer = Indexer::new_concrete(embedder);
 
         let _home = set_test_home();
@@ -901,7 +1113,7 @@ mod tests {
     #[test]
     #[serial]
     fn index_metadata_has_correct_fields() {
-        let embedder = Arc::new(Embedder::default());
+        let embedder = Arc::new(DeterministicEmbedder::default());
         let indexer = Indexer::new(embedder.clone());
 
         let _home = set_test_home();
@@ -1006,6 +1218,45 @@ mod tests {
         assert!(msg.contains("Embedding failed"));
 
         fs::remove_dir_all(&test_repo).ok();
+    }
+
+    #[derive(Clone, Default)]
+    struct IncompleteEmbedder;
+
+    impl BatchEmbedder for IncompleteEmbedder {
+        fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            // Return no vectors to leave holes in the results.
+            let _ = texts;
+            Ok(Vec::new())
+        }
+
+        fn dimension(&self) -> usize {
+            4
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn indexer_errors_when_vectors_missing() {
+        let embedder = Arc::new(IncompleteEmbedder::default());
+        let indexer = Indexer::new(embedder.clone());
+
+        let _home = set_test_home();
+        let repo = create_test_repo();
+
+        let result = indexer.build_index(IndexRequest {
+            path: repo.clone(),
+            force: true,
+            batch_size: Some(2),
+            profile: false,
+            dirty: None,
+        });
+
+        assert!(result.is_err());
+        let msg = format!("{:?}", result.err().unwrap());
+        assert!(msg.contains("Missing vector"));
+
+        fs::remove_dir_all(&repo).ok();
     }
 
     #[derive(Clone, Default)]
@@ -1168,6 +1419,51 @@ mod tests {
 
     #[test]
     #[serial]
+    fn incremental_incompatible_index_with_dirty_triggers_full_reindex() {
+        let embedder = Arc::new(StubEmbedder::default());
+        let indexer = Indexer::new(embedder.clone());
+
+        let _home = set_test_home();
+        let repo = create_test_repo();
+
+        // seed an incompatible index (different vector_dim and version)
+        let chunk = chunker::chunk_file(&repo.join("test.rs"), &repo)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let bad_meta = IndexMetadata {
+            version: "0.0.0".into(),
+            repo_path: repo.clone(),
+            repo_hash: "hash".into(),
+            vector_dim: 3,
+            indexed_at: chrono::Utc::now(),
+            total_files: 1,
+            total_chunks: 1,
+        };
+        let bad_index =
+            RepositoryIndex::new(bad_meta, vec![chunk.clone()], vec![vec![0.1, 0.2, 0.3]]);
+        let store = IndexStore::new(&repo).unwrap();
+        store.save(&bad_index).unwrap();
+
+        let report = indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: false,
+                batch_size: None,
+                profile: false,
+                dirty: Some(DirtySet {
+                    touched: vec![repo.join("test.rs")],
+                    deleted: vec![repo.join("missing.rs")],
+                }),
+            })
+            .unwrap();
+
+        assert!(report.cache_hits + report.cache_misses > 0);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
     fn incremental_handles_deleted_nested_file() {
         let embedder = Arc::new(StubEmbedder::default());
         let indexer = Indexer::new(embedder.clone());
@@ -1211,6 +1507,54 @@ mod tests {
             .chunks
             .iter()
             .any(|c| c.path.ends_with(std::path::Path::new("src/extra.rs"))));
+    }
+
+    #[test]
+    #[serial]
+    fn incremental_removes_deleted_directory_tree() {
+        let embedder = Arc::new(StubEmbedder::default());
+        let indexer = Indexer::new(embedder.clone());
+
+        let _home = set_test_home();
+        let repo = create_test_repo();
+        let nested_dir = repo.join("nested_dir");
+        fs::create_dir_all(&nested_dir).unwrap();
+        fs::write(nested_dir.join("nested.rs"), "fn inner() {}\n").unwrap();
+
+        indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: None,
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        fs::remove_dir_all(&nested_dir).unwrap();
+
+        let report = indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: false,
+                batch_size: None,
+                profile: false,
+                dirty: Some(DirtySet {
+                    touched: Vec::new(),
+                    deleted: vec![nested_dir.clone()],
+                }),
+            })
+            .unwrap();
+
+        assert!(report.files_indexed >= 1);
+
+        let store = IndexStore::new(&repo).unwrap();
+        let index = store.load().unwrap().unwrap();
+        assert!(!index
+            .chunks
+            .iter()
+            .any(|c| c.path.to_string_lossy().contains("nested_dir")));
+        fs::remove_dir_all(&repo).ok();
     }
 
     #[test]
@@ -1392,8 +1736,7 @@ mod tests {
     #[test]
     #[serial]
     fn collect_files_skips_binary_and_large_assets() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("sgrep_collect_test_{}", Uuid::new_v4()));
+        let temp_dir = std::env::temp_dir().join(format!("sgrep_collect_test_{}", Uuid::new_v4()));
         fs::create_dir_all(&temp_dir).unwrap();
 
         let keep = temp_dir.join("keep.rs");
@@ -1430,5 +1773,175 @@ mod tests {
         let _ = std::fs::remove_file(&nested_missing);
         let rel_nested = normalize_to_relative(&nested_missing, &repo);
         assert_eq!(rel_nested, PathBuf::from("src/ghost_nested.rs"));
+    }
+
+    #[derive(Clone)]
+    struct SlowEmbedder {
+        delay: StdDuration,
+    }
+
+    impl BatchEmbedder for SlowEmbedder {
+        fn embed_batch(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            std::thread::sleep(self.delay);
+            Ok(vec![vec![1.0, 0.0, 0.0, 0.0]])
+        }
+
+        fn dimension(&self) -> usize {
+            4
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn embed_batch_with_timeout_times_out() {
+        let embedder = Arc::new(SlowEmbedder {
+            delay: StdDuration::from_millis(200),
+        });
+        let start = Instant::now();
+        let result =
+            embed_batch_with_timeout(embedder, vec!["slow".into()], StdDuration::from_millis(50));
+        assert!(result.is_err());
+        assert!(start.elapsed() >= StdDuration::from_millis(50));
+    }
+
+    #[test]
+    #[serial]
+    fn embed_batch_with_timeout_succeeds() {
+        let embedder = Arc::new(SlowEmbedder {
+            delay: StdDuration::from_millis(5),
+        });
+        let result =
+            embed_batch_with_timeout(embedder, vec!["ok".into()], StdDuration::from_millis(100));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn determine_embed_timeout_reads_env() {
+        env::set_var("SGREP_EMBED_TIMEOUT_SECS", "2");
+        let timeout = determine_embed_timeout();
+        assert_eq!(timeout, Duration::from_secs(2));
+        env::remove_var("SGREP_EMBED_TIMEOUT_SECS");
+    }
+
+    #[test]
+    #[serial]
+    fn build_index_handles_empty_repository() {
+        let embedder = Arc::new(StubEmbedder::default());
+        let indexer = Indexer::new(embedder);
+
+        let _home = set_test_home();
+        let repo = std::env::temp_dir().join(format!("sgrep_empty_repo_{}", Uuid::new_v4()));
+        fs::create_dir_all(&repo).unwrap();
+
+        let report = indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: None,
+                profile: true,
+                dirty: None,
+            })
+            .unwrap();
+
+        assert_eq!(report.files_indexed, 0);
+        assert_eq!(report.chunks_indexed, 0);
+        assert!(report.timings.is_some());
+
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[derive(Clone, Default)]
+    struct RetryingEmbedder {
+        attempts: Arc<std::sync::Mutex<usize>>,
+    }
+
+    impl BatchEmbedder for RetryingEmbedder {
+        fn embed_batch(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            let mut guard = self.attempts.lock().unwrap();
+            *guard += 1;
+            if *guard < 2 {
+                Err(anyhow!("temporary failure"))
+            } else {
+                Ok(vec![vec![1.0, 0.0, 0.0, 0.0]])
+            }
+        }
+
+        fn dimension(&self) -> usize {
+            4
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct AlwaysFailRetryEmbedder;
+
+    impl BatchEmbedder for AlwaysFailRetryEmbedder {
+        fn embed_batch(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Err(anyhow!("permanent failure"))
+        }
+
+        fn dimension(&self) -> usize {
+            4
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn embed_batch_with_retry_recovers_after_initial_error() {
+        let embedder = Arc::new(RetryingEmbedder::default());
+        let indexer = Indexer::new(embedder);
+
+        let vectors = indexer
+            .embed_batch_with_retry(&vec!["hello".into()])
+            .expect("should recover on second attempt");
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0], vec![1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    #[serial]
+    fn embed_batch_with_retry_fails_after_max_attempts() {
+        let embedder = Arc::new(AlwaysFailRetryEmbedder::default());
+        let indexer = Indexer::new(embedder);
+
+        let result = indexer.embed_batch_with_retry(&vec!["fail".into()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn estimate_tokens_counts_words_and_operators() {
+        assert_eq!(estimate_tokens("fn hello() {}"), 6);
+        assert_eq!(estimate_tokens("let x = 5 + 3;"), 7);
+        assert_eq!(estimate_tokens(""), 1);
+        assert_eq!(estimate_tokens("   "), 1);
+    }
+
+    #[test]
+    fn estimate_tokens_handles_complex_code() {
+        let code = "fn calculate(x: i32, y: i32) -> i32 { x + y }";
+        let tokens = estimate_tokens(code);
+        assert!(tokens > 10);
+        assert!(tokens < 30);
+    }
+
+    #[test]
+    fn estimate_tokens_counts_identifiers_once() {
+        assert_eq!(estimate_tokens("hello_world"), 1);
+        assert_eq!(estimate_tokens("hello world"), 2);
+        assert_eq!(estimate_tokens("hello123world"), 1);
+    }
+
+    #[test]
+    fn is_operator_or_punctuation_covers_common_operators() {
+        assert!(is_operator_or_punctuation('('));
+        assert!(is_operator_or_punctuation(')'));
+        assert!(is_operator_or_punctuation('{'));
+        assert!(is_operator_or_punctuation('}'));
+        assert!(is_operator_or_punctuation(';'));
+        assert!(is_operator_or_punctuation('='));
+        assert!(is_operator_or_punctuation('+'));
+        assert!(!is_operator_or_punctuation('a'));
+        assert!(!is_operator_or_punctuation(' '));
+        assert!(!is_operator_or_punctuation('\n'));
     }
 }

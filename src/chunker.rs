@@ -402,4 +402,96 @@ mod tests {
         assert!(chunk.text.len() <= MAX_SNIPPET_CHARS);
         assert!(chunk.text.is_char_boundary(chunk.text.len()));
     }
+
+    #[test]
+    fn chunk_file_produces_chunks_for_small_rust_file() {
+        let dir = std::env::temp_dir().join("sgrep_chunk_file");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("small.rs");
+        std::fs::write(&path, "fn main() { println!(\"hi\"); }\n").unwrap();
+        let chunks = chunk_file(&path, &dir).unwrap();
+        assert!(!chunks.is_empty());
+        assert!(chunks[0].path.ends_with(Path::new("small.rs")));
+    }
+
+    #[test]
+    fn chunk_file_returns_empty_for_blank_file() {
+        let dir = std::env::temp_dir().join("sgrep_chunk_file_blank");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty.rs");
+        std::fs::write(&path, "   \n\t").unwrap();
+
+        let chunks = chunk_file(&path, &dir).unwrap();
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn chunk_file_unknown_extension_uses_plain_fallback() {
+        let dir = std::env::temp_dir().join("sgrep_chunk_file_plain");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, "just some words\nanother line").unwrap();
+
+        let chunks = chunk_file(&path, &dir).unwrap();
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].language, "plain");
+    }
+
+    #[test]
+    fn chunk_file_with_parse_error_falls_back() {
+        let dir = std::env::temp_dir().join("sgrep_chunk_file_parse_error");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("broken.rs");
+        // Tree-sitter will produce an ERROR node but no semantic matches; we should fallback.
+        std::fs::write(&path, "??? ??\n!!!").unwrap();
+
+        let chunks = chunk_file(&path, &dir).unwrap();
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].language, "rust");
+        assert!(chunks[0].text.contains("???"));
+    }
+
+    #[test]
+    fn chunk_fallback_handles_empty_source() {
+        let chunks = chunk_fallback("", Path::new("empty.txt"), "plain", Utc::now());
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "");
+        assert_eq!(chunks[0].start_line, 1);
+    }
+
+    #[test]
+    fn detect_language_covers_common_extensions() {
+        let cases = [
+            ("file.ts", "typescript"),
+            ("component.tsx", "tsx"),
+            ("script.js", "javascript"),
+            ("script.jsx", "javascript"),
+            ("main.c", "c"),
+            ("main.go", "go"),
+            ("main.java", "java"),
+            ("header.hpp", "cpp"),
+            ("class.cs", "csharp"),
+            ("tool.rb", "ruby"),
+            ("doc.md", "markdown"),
+            ("data.json", "json"),
+            ("config.yaml", "yaml"),
+            ("config.toml", "toml"),
+            ("index.html", "html"),
+            ("style.css", "css"),
+            ("script.sh", "bash"),
+        ];
+
+        for (file, expected_label) in cases {
+            let lang = detect_language(Path::new(file)).expect("language detected");
+            assert_eq!(lang.label(), expected_label);
+            assert!(lang.language().is_some());
+        }
+    }
+
+    #[test]
+    fn is_semantic_node_matches_keyword_variants() {
+        assert!(is_semantic_node("custom_function_kind"));
+        assert!(is_semantic_node("custom_method_kind"));
+        assert!(is_semantic_node("custom_heading_kind"));
+    }
 }

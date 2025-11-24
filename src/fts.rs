@@ -137,4 +137,41 @@ mod tests {
         assert!(glob_matches(globset.as_ref(), Path::new("src/main.rs")));
         assert!(!glob_matches(globset.as_ref(), Path::new("tests/data.txt")));
     }
+
+    #[test]
+    fn keyword_score_zero_with_no_keywords() {
+        let score = keyword_score(&[], "anything", Path::new("file.rs"));
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn matches_filters_handles_invalid_format() {
+        let chunk = sample_chunk("rust", "src/lib.rs");
+        assert!(matches_filters(&["nonsense".into()], &chunk));
+        assert!(matches_filters(&["keyvalue".into()], &chunk));
+    }
+
+    #[test]
+    fn matches_filters_allows_unknown_keys() {
+        let chunk = sample_chunk("rust", "src/lib.rs");
+        assert!(matches_filters(&["owner=alice".into()], &chunk));
+    }
+
+    #[test]
+    fn keyword_score_prefers_path_matches() {
+        let keywords = vec!["auth".into()];
+        let score = keyword_score(&keywords, "irrelevant body", Path::new("src/auth/mod.rs"));
+        assert!(score >= 2.0);
+    }
+
+    #[test]
+    fn build_globset_returns_none_for_invalid_patterns() {
+        let globset = build_globset(&["[".into()]);
+        assert!(globset.is_none());
+    }
+
+    #[test]
+    fn glob_matches_defaults_to_true_without_globset() {
+        assert!(glob_matches(None, Path::new("any/path.rs")));
+    }
 }
