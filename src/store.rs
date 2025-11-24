@@ -1,16 +1,22 @@
 use std::env;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use blake3::Hasher;
 use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
+use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 
 use crate::chunker::CodeChunk;
 
 const INDEX_FILE: &str = "index.bin.zst";
+const VECTORS_FILE: &str = "vectors.bin";
+const INDEX_FORMAT_VERSION: u32 = 2;
+const VECTOR_HEADER_SIZE: usize = 8;
+const BYTES_PER_F32: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct IndexStore {
@@ -31,28 +37,165 @@ impl IndexStore {
     }
 
     pub fn load(&self) -> Result<Option<RepositoryIndex>> {
-        let path = self.root.join(INDEX_FILE);
-        if !path.exists() {
-            return Ok(None);
+        let vectors_path = self.root.join(VECTORS_FILE);
+        let index_path = self.root.join(INDEX_FILE);
+
+        if vectors_path.exists() && index_path.exists() {
+            return self.load_mmap_format(&index_path, &vectors_path);
         }
-        let bytes =
-            fs::read(&path).with_context(|| format!("Failed to read {}", path.display()))?;
-        let buffer = zstd::stream::decode_all(bytes.as_slice())?;
-        let index: RepositoryIndex = bincode::deserialize(&buffer)?;
-        Ok(Some(index))
+
+        if index_path.exists() {
+            return self.load_legacy_format(&index_path);
+        }
+
+        Ok(None)
     }
 
     pub fn save(&self, index: &RepositoryIndex) -> Result<()> {
-        let path = self.root.join(INDEX_FILE);
-        let bytes = bincode::serialize(index)?;
-        let compressed = zstd::stream::encode_all(bytes.as_slice(), 3)?;
-        fs::write(&path, compressed)?;
+        let vectors_path = self.root.join(VECTORS_FILE);
+        let index_path = self.root.join(INDEX_FILE);
+
+        self.write_vectors_file(&vectors_path, index)?;
+        self.write_index_file(&index_path, index)?;
+
         Ok(())
+    }
+
+    pub fn load_mmap(&self) -> Result<Option<MmapIndex>> {
+        let vectors_path = self.root.join(VECTORS_FILE);
+        let index_path = self.root.join(INDEX_FILE);
+
+        if !vectors_path.exists() || !index_path.exists() {
+            return Ok(None);
+        }
+
+        let partial = self.read_partial_index(&index_path)?;
+        let mmap = self.open_vectors_mmap(&vectors_path)?;
+        let (format_version, vector_dim) = parse_vectors_header(&mmap)?;
+
+        if format_version != INDEX_FORMAT_VERSION {
+            return Ok(None);
+        }
+
+        validate_vectors_size(&mmap, vector_dim, partial.chunks.len())?;
+
+        Ok(Some(MmapIndex {
+            metadata: partial.metadata,
+            chunks: partial.chunks,
+            mmap,
+            vector_dim,
+        }))
     }
 
     pub fn repo_hash(&self) -> &str {
         &self.repo_hash
     }
+
+    fn load_legacy_format(&self, path: &Path) -> Result<Option<RepositoryIndex>> {
+        let bytes = fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+        let buffer = zstd::stream::decode_all(bytes.as_slice())?;
+        let index: RepositoryIndex = bincode::deserialize(&buffer)?;
+        Ok(Some(index))
+    }
+
+    fn load_mmap_format(&self, index_path: &Path, vectors_path: &Path) -> Result<Option<RepositoryIndex>> {
+        let partial = self.read_partial_index(index_path)?;
+        let mmap = self.open_vectors_mmap(vectors_path)?;
+        let (format_version, vector_dim) = parse_vectors_header(&mmap)?;
+
+        if format_version != INDEX_FORMAT_VERSION {
+            return self.load_legacy_format(index_path);
+        }
+
+        validate_vectors_size(&mmap, vector_dim, partial.chunks.len())?;
+
+        let vectors = read_vectors_from_mmap(&mmap, vector_dim, partial.chunks.len());
+
+        Ok(Some(RepositoryIndex {
+            metadata: partial.metadata,
+            chunks: partial.chunks,
+            vectors,
+        }))
+    }
+
+    fn read_partial_index(&self, path: &Path) -> Result<PartialIndex> {
+        let bytes = fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+        let buffer = zstd::stream::decode_all(bytes.as_slice())?;
+        Ok(bincode::deserialize(&buffer)?)
+    }
+
+    fn open_vectors_mmap(&self, path: &Path) -> Result<Mmap> {
+        let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+        Ok(unsafe { Mmap::map(&file)? })
+    }
+
+    fn write_vectors_file(&self, path: &Path, index: &RepositoryIndex) -> Result<()> {
+        let file = File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+
+        writer.write_all(&INDEX_FORMAT_VERSION.to_le_bytes())?;
+        writer.write_all(&(index.metadata.vector_dim as u32).to_le_bytes())?;
+
+        for vector in &index.vectors {
+            for &val in vector {
+                writer.write_all(&val.to_le_bytes())?;
+            }
+        }
+        writer.flush()?;
+        Ok(())
+    }
+
+    fn write_index_file(&self, path: &Path, index: &RepositoryIndex) -> Result<()> {
+        let partial = PartialIndex {
+            metadata: index.metadata.clone(),
+            chunks: index.chunks.clone(),
+        };
+        let bytes = bincode::serialize(&partial)?;
+        let compressed = zstd::stream::encode_all(bytes.as_slice(), 3)?;
+        fs::write(path, compressed)?;
+        Ok(())
+    }
+}
+
+fn parse_vectors_header(mmap: &Mmap) -> Result<(u32, usize)> {
+    if mmap.len() < VECTOR_HEADER_SIZE {
+        return Err(anyhow::anyhow!("Invalid vectors file: too small"));
+    }
+    let format_version = u32::from_le_bytes([mmap[0], mmap[1], mmap[2], mmap[3]]);
+    let vector_dim = u32::from_le_bytes([mmap[4], mmap[5], mmap[6], mmap[7]]) as usize;
+    Ok((format_version, vector_dim))
+}
+
+fn validate_vectors_size(mmap: &Mmap, vector_dim: usize, num_vectors: usize) -> Result<()> {
+    let vector_bytes = vector_dim * BYTES_PER_F32;
+    let expected_size = VECTOR_HEADER_SIZE + num_vectors * vector_bytes;
+    if mmap.len() < expected_size {
+        return Err(anyhow::anyhow!(
+            "Invalid vectors file: expected {} bytes, got {}",
+            expected_size,
+            mmap.len()
+        ));
+    }
+    Ok(())
+}
+
+fn read_vectors_from_mmap(mmap: &Mmap, vector_dim: usize, num_vectors: usize) -> Vec<Vec<f32>> {
+    let vector_bytes = vector_dim * BYTES_PER_F32;
+    (0..num_vectors)
+        .map(|i| {
+            let offset = VECTOR_HEADER_SIZE + i * vector_bytes;
+            mmap[offset..offset + vector_bytes]
+                .chunks_exact(BYTES_PER_F32)
+                .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                .collect()
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PartialIndex {
+    metadata: IndexMetadata,
+    chunks: Vec<CodeChunk>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,9 +219,41 @@ pub struct IndexMetadata {
 impl RepositoryIndex {
     pub fn new(metadata: IndexMetadata, chunks: Vec<CodeChunk>, vectors: Vec<Vec<f32>>) -> Self {
         debug_assert_eq!(chunks.len(), vectors.len());
-        Self {
-            metadata,
-            chunks,
+        Self { metadata, chunks, vectors }
+    }
+}
+
+pub struct MmapIndex {
+    pub metadata: IndexMetadata,
+    pub chunks: Vec<CodeChunk>,
+    mmap: Mmap,
+    vector_dim: usize,
+}
+
+impl MmapIndex {
+    #[inline]
+    pub fn get_vector(&self, idx: usize) -> &[f32] {
+        let vector_bytes = self.vector_dim * BYTES_PER_F32;
+        let offset = VECTOR_HEADER_SIZE + idx * vector_bytes;
+        let slice = &self.mmap[offset..offset + vector_bytes];
+        unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const f32, self.vector_dim) }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.chunks.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    pub fn to_repository_index(&self) -> RepositoryIndex {
+        let vectors: Vec<Vec<f32>> = (0..self.len()).map(|i| self.get_vector(i).to_vec()).collect();
+        RepositoryIndex {
+            metadata: self.metadata.clone(),
+            chunks: self.chunks.clone(),
             vectors,
         }
     }
@@ -88,15 +263,12 @@ fn data_dir() -> PathBuf {
     if let Ok(home) = env::var("SGREP_HOME") {
         return PathBuf::from(home);
     }
-
-    if let Some(dirs) = ProjectDirs::from("dev", "RikaLabs", "sgrep") {
-        dirs.data_local_dir().to_path_buf()
-    } else {
-        dirs_next_best()
-    }
+    ProjectDirs::from("dev", "RikaLabs", "sgrep")
+        .map(|d| d.data_local_dir().to_path_buf())
+        .unwrap_or_else(fallback_data_dir)
 }
 
-fn dirs_next_best() -> PathBuf {
+fn fallback_data_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -106,25 +278,27 @@ fn dirs_next_best() -> PathBuf {
 fn hash_path(path: &Path) -> String {
     let mut hasher = Hasher::new();
     hasher.update(path.to_string_lossy().as_bytes());
-    let digest = hasher.finalize();
-    digest.to_hex().to_string()
+    hasher.finalize().to_hex().to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use uuid::Uuid;
     use serial_test::serial;
+    use uuid::Uuid;
+
+    fn temp_dir_with_name(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("sgrep_test_{}_{}", name, Uuid::new_v4()))
+    }
 
     fn set_test_home() -> PathBuf {
-        let temp_dir = std::env::temp_dir().join(format!("sgrep_test_home_{}", Uuid::new_v4()));
+        let temp_dir = temp_dir_with_name("home");
         std::fs::create_dir_all(&temp_dir).unwrap();
         std::env::set_var("SGREP_HOME", &temp_dir);
         temp_dir
     }
 
-    fn create_sample_chunk() -> CodeChunk {
+    fn make_chunk() -> CodeChunk {
         CodeChunk {
             id: Uuid::new_v4(),
             path: PathBuf::from("test.rs"),
@@ -137,53 +311,47 @@ mod tests {
         }
     }
 
-    #[test]
-    #[serial]
-    fn hash_path_is_deterministic() {
-        let path = Path::new("/test/path");
-        let hash1 = hash_path(path);
-        let hash2 = hash_path(path);
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    #[serial]
-    fn hash_path_differs_for_different_paths() {
-        let hash1 = hash_path(Path::new("/path/one"));
-        let hash2 = hash_path(Path::new("/path/two"));
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    #[serial]
-    fn repository_index_maintains_chunk_vector_correspondence() {
-        let chunk = create_sample_chunk();
-        let vector = vec![0.1, 0.2, 0.3];
-        let metadata = IndexMetadata {
+    fn make_metadata(repo_path: PathBuf, repo_hash: String, vector_dim: usize) -> IndexMetadata {
+        IndexMetadata {
             version: "0.1.0".to_string(),
-            repo_path: PathBuf::from("/test"),
-            repo_hash: "test123".to_string(),
-            vector_dim: 3,
+            repo_path,
+            repo_hash,
+            vector_dim,
             indexed_at: Utc::now(),
             total_files: 1,
             total_chunks: 1,
-        };
+        }
+    }
 
+    #[test]
+    fn hash_is_deterministic() {
+        let path = Path::new("/test/path");
+        assert_eq!(hash_path(path), hash_path(path));
+    }
+
+    #[test]
+    fn hash_differs_for_different_paths() {
+        assert_ne!(hash_path(Path::new("/a")), hash_path(Path::new("/b")));
+    }
+
+    #[test]
+    fn repository_index_maintains_correspondence() {
+        let chunk = make_chunk();
+        let vector = vec![0.1, 0.2, 0.3];
+        let metadata = make_metadata(PathBuf::from("/test"), "test".to_string(), 3);
         let index = RepositoryIndex::new(metadata, vec![chunk], vec![vector]);
         assert_eq!(index.chunks.len(), index.vectors.len());
-        assert_eq!(index.chunks.len(), 1);
     }
 
     #[test]
     #[serial]
-    fn index_store_creates_deterministic_hash() {
+    fn store_creates_deterministic_hash() {
         let _home = set_test_home();
-        let temp_dir = std::env::temp_dir().join("sgrep_test_repo");
+        let temp_dir = temp_dir_with_name("repo");
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let store1 = IndexStore::new(&temp_dir).unwrap();
         let store2 = IndexStore::new(&temp_dir).unwrap();
-
         assert_eq!(store1.repo_hash(), store2.repo_hash());
 
         std::fs::remove_dir_all(&temp_dir).ok();
@@ -193,30 +361,18 @@ mod tests {
     #[serial]
     fn save_and_load_roundtrip() {
         let _home = set_test_home();
-        let temp_dir = std::env::temp_dir().join(format!("sgrep_test_{}", Uuid::new_v4()));
+        let temp_dir = temp_dir_with_name("roundtrip");
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let store = IndexStore::new(&temp_dir).unwrap();
-        let chunk = create_sample_chunk();
+        let chunk = make_chunk();
         let vector = vec![0.1, 0.2, 0.3];
-        let metadata = IndexMetadata {
-            version: "0.1.0".to_string(),
-            repo_path: temp_dir.clone(),
-            repo_hash: store.repo_hash().to_string(),
-            vector_dim: 3,
-            indexed_at: Utc::now(),
-            total_files: 1,
-            total_chunks: 1,
-        };
+        let metadata = make_metadata(temp_dir.clone(), store.repo_hash().to_string(), 3);
+        let original = RepositoryIndex::new(metadata, vec![chunk.clone()], vec![vector.clone()]);
 
-        let original_index =
-            RepositoryIndex::new(metadata, vec![chunk.clone()], vec![vector.clone()]);
-        store.save(&original_index).unwrap();
+        store.save(&original).unwrap();
+        let loaded = store.load().unwrap().unwrap();
 
-        let loaded_index = store.load().unwrap();
-        assert!(loaded_index.is_some());
-
-        let loaded = loaded_index.unwrap();
         assert_eq!(loaded.chunks.len(), 1);
         assert_eq!(loaded.vectors.len(), 1);
         assert_eq!(loaded.chunks[0].text, chunk.text);
@@ -227,14 +383,127 @@ mod tests {
 
     #[test]
     #[serial]
-    fn load_returns_none_for_nonexistent_index() {
+    fn load_returns_none_for_missing_index() {
         let _home = set_test_home();
-        let temp_dir = std::env::temp_dir().join(format!("sgrep_test_empty_{}", Uuid::new_v4()));
+        let temp_dir = temp_dir_with_name("empty");
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let store = IndexStore::new(&temp_dir).unwrap();
-        let result = store.load().unwrap();
-        assert!(result.is_none());
+        assert!(store.load().unwrap().is_none());
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn mmap_index_provides_zero_copy_access() {
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("mmap");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let chunk = make_chunk();
+        let vectors = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let metadata = make_metadata(temp_dir.clone(), store.repo_hash().to_string(), 3);
+        let original = RepositoryIndex::new(metadata, vec![chunk.clone(), chunk], vectors.clone());
+
+        store.save(&original).unwrap();
+        let mmap_index = store.load_mmap().unwrap().unwrap();
+
+        assert_eq!(mmap_index.len(), 2);
+        assert_eq!(mmap_index.get_vector(0), &vectors[0][..]);
+        assert_eq!(mmap_index.get_vector(1), &vectors[1][..]);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn mmap_index_converts_to_repository_index() {
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("convert");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let chunk = make_chunk();
+        let vector = vec![1.5, 2.5, 3.5];
+        let metadata = make_metadata(temp_dir.clone(), store.repo_hash().to_string(), 3);
+        let original = RepositoryIndex::new(metadata, vec![chunk], vec![vector.clone()]);
+
+        store.save(&original).unwrap();
+        let mmap_index = store.load_mmap().unwrap().unwrap();
+        let converted = mmap_index.to_repository_index();
+
+        assert_eq!(converted.vectors[0], vector);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn mmap_returns_none_for_missing_index() {
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("mmap_missing");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        assert!(store.load_mmap().unwrap().is_none());
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn data_dir_uses_sgrep_home_when_set() {
+        let prev = std::env::var("SGREP_HOME").ok();
+        std::env::set_var("SGREP_HOME", "/custom/path");
+        assert_eq!(data_dir(), PathBuf::from("/custom/path"));
+        match prev {
+            Some(v) => std::env::set_var("SGREP_HOME", v),
+            None => std::env::remove_var("SGREP_HOME"),
+        }
+    }
+
+    #[test]
+    fn fallback_uses_home_directory() {
+        let dir = fallback_data_dir();
+        assert!(dir.to_string_lossy().contains(".sgrep"));
+    }
+
+    #[test]
+    #[serial]
+    fn save_creates_both_files() {
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("files");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let chunk = make_chunk();
+        let metadata = make_metadata(temp_dir.clone(), store.repo_hash().to_string(), 3);
+        let index = RepositoryIndex::new(metadata, vec![chunk], vec![vec![0.1, 0.2, 0.3]]);
+
+        store.save(&index).unwrap();
+
+        assert!(store.root.join(INDEX_FILE).exists());
+        assert!(store.root.join(VECTORS_FILE).exists());
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn mmap_is_empty_works() {
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("empty_check");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let metadata = make_metadata(temp_dir.clone(), store.repo_hash().to_string(), 3);
+        let index = RepositoryIndex::new(metadata, vec![], vec![]);
+
+        store.save(&index).unwrap();
+        let mmap_index = store.load_mmap().unwrap().unwrap();
+
+        assert!(mmap_index.is_empty());
+        assert_eq!(mmap_index.len(), 0);
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

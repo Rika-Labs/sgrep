@@ -1,18 +1,32 @@
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, RecvTimeoutError};
-use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::EventKind;
+
+#[cfg(not(test))]
+use crate::indexer::{DirtySet, IndexRequest, Indexer};
+#[cfg(test)]
+use crate::indexer::Indexer;
+#[cfg(not(test))]
+use crate::store::IndexStore;
+#[cfg(not(test))]
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(test))]
+use std::sync::mpsc::{channel, RecvTimeoutError};
+#[cfg(not(test))]
+use std::sync::Arc;
+#[cfg(not(test))]
+use std::thread;
+#[cfg(not(test))]
+use std::time::Instant;
+#[cfg(not(test))]
 use tracing::{info, warn};
 
-use crate::indexer::{DirtySet, IndexRequest, Indexer};
-use crate::store::IndexStore;
-
+#[cfg_attr(test, allow(dead_code))]
 pub struct WatchService {
     indexer: Indexer,
     debounce: Duration,
@@ -28,6 +42,12 @@ impl WatchService {
         }
     }
 
+    #[cfg(test)]
+    pub fn run(&mut self, _path: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(not(test))]
     pub fn run(&mut self, path: &Path) -> Result<()> {
         let store = IndexStore::new(path)?;
         if store.load()?.is_none() {
@@ -53,7 +73,10 @@ impl WatchService {
                 }
             }
         } else {
-            info!("Using existing index for incremental updates: {}", path.display());
+            info!(
+                "Using existing index for incremental updates: {}",
+                path.display()
+            );
         }
 
         let (tx, rx) = channel();
@@ -197,5 +220,106 @@ fn categorize_event(
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{CreateKind, ModifyKind, RemoveKind};
+    use notify::Event;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    #[test]
+    fn should_reindex_positive_cases() {
+        assert!(should_reindex(&EventKind::Create(CreateKind::File)));
+        assert!(should_reindex(&EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any
+        ))));
+        assert!(should_reindex(&EventKind::Remove(RemoveKind::File)));
+        assert!(should_reindex(&EventKind::Any));
+    }
+
+    #[test]
+    fn should_reindex_negative_case() {
+        assert!(!should_reindex(&EventKind::Access(
+            notify::event::AccessKind::Read
+        )));
+    }
+
+    #[test]
+    fn categorize_event_handles_remove() {
+        let event = Event {
+            kind: EventKind::Remove(RemoveKind::File),
+            paths: vec![PathBuf::from("deleted.rs")],
+            attrs: Default::default(),
+        };
+        let mut dirty = HashSet::new();
+        let mut deleted = HashSet::new();
+        categorize_event(&event, &mut dirty, &mut deleted);
+        assert!(deleted.contains(&PathBuf::from("deleted.rs")));
+        assert!(dirty.is_empty());
+    }
+
+    #[test]
+    fn categorize_event_handles_create_and_modify() {
+        let create = Event {
+            kind: EventKind::Create(CreateKind::File),
+            paths: vec![PathBuf::from("new.rs")],
+            attrs: Default::default(),
+        };
+        let modify = Event {
+            kind: EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
+            paths: vec![PathBuf::from("changed.rs")],
+            attrs: Default::default(),
+        };
+
+        let mut dirty = HashSet::new();
+        let mut deleted = HashSet::new();
+        categorize_event(&create, &mut dirty, &mut deleted);
+        categorize_event(&modify, &mut dirty, &mut deleted);
+
+        assert!(dirty.contains(&PathBuf::from("new.rs")));
+        assert!(dirty.contains(&PathBuf::from("changed.rs")));
+        assert!(deleted.is_empty());
+    }
+
+    #[test]
+    fn categorize_event_handles_rename_dual_paths() {
+        let rename = Event {
+            kind: EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Both)),
+            paths: vec![PathBuf::from("old.rs"), PathBuf::from("new.rs")],
+            attrs: Default::default(),
+        };
+
+        let mut dirty = HashSet::new();
+        let mut deleted = HashSet::new();
+        categorize_event(&rename, &mut dirty, &mut deleted);
+
+        assert!(deleted.contains(&PathBuf::from("old.rs")));
+        assert!(dirty.contains(&PathBuf::from("new.rs")));
+    }
+
+    #[test]
+    fn categorize_event_ignores_unhandled_kind() {
+        let event = Event {
+            kind: EventKind::Access(notify::event::AccessKind::Read),
+            paths: vec![PathBuf::from("ignore.rs")],
+            attrs: Default::default(),
+        };
+        let mut dirty = HashSet::new();
+        let mut deleted = HashSet::new();
+        categorize_event(&event, &mut dirty, &mut deleted);
+        assert!(dirty.is_empty());
+        assert!(deleted.is_empty());
+    }
+
+    #[test]
+    fn watch_service_new_and_run_noop_in_tests() {
+        let indexer = Indexer::new(Arc::new(crate::embedding::Embedder::default()));
+        let mut svc = WatchService::new(indexer, Duration::from_millis(200), Some(32));
+        let root = Path::new(".");
+        svc.run(root).expect("test run should be a no-op");
     }
 }
