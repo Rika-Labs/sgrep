@@ -895,8 +895,8 @@ fn determine_batch_size(override_val: Option<usize>) -> usize {
         .to_lowercase()
         .as_str()
     {
-        "cuda" | "coreml" => 256,
-        _ => 64,
+        "cuda" | "coreml" => 128,
+        _ => 16, // Small batches for frequent progress updates on CPU
     }
 }
 
@@ -1779,9 +1779,9 @@ mod tests {
     #[serial]
     fn determine_batch_size_respects_device_env() {
         env::set_var("SGREP_DEVICE", "coreml");
-        assert_eq!(determine_batch_size(None), 256);
+        assert_eq!(determine_batch_size(None), 128);
         env::set_var("SGREP_DEVICE", "cuda");
-        assert_eq!(determine_batch_size(None), 256);
+        assert_eq!(determine_batch_size(None), 128);
         env::remove_var("SGREP_DEVICE");
     }
 
