@@ -9,6 +9,7 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 use crate::chunker::CodeChunk;
 use crate::embedding::BatchEmbedder;
 use crate::fts;
+use crate::reranker::Reranker;
 use crate::store::{MmapIndex, RepositoryIndex};
 
 const HNSW_THRESHOLD: usize = 500;
@@ -18,10 +19,12 @@ const HNSW_CONNECTIVITY: usize = 16;
 const HNSW_EXPANSION_ADD: usize = 128;
 const HNSW_EXPANSION_SEARCH: usize = 64;
 const HNSW_OVERSAMPLE_FACTOR: usize = 4;
+const RERANK_OVERSAMPLE_FACTOR: usize = 3;
 
-const SEMANTIC_WEIGHT: f32 = 0.7;
-const KEYWORD_WEIGHT: f32 = 0.2;
-const RECENCY_WEIGHT: f32 = 0.1;
+const SEMANTIC_WEIGHT: f32 = 0.60;
+const BM25_WEIGHT: f32 = 0.25;
+const KEYWORD_WEIGHT: f32 = 0.10;
+const RECENCY_WEIGHT: f32 = 0.05;
 const RECENCY_HALF_LIFE_HOURS: f32 = 48.0;
 
 pub struct SearchOptions {
@@ -29,15 +32,34 @@ pub struct SearchOptions {
     pub include_context: bool,
     pub glob: Vec<String>,
     pub filters: Vec<String>,
+    pub rerank: bool,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            limit: 10,
+            include_context: false,
+            glob: vec![],
+            filters: vec![],
+            rerank: false,
+        }
+    }
 }
 
 pub struct SearchEngine {
     embedder: Arc<dyn BatchEmbedder>,
+    reranker: Option<Arc<dyn Reranker>>,
 }
 
 impl SearchEngine {
     pub fn new(embedder: Arc<dyn BatchEmbedder>) -> Self {
-        Self { embedder }
+        Self { embedder, reranker: None }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_reranker(embedder: Arc<dyn BatchEmbedder>, reranker: Arc<dyn Reranker>) -> Self {
+        Self { embedder, reranker: Some(reranker) }
     }
 
     pub fn search(
@@ -97,20 +119,32 @@ impl SearchEngine {
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
+        let fetch_limit = if options.rerank && self.reranker.is_some() {
+            limit * RERANK_OVERSAMPLE_FACTOR
+        } else {
+            limit
+        };
         let globset = fts::build_globset(&options.glob);
+
+        // Build BM25 index
+        let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
+        let bm25_index = fts::Bm25Index::build(&doc_texts);
 
         let mut matches: Vec<SearchResult> = index
             .chunks
             .iter()
             .zip(&index.vectors)
-            .filter(|(chunk, _)| fts::glob_matches(globset.as_ref(), &chunk.path))
-            .filter(|(chunk, _)| fts::matches_filters(&options.filters, chunk))
-            .map(|(chunk, vector)| {
-                self.score_chunk(chunk, vector, &query_vec, &keywords, options.include_context)
+            .enumerate()
+            .filter(|(_, (chunk, _))| fts::glob_matches(globset.as_ref(), &chunk.path))
+            .filter(|(_, (chunk, _))| fts::matches_filters(&options.filters, chunk))
+            .map(|(idx, (chunk, vector))| {
+                let bm25_score = bm25_index.score(query, idx);
+                self.score_chunk(chunk, vector, &query_vec, &keywords, bm25_score, options.include_context)
             })
             .collect();
 
-        select_top_k(&mut matches, limit);
+        select_top_k(&mut matches, fetch_limit);
+        let matches = self.maybe_rerank(query, matches, &options);
         Ok(matches)
     }
 
@@ -123,26 +157,38 @@ impl SearchEngine {
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
+        let fetch_limit = if options.rerank && self.reranker.is_some() {
+            limit * RERANK_OVERSAMPLE_FACTOR
+        } else {
+            limit
+        };
+
+        // Build BM25 index
+        let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
+        let bm25_index = fts::Bm25Index::build(&doc_texts);
 
         let query_binary = quantize_to_binary(&query_vec);
         let index_binary: Vec<Vec<u64>> = index.vectors.iter().map(|v| quantize_to_binary(v)).collect();
-        let shortlist_size = (limit * BINARY_SHORTLIST_FACTOR).min(index.vectors.len());
+        let shortlist_size = (fetch_limit * BINARY_SHORTLIST_FACTOR).min(index.vectors.len());
         let candidates = binary_shortlist(&query_binary, &index_binary, shortlist_size);
 
         let mut matches: Vec<SearchResult> = candidates
             .into_iter()
             .map(|idx| {
+                let bm25_score = bm25_index.score(query, idx);
                 self.score_chunk(
                     &index.chunks[idx],
                     &index.vectors[idx],
                     &query_vec,
                     &keywords,
+                    bm25_score,
                     options.include_context,
                 )
             })
             .collect();
 
-        select_top_k(&mut matches, limit);
+        select_top_k(&mut matches, fetch_limit);
+        let matches = self.maybe_rerank(query, matches, &options);
         Ok(matches)
     }
 
@@ -155,6 +201,15 @@ impl SearchEngine {
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
+        let fetch_limit = if options.rerank && self.reranker.is_some() {
+            limit * RERANK_OVERSAMPLE_FACTOR
+        } else {
+            limit
+        };
+
+        // Build BM25 index
+        let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
+        let bm25_index = fts::Bm25Index::build(&doc_texts);
 
         let hnsw = self.build_hnsw_index(index.metadata.vector_dim, index.vectors.len())?;
         for (i, vector) in index.vectors.iter().enumerate() {
@@ -162,7 +217,7 @@ impl SearchEngine {
                 .map_err(|e| anyhow::anyhow!("HNSW add failed: {}", e))?;
         }
 
-        let candidates = self.search_hnsw_candidates(&hnsw, &query_vec, limit, index.vectors.len())?;
+        let candidates = self.search_hnsw_candidates(&hnsw, &query_vec, fetch_limit, index.vectors.len())?;
 
         let mut matches: Vec<SearchResult> = candidates
             .into_iter()
@@ -170,18 +225,21 @@ impl SearchEngine {
                 if idx >= index.chunks.len() {
                     return None;
                 }
+                let bm25_score = bm25_index.score(query, idx);
                 Some(self.score_chunk(
                     &index.chunks[idx],
                     &index.vectors[idx],
                     &query_vec,
                     &keywords,
+                    bm25_score,
                     options.include_context,
                 ))
             })
             .collect();
 
         sort_by_score(&mut matches);
-        matches.truncate(limit);
+        matches.truncate(fetch_limit);
+        let matches = self.maybe_rerank(query, matches, &options);
         Ok(matches)
     }
 
@@ -194,7 +252,16 @@ impl SearchEngine {
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
+        let fetch_limit = if options.rerank && self.reranker.is_some() {
+            limit * RERANK_OVERSAMPLE_FACTOR
+        } else {
+            limit
+        };
         let globset = fts::build_globset(&options.glob);
+
+        // Build BM25 index
+        let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
+        let bm25_index = fts::Bm25Index::build(&doc_texts);
 
         let mut matches: Vec<SearchResult> = (0..index.len())
             .filter_map(|i| {
@@ -206,11 +273,13 @@ impl SearchEngine {
                     return None;
                 }
                 let vector = index.get_vector(i);
-                Some(self.score_chunk(chunk, vector, &query_vec, &keywords, options.include_context))
+                let bm25_score = bm25_index.score(query, i);
+                Some(self.score_chunk(chunk, vector, &query_vec, &keywords, bm25_score, options.include_context))
             })
             .collect();
 
-        select_top_k(&mut matches, limit);
+        select_top_k(&mut matches, fetch_limit);
+        let matches = self.maybe_rerank(query, matches, &options);
         Ok(matches)
     }
 
@@ -223,6 +292,15 @@ impl SearchEngine {
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
+        let fetch_limit = if options.rerank && self.reranker.is_some() {
+            limit * RERANK_OVERSAMPLE_FACTOR
+        } else {
+            limit
+        };
+
+        // Build BM25 index
+        let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
+        let bm25_index = fts::Bm25Index::build(&doc_texts);
 
         let hnsw = self.build_hnsw_index(index.metadata.vector_dim, index.len())?;
         for i in 0..index.len() {
@@ -230,7 +308,7 @@ impl SearchEngine {
                 .map_err(|e| anyhow::anyhow!("HNSW add failed: {}", e))?;
         }
 
-        let candidates = self.search_hnsw_candidates(&hnsw, &query_vec, limit, index.len())?;
+        let candidates = self.search_hnsw_candidates(&hnsw, &query_vec, fetch_limit, index.len())?;
 
         let mut matches: Vec<SearchResult> = candidates
             .into_iter()
@@ -238,18 +316,21 @@ impl SearchEngine {
                 if idx >= index.len() {
                     return None;
                 }
+                let bm25_score = bm25_index.score(query, idx);
                 Some(self.score_chunk(
                     &index.chunks[idx],
                     index.get_vector(idx),
                     &query_vec,
                     &keywords,
+                    bm25_score,
                     options.include_context,
                 ))
             })
             .collect();
 
         sort_by_score(&mut matches);
-        matches.truncate(limit);
+        matches.truncate(fetch_limit);
+        let matches = self.maybe_rerank(query, matches, &options);
         Ok(matches)
     }
 
@@ -262,7 +343,16 @@ impl SearchEngine {
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
-        let shortlist_size = (limit * BINARY_SHORTLIST_FACTOR).min(index.len());
+        let fetch_limit = if options.rerank && self.reranker.is_some() {
+            limit * RERANK_OVERSAMPLE_FACTOR
+        } else {
+            limit
+        };
+        let shortlist_size = (fetch_limit * BINARY_SHORTLIST_FACTOR).min(index.len());
+
+        // Build BM25 index
+        let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
+        let bm25_index = fts::Bm25Index::build(&doc_texts);
 
         let query_binary = quantize_to_binary(&query_vec);
 
@@ -279,17 +369,20 @@ impl SearchEngine {
         let mut matches: Vec<SearchResult> = candidates
             .into_iter()
             .map(|idx| {
+                let bm25_score = bm25_index.score(query, idx);
                 self.score_chunk(
                     &index.chunks[idx],
                     index.get_vector(idx),
                     &query_vec,
                     &keywords,
+                    bm25_score,
                     options.include_context,
                 )
             })
             .collect();
 
-        select_top_k(&mut matches, limit);
+        select_top_k(&mut matches, fetch_limit);
+        let matches = self.maybe_rerank(query, matches, &options);
         Ok(matches)
     }
 
@@ -331,19 +424,83 @@ impl SearchEngine {
         vector: &[f32],
         query_vec: &[f32],
         keywords: &[String],
+        bm25_score: f32,
         include_context: bool,
     ) -> SearchResult {
         let semantic = cosine_similarity(query_vec, vector);
         let keyword = fts::keyword_score(keywords, &chunk.text, &chunk.path);
         let recency = recency_boost(chunk);
-        let score = SEMANTIC_WEIGHT * semantic + KEYWORD_WEIGHT * keyword + RECENCY_WEIGHT * recency;
+
+        // Normalize BM25 score (typical range 0-10) to 0-1 range
+        let bm25_normalized = (bm25_score / 10.0).min(1.0);
+
+        let score = SEMANTIC_WEIGHT * semantic
+                  + BM25_WEIGHT * bm25_normalized
+                  + KEYWORD_WEIGHT * keyword
+                  + RECENCY_WEIGHT * recency;
 
         SearchResult {
             chunk: chunk.clone(),
             score,
             semantic_score: semantic,
+            bm25_score,
             keyword_score: keyword,
             show_full_context: include_context,
+        }
+    }
+
+    /// Apply reranking to results if enabled and reranker is available
+    fn maybe_rerank(
+        &self,
+        query: &str,
+        results: Vec<SearchResult>,
+        options: &SearchOptions,
+    ) -> Vec<SearchResult> {
+        // Skip reranking if not enabled or no reranker available
+        if !options.rerank {
+            return results;
+        }
+
+        let reranker = match &self.reranker {
+            Some(r) => r,
+            None => return results,
+        };
+
+        // Skip if too few results
+        if results.len() <= 1 {
+            return results;
+        }
+
+        // Extract document texts for reranking
+        let docs: Vec<&str> = results.iter().map(|r| r.chunk.text.as_str()).collect();
+
+        // Rerank and reorder results
+        match reranker.rerank(query, &docs) {
+            Ok(reranked) => {
+                let mut reordered: Vec<SearchResult> = reranked
+                    .into_iter()
+                    .filter_map(|(idx, rerank_score)| {
+                        if idx < results.len() {
+                            let mut result = results[idx].clone();
+                            // Blend rerank score with original score (rerank has higher weight)
+                            result.score = 0.3 * result.score + 0.7 * rerank_score;
+                            Some(result)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                // Ensure results are sorted by the new blended score
+                reordered.sort_by(|a, b| {
+                    b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                // Truncate to original limit
+                reordered.truncate(options.limit);
+                reordered
+            }
+            Err(_) => results, // Fall back to original results on error
         }
     }
 }
@@ -353,6 +510,7 @@ pub struct SearchResult {
     pub chunk: CodeChunk,
     pub score: f32,
     pub semantic_score: f32,
+    pub bm25_score: f32,
     pub keyword_score: f32,
     pub show_full_context: bool,
 }
@@ -548,7 +706,7 @@ mod tests {
         let results = engine.search(
             &make_index(chunks, vectors),
             "function",
-            SearchOptions { limit: 2, include_context: false, glob: vec![], filters: vec![] },
+            SearchOptions { limit: 2, include_context: false, glob: vec![], filters: vec![], rerank: false },
         ).unwrap();
 
         assert_eq!(results.len(), 2);
@@ -575,6 +733,7 @@ mod tests {
                 include_context: false,
                 glob: vec!["src/**/*.rs".to_string()],
                 filters: vec![],
+                rerank: false,
             },
         ).unwrap();
 
@@ -603,6 +762,7 @@ mod tests {
                 include_context: false,
                 glob: vec![],
                 filters: vec!["lang=rust".to_string()],
+                rerank: false,
             },
         ).unwrap();
 
@@ -621,6 +781,7 @@ mod tests {
             chunk,
             score: 0.5,
             semantic_score: 0.5,
+            bm25_score: 0.0,
             keyword_score: 0.0,
             show_full_context: false,
         };
@@ -638,6 +799,7 @@ mod tests {
             chunk,
             score: 0.5,
             semantic_score: 0.5,
+            bm25_score: 0.0,
             keyword_score: 0.0,
             show_full_context: true,
         };
@@ -662,10 +824,10 @@ mod tests {
     fn select_top_k_returns_highest_scores() {
         let chunk = make_chunk("test", "rust", "test.rs");
         let mut matches = vec![
-            SearchResult { chunk: chunk.clone(), score: 0.3, semantic_score: 0.3, keyword_score: 0.0, show_full_context: false },
-            SearchResult { chunk: chunk.clone(), score: 0.9, semantic_score: 0.9, keyword_score: 0.0, show_full_context: false },
-            SearchResult { chunk: chunk.clone(), score: 0.6, semantic_score: 0.6, keyword_score: 0.0, show_full_context: false },
-            SearchResult { chunk: chunk.clone(), score: 0.1, semantic_score: 0.1, keyword_score: 0.0, show_full_context: false },
+            SearchResult { chunk: chunk.clone(), score: 0.3, semantic_score: 0.3, bm25_score: 0.0, keyword_score: 0.0, show_full_context: false },
+            SearchResult { chunk: chunk.clone(), score: 0.9, semantic_score: 0.9, bm25_score: 0.0, keyword_score: 0.0, show_full_context: false },
+            SearchResult { chunk: chunk.clone(), score: 0.6, semantic_score: 0.6, bm25_score: 0.0, keyword_score: 0.0, show_full_context: false },
+            SearchResult { chunk: chunk.clone(), score: 0.1, semantic_score: 0.1, bm25_score: 0.0, keyword_score: 0.0, show_full_context: false },
         ];
 
         select_top_k(&mut matches, 2);
@@ -690,7 +852,7 @@ mod tests {
         let results = engine.search(
             &make_index(chunks, vectors),
             "function",
-            SearchOptions { limit: 10, include_context: false, glob: vec![], filters: vec![] },
+            SearchOptions { limit: 10, include_context: false, glob: vec![], filters: vec![], rerank: false },
         ).unwrap();
 
         assert_eq!(results.len(), 10);
@@ -773,9 +935,95 @@ mod tests {
         let results = engine.search(
             &make_index(chunks, vectors),
             "function",
-            SearchOptions { limit: 10, include_context: false, glob: vec![], filters: vec![] },
+            SearchOptions { limit: 10, include_context: false, glob: vec![], filters: vec![], rerank: false },
         ).unwrap();
 
         assert_eq!(results.len(), 10);
+    }
+
+    #[test]
+    fn reranking_reorders_results_when_enabled() {
+        use crate::reranker::MockReranker;
+
+        let embedder = Arc::new(MockEmbedder);
+        let reranker = Arc::new(MockReranker);
+        let engine = SearchEngine::with_reranker(embedder.clone(), reranker);
+
+        // Create chunks with different lengths - MockReranker prefers longer documents
+        let chunks = vec![
+            make_chunk("short", "rust", "a.rs"),
+            make_chunk("this is a much longer document that should be preferred", "rust", "b.rs"),
+            make_chunk("medium length", "rust", "c.rs"),
+        ];
+        let vectors: Vec<Vec<f32>> = chunks.iter()
+            .map(|c| embedder.embed(&c.text).unwrap())
+            .collect();
+
+        let results = engine.search(
+            &make_index(chunks, vectors),
+            "query",
+            SearchOptions { limit: 3, include_context: false, glob: vec![], filters: vec![], rerank: true },
+        ).unwrap();
+
+        // MockReranker prefers longer documents, so the longest should be first
+        assert_eq!(results.len(), 3);
+        assert!(results[0].chunk.text.contains("much longer"));
+    }
+
+    #[test]
+    fn reranking_skipped_when_disabled() {
+        use crate::reranker::MockReranker;
+
+        let embedder = Arc::new(MockEmbedder);
+        let reranker = Arc::new(MockReranker);
+        let engine = SearchEngine::with_reranker(embedder.clone(), reranker);
+
+        let chunks = vec![
+            make_chunk("fn foo() {}", "rust", "a.rs"),
+            make_chunk("fn bar() {}", "rust", "b.rs"),
+        ];
+        let vectors: Vec<Vec<f32>> = chunks.iter()
+            .map(|c| embedder.embed(&c.text).unwrap())
+            .collect();
+
+        // Search with rerank: false
+        let results = engine.search(
+            &make_index(chunks, vectors),
+            "function",
+            SearchOptions { limit: 2, include_context: false, glob: vec![], filters: vec![], rerank: false },
+        ).unwrap();
+
+        assert_eq!(results.len(), 2);
+        // Results should be in semantic score order, not reranked
+    }
+
+    #[test]
+    fn reranking_skipped_without_reranker() {
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder.clone()); // No reranker
+
+        let chunks = vec![
+            make_chunk("fn foo() {}", "rust", "a.rs"),
+            make_chunk("fn bar() {}", "rust", "b.rs"),
+        ];
+        let vectors: Vec<Vec<f32>> = chunks.iter()
+            .map(|c| embedder.embed(&c.text).unwrap())
+            .collect();
+
+        // Even with rerank: true, should work without panicking
+        let results = engine.search(
+            &make_index(chunks, vectors),
+            "function",
+            SearchOptions { limit: 2, include_context: false, glob: vec![], filters: vec![], rerank: true },
+        ).unwrap();
+
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn search_options_default_has_rerank_disabled() {
+        let options = SearchOptions::default();
+        assert!(!options.rerank);
+        assert_eq!(options.limit, 10);
     }
 }

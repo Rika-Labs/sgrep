@@ -7,6 +7,7 @@ mod embedding;
 mod fts;
 mod indexer;
 mod output;
+mod reranker;
 mod search;
 mod store;
 mod watch;

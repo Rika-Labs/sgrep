@@ -154,6 +154,7 @@ fn handle_search(
                     include_context: context,
                     glob,
                     filters,
+                    rerank: false,
                 },
             )?;
             let elapsed = start.elapsed();
@@ -172,6 +173,7 @@ fn handle_search(
             include_context: context,
             glob,
             filters,
+            rerank: false,
         },
     )?;
     let elapsed = start.elapsed();
@@ -509,6 +511,7 @@ mod tests {
             chunk,
             score: 0.5,
             semantic_score: 0.4,
+            bm25_score: 0.0,
             keyword_score: 0.1,
             show_full_context: false,
         };
@@ -541,6 +544,7 @@ mod tests {
             chunk,
             score: 0.9,
             semantic_score: 0.8,
+            bm25_score: 0.0,
             keyword_score: 0.1,
             show_full_context: false,
         };
