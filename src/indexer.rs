@@ -759,9 +759,11 @@ fn collect_files(root: &Path) -> Vec<PathBuf> {
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
+        .require_git(false)
+        .parents(true)
         .follow_links(false)
         .add_custom_ignore_filename(".sgrepignore")
-        .threads(num_cpus::get().min(8)) // Parallel walk with up to 8 threads
+        .threads(num_cpus::get().min(8))
         .build_parallel()
         .run(|| {
             let files = Arc::clone(&files);
@@ -893,8 +895,8 @@ fn determine_batch_size(override_val: Option<usize>) -> usize {
         .to_lowercase()
         .as_str()
     {
-        "cuda" | "coreml" => 512,
-        _ => 256,
+        "cuda" | "coreml" => 256,
+        _ => 64,
     }
 }
 
@@ -927,7 +929,7 @@ fn determine_embed_timeout() -> Duration {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(45))
+        .unwrap_or_else(|| Duration::from_secs(120))
 }
 
 fn embed_batch_with_timeout(
@@ -1112,6 +1114,58 @@ mod tests {
             file_names
         );
         assert!(file_names.contains(&"visible.txt".to_string()));
+
+        fs::remove_dir_all(&test_repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn collect_files_respects_root_prefixed_gitignore() {
+        let test_repo = create_test_repo();
+
+        std::process::Command::new("git")
+            .args(&["init"])
+            .current_dir(&test_repo)
+            .output()
+            .ok();
+
+        fs::write(test_repo.join(".gitignore"), "/node_modules\n/dist\n.vercel\n").unwrap();
+
+        let node_modules = test_repo.join("node_modules");
+        fs::create_dir_all(&node_modules).unwrap();
+        fs::write(node_modules.join("dep.js"), "module.exports = {}").unwrap();
+
+        let dist = test_repo.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(dist.join("bundle.js"), "bundled").unwrap();
+
+        let vercel = test_repo.join(".vercel");
+        fs::create_dir_all(&vercel).unwrap();
+        fs::write(vercel.join("output.js"), "output").unwrap();
+
+        fs::write(test_repo.join("src.js"), "real code").unwrap();
+
+        let files = collect_files(&test_repo);
+        let file_names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
+            .collect();
+
+        eprintln!("Collected files: {:?}", file_names);
+
+        assert!(
+            !file_names.contains(&"dep.js".to_string()),
+            "node_modules/dep.js should be ignored"
+        );
+        assert!(
+            !file_names.contains(&"bundle.js".to_string()),
+            "dist/bundle.js should be ignored"
+        );
+        assert!(
+            !file_names.contains(&"output.js".to_string()),
+            ".vercel/output.js should be ignored"
+        );
+        assert!(file_names.contains(&"src.js".to_string()));
 
         fs::remove_dir_all(&test_repo).ok();
     }
@@ -1725,9 +1779,9 @@ mod tests {
     #[serial]
     fn determine_batch_size_respects_device_env() {
         env::set_var("SGREP_DEVICE", "coreml");
-        assert_eq!(determine_batch_size(None), 512);
+        assert_eq!(determine_batch_size(None), 256);
         env::set_var("SGREP_DEVICE", "cuda");
-        assert_eq!(determine_batch_size(None), 512);
+        assert_eq!(determine_batch_size(None), 256);
         env::remove_var("SGREP_DEVICE");
     }
 
