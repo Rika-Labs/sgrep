@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -45,7 +46,13 @@ impl IndexStore {
     pub fn save(&self, index: &RepositoryIndex) -> Result<()> {
         let path = self.root.join(INDEX_FILE);
         let bytes = bincode::serialize(index)?;
-        let compressed = zstd::stream::encode_all(bytes.as_slice(), 3)?;
+
+        // Use parallel compression for faster writes
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3)?;
+        encoder.multithread(num_cpus::get() as u32)?;
+        encoder.write_all(&bytes)?;
+        let compressed = encoder.finish()?;
+
         fs::write(&path, compressed)?;
         Ok(())
     }

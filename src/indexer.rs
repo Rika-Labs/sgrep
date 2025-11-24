@@ -747,8 +747,8 @@ fn determine_batch_size(override_val: Option<usize>) -> usize {
         .to_lowercase()
         .as_str()
     {
-        "cuda" | "coreml" => 512,
-        _ => 256,
+        "cuda" | "coreml" => 2048,
+        _ => 512,
     }
 }
 

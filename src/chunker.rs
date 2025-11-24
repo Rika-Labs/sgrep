@@ -42,9 +42,20 @@ pub fn chunk_file(path: &Path, repo_root: &Path) -> Result<Vec<CodeChunk>> {
         .unwrap_or_else(|_| SystemTime::now());
     let modified_at: DateTime<Utc> = modified.into();
 
-    let mut parser = Parser::new();
-    let mut chunks = if let Some(lang_kind) = language {
+    let label = language.as_ref().map(|k| k.label()).unwrap_or("plain");
+
+    // Fast-path: skip tree-sitter for simple/data files
+    let is_simple_file = matches!(
+        label,
+        "json" | "yaml" | "toml" | "markdown" | "css" | "html"
+    );
+
+    let mut chunks = if is_simple_file {
+        // Use line-based chunking directly for simple files
+        chunk_fallback(&source, &relative, label, modified_at)
+    } else if let Some(lang_kind) = language {
         let label = lang_kind.label().to_string();
+        let mut parser = Parser::new();
         if let Some(lang) = lang_kind.language() {
             parser.set_language(&lang).ok();
             if let Some(tree) = parser.parse(&source, None) {
