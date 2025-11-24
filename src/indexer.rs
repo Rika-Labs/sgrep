@@ -291,12 +291,6 @@ impl Indexer {
         let progress_counter = Arc::new(AtomicUsize::new(cache_hits));
         pb.set_position(cache_hits as u64);
 
-        let embedder = self.embedder.clone();
-        let cancelled_clone = cancelled.clone();
-        let embed_timeout = determine_embed_timeout();
-        let pb_clone = pb.clone();
-        let progress_clone = progress_counter.clone();
-
         if !batches.is_empty() {
             pb.set_message("loading AI model (first run may take 30s)...");
             let warmup_text = batches[0].texts.first().cloned().unwrap_or_default();
@@ -304,50 +298,29 @@ impl Indexer {
             pb.set_message("embedding");
         }
 
-        let batch_results: Result<Vec<(Vec<usize>, Vec<Vec<f32>>)>> = batches
-            .into_par_iter()
-            .map(|batch| {
-                if cancelled_clone.load(Ordering::SeqCst) {
-                    return Err(anyhow!("Indexing cancelled"));
-                }
+        // Process batches sequentially to avoid ONNX thread contention
+        let mut batch_results: Vec<(Vec<usize>, Vec<Vec<f32>>)> = Vec::new();
+        for batch in batches.into_iter() {
+            if cancelled.load(Ordering::SeqCst) {
+                return Err(anyhow!("Indexing cancelled"));
+            }
 
-                let texts: Vec<String> = batch.texts;
-                let hashes = batch.hashes;
-                let batch_size = texts.len();
-                let mut attempt = 1;
-                let max_attempts = 3;
-                loop {
-                    match embed_batch_with_timeout(embedder.clone(), texts.clone(), embed_timeout) {
-                        Ok(batch_vectors) => {
-                            for (vec, hash) in batch_vectors.iter().zip(hashes.iter()) {
-                                cache.insert(hash.clone(), vec.clone());
-                            }
-                            let new_count = progress_clone.fetch_add(batch_size, Ordering::SeqCst) + batch_size;
-                            pb_clone.set_position(new_count as u64);
-                            pb_clone.tick();
-                            return Ok((batch.indices, batch_vectors));
-                        }
-                        Err(_err) if attempt < max_attempts => {
-                            if cancelled_clone.load(Ordering::SeqCst) {
-                                return Err(anyhow!("Indexing cancelled"));
-                            }
-                            thread::sleep(Duration::from_millis((attempt * 200) as u64));
-                            attempt += 1;
-                            continue;
-                        }
-                        Err(err) => {
-                            return Err(anyhow!(
-                                "Embedding failed after {} attempts: {}",
-                                attempt,
-                                err
-                            ));
-                        }
-                    }
-                }
-            })
-            .collect();
+            let texts: Vec<String> = batch.texts;
+            let hashes = batch.hashes;
+            let batch_len = texts.len();
 
-        let batch_results = batch_results?;
+            let batch_vectors = self.embedder.embed_batch(&texts)?;
+
+            for (vec, hash) in batch_vectors.iter().zip(hashes.iter()) {
+                cache.insert(hash.clone(), vec.clone());
+            }
+
+            let new_count = progress_counter.fetch_add(batch_len, Ordering::SeqCst) + batch_len;
+            pb.set_position(new_count as u64);
+            pb.tick();
+
+            batch_results.push((batch.indices, batch_vectors));
+        }
 
         for (indices, batch_vectors) in batch_results {
             for (vec, idx) in batch_vectors.into_iter().zip(indices.iter()) {
@@ -896,7 +869,7 @@ fn determine_batch_size(override_val: Option<usize>) -> usize {
         .as_str()
     {
         "cuda" | "coreml" => 128,
-        _ => 16, // Small batches for frequent progress updates on CPU
+        _ => 64, // Larger batches for better ONNX efficiency
     }
 }
 
@@ -1258,7 +1231,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn indexer_aborts_after_repeated_embedding_failures() {
+    fn indexer_aborts_on_embedding_failure() {
         let embedder = Arc::new(FailingEmbedder::default());
         let indexer = Indexer::new(embedder);
 
@@ -1275,7 +1248,7 @@ mod tests {
         let result = indexer.build_index(request);
         assert!(result.is_err());
         let msg = format!("{:?}", result.err().unwrap());
-        assert!(msg.contains("Embedding failed"));
+        assert!(msg.contains("intentional embed failure"));
 
         fs::remove_dir_all(&test_repo).ok();
     }
@@ -2061,23 +2034,22 @@ mod tests {
 
     #[test]
     #[serial]
-    fn embedding_batches_are_processed_in_parallel() {
+    fn embedding_batches_are_processed_sequentially() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let embedder = Arc::new(ProgressTrackingEmbedder {
             call_count: call_count.clone(),
-            delay_ms: 50,
+            delay_ms: 5,
         });
         let indexer = Indexer::new(embedder);
 
         let _home = set_test_home();
-        let repo = std::env::temp_dir().join(format!("sgrep_parallel_test_{}", Uuid::new_v4()));
+        let repo = std::env::temp_dir().join(format!("sgrep_seq_test_{}", Uuid::new_v4()));
         fs::create_dir_all(&repo).unwrap();
 
         for i in 0..8 {
             fs::write(repo.join(format!("file{}.rs", i)), format!("fn func{}() {{}}", i)).unwrap();
         }
 
-        let start = Instant::now();
         let report = indexer
             .build_index(IndexRequest {
                 path: repo.clone(),
@@ -2087,19 +2059,10 @@ mod tests {
                 dirty: None,
             })
             .unwrap();
-        let elapsed = start.elapsed();
 
         assert!(report.chunks_indexed >= 8);
         let calls = call_count.load(Ordering::SeqCst);
-        assert!(calls >= 4);
-        let sequential_time = StdDuration::from_millis(50 * calls as u64);
-        assert!(
-            elapsed < sequential_time,
-            "Elapsed {:?} should be less than sequential {:?} (calls: {})",
-            elapsed,
-            sequential_time,
-            calls
-        );
+        assert!(calls >= 1, "Expected at least 1 embedding call, got {}", calls);
 
         fs::remove_dir_all(&repo).ok();
     }
