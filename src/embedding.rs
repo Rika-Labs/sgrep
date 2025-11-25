@@ -19,18 +19,32 @@ use once_cell::sync::Lazy;
 #[cfg(not(test))]
 use std::io::Write;
 
+use crate::config::{Config, EmbeddingProviderType};
+
 #[cfg(not(test))]
 const MXBAI_MODEL_NAME: &str = "mxbai-embed-xsmall-v1";
 #[cfg(not(test))]
-const MXBAI_BASE_URL: &str = "https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/resolve/main";
+const MXBAI_BASE_URL: &str =
+    "https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/resolve/main";
 use ort::execution_providers::{
     CPUExecutionProvider, CUDAExecutionProvider, CoreMLExecutionProvider, ExecutionProviderDispatch,
 };
 use tracing::warn;
 
 #[cfg(not(test))]
-const DEFAULT_MAX_CACHE: u64 = 50_000;
+const DEFAULT_MAX_CACHE: u64 = 100_000;
 pub const DEFAULT_VECTOR_DIM: usize = 384;
+
+/// Voyage Code 3 embedding dimension
+pub const VOYAGE_VECTOR_DIM: usize = 1024;
+
+/// Voyage API endpoint
+#[cfg(not(test))]
+const VOYAGE_API_URL: &str = "https://api.voyageai.com/v1/embeddings";
+
+/// Voyage model for code embeddings
+#[cfg(not(test))]
+const VOYAGE_MODEL: &str = "voyage-code-3";
 
 /// Minimal interface so the indexer can be tested with stub embedders.
 pub trait BatchEmbedder: Send + Sync {
@@ -135,8 +149,11 @@ impl Embedder {
                 .unwrap_or(120),
         );
 
-        let model = init_model_with_timeout(execution_providers, show_download_progress, init_timeout)
-            .expect("Failed to initialize embedding model (try increasing SGREP_INIT_TIMEOUT_SECS)");
+        let model =
+            init_model_with_timeout(execution_providers, show_download_progress, init_timeout)
+                .expect(
+                    "Failed to initialize embedding model (try increasing SGREP_INIT_TIMEOUT_SECS)",
+                );
         drop(_cache_guard);
 
         Self {
@@ -261,7 +278,9 @@ impl PooledEmbedder {
                 show_progress && i == 0,
                 init_timeout,
             )
-            .expect("Failed to initialize embedding model (try increasing SGREP_INIT_TIMEOUT_SECS)");
+            .expect(
+                "Failed to initialize embedding model (try increasing SGREP_INIT_TIMEOUT_SECS)",
+            );
             drop(_cache_guard);
 
             let embedder = Embedder {
@@ -409,7 +428,9 @@ fn dirs_next_best_cache() -> PathBuf {
 }
 
 fn optimized_cpu_provider() -> ExecutionProviderDispatch {
-    CPUExecutionProvider::default().with_arena_allocator(true).into()
+    CPUExecutionProvider::default()
+        .with_arena_allocator(true)
+        .into()
 }
 
 #[cfg(not(test))]
@@ -430,7 +451,10 @@ fn download_file(url: &str, path: &Path, show_progress: bool) -> Result<()> {
     }
 
     if show_progress {
-        eprintln!("Downloading {}...", path.file_name().unwrap_or_default().to_string_lossy());
+        eprintln!(
+            "Downloading {}...",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
     }
 
     let response = ureq::get(url)
@@ -482,8 +506,8 @@ fn load_mxbai_model(show_download_progress: bool) -> Result<UserDefinedEmbedding
         show_download_progress,
     )?;
 
-    let onnx_file = fs::read(&onnx_path)
-        .with_context(|| format!("Failed to read {}", onnx_path.display()))?;
+    let onnx_file =
+        fs::read(&onnx_path).with_context(|| format!("Failed to read {}", onnx_path.display()))?;
     let tokenizer_file = fs::read(&tokenizer_path)
         .with_context(|| format!("Failed to read {}", tokenizer_path.display()))?;
     let config_file = fs::read(&config_path)
@@ -521,8 +545,7 @@ fn init_model_with_timeout(
             let _ = show_download_progress;
             TextEmbedding::try_new_from_user_defined(
                 model_data,
-                InitOptionsUserDefined::default()
-                    .with_execution_providers(execution_providers),
+                InitOptionsUserDefined::default().with_execution_providers(execution_providers),
             )
             .map_err(|e| anyhow!("{}", e))
         })();
@@ -552,8 +575,14 @@ pub(crate) fn select_execution_providers() -> Vec<ExecutionProviderDispatch> {
 
     match device.as_str() {
         "cpu" => vec![optimized_cpu_provider()],
-        "coreml" => vec![CoreMLExecutionProvider::default().into(), optimized_cpu_provider()],
-        "cuda" => vec![CUDAExecutionProvider::default().into(), optimized_cpu_provider()],
+        "coreml" => vec![
+            CoreMLExecutionProvider::default().into(),
+            optimized_cpu_provider(),
+        ],
+        "cuda" => vec![
+            CUDAExecutionProvider::default().into(),
+            optimized_cpu_provider(),
+        ],
         _ => auto_detect_providers(),
     }
 }
@@ -564,7 +593,10 @@ fn auto_detect_providers() -> Vec<ExecutionProviderDispatch> {
     // overhead (30-120s) that makes it slower for typical use cases.
     // Users can override with SGREP_DEVICE=coreml or SGREP_DEVICE=cuda if desired.
     if has_nvidia_gpu() {
-        return vec![CUDAExecutionProvider::default().into(), optimized_cpu_provider()];
+        return vec![
+            CUDAExecutionProvider::default().into(),
+            optimized_cpu_provider(),
+        ];
     }
 
     vec![optimized_cpu_provider()]
@@ -577,7 +609,7 @@ fn configure_onnx_threading() {
 
     // Use physical cores only (half of logical cores on hyperthreaded systems)
     // Cap at 8 threads to avoid diminishing returns and thread contention
-    let optimal_threads = (parallelism / 2).max(2).min(8);
+    let optimal_threads = (parallelism / 2).clamp(2, 8);
 
     if env::var_os("ORT_NUM_THREADS").is_none() {
         env::set_var("ORT_NUM_THREADS", optimal_threads.to_string());
@@ -617,6 +649,258 @@ fn has_nvidia_gpu() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(not(test))]
+const VOYAGE_TPM_LIMIT: usize = 10_000;
+#[cfg(not(test))]
+const VOYAGE_RPM_LIMIT: usize = 3;
+#[cfg(not(test))]
+const VOYAGE_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+
+#[cfg(not(test))]
+pub struct VoyageProvider {
+    api_key: String,
+    cache: Cache<String, Arc<Vec<f32>>>,
+    request_times: Arc<Mutex<Vec<std::time::Instant>>>,
+    tokens_used: Arc<Mutex<Vec<(std::time::Instant, usize)>>>,
+}
+
+#[cfg(not(test))]
+impl Clone for VoyageProvider {
+    fn clone(&self) -> Self {
+        Self {
+            api_key: self.api_key.clone(),
+            cache: self.cache.clone(),
+            request_times: self.request_times.clone(),
+            tokens_used: self.tokens_used.clone(),
+        }
+    }
+}
+
+#[cfg(not(test))]
+impl VoyageProvider {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            api_key,
+            cache: Cache::builder().max_capacity(DEFAULT_MAX_CACHE).build(),
+            request_times: Arc::new(Mutex::new(Vec::new())),
+            tokens_used: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn estimate_tokens(text: &str) -> usize {
+        (text.len() / 4).max(1)
+    }
+
+    fn wait_for_rate_limit(&self, estimated_tokens: usize) {
+        loop {
+            let now = std::time::Instant::now();
+            let cutoff = now - VOYAGE_RATE_LIMIT_WINDOW;
+
+            {
+                let mut times = self.request_times.lock().unwrap();
+                times.retain(|t| *t > cutoff);
+
+                let mut tokens = self.tokens_used.lock().unwrap();
+                tokens.retain(|(t, _)| *t > cutoff);
+
+                let total_tokens: usize = tokens.iter().map(|(_, t)| *t).sum();
+
+                if times.len() < VOYAGE_RPM_LIMIT
+                    && total_tokens + estimated_tokens <= VOYAGE_TPM_LIMIT
+                {
+                    times.push(now);
+                    tokens.push((now, estimated_tokens));
+                    return;
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    fn call_api(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        use std::io::Read;
+
+        let estimated_tokens: usize = texts.iter().map(|t| Self::estimate_tokens(t)).sum();
+        self.wait_for_rate_limit(estimated_tokens);
+
+        let request_body = serde_json::json!({
+            "model": VOYAGE_MODEL,
+            "input": texts,
+            "input_type": "document"
+        });
+
+        let response = ureq::post(VOYAGE_API_URL)
+            .set("Authorization", &format!("Bearer {}", self.api_key))
+            .set("Content-Type", "application/json")
+            .send_json(&request_body)
+            .map_err(|e| anyhow!("Voyage API request failed: {}", e))?;
+
+        let mut body = String::new();
+        response.into_reader().read_to_string(&mut body)?;
+
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .with_context(|| format!("Failed to parse Voyage API response: {}", body))?;
+
+        let data = json
+            .get("data")
+            .ok_or_else(|| anyhow!("Voyage API response missing 'data' field"))?
+            .as_array()
+            .ok_or_else(|| anyhow!("Voyage API 'data' field is not an array"))?;
+
+        let mut embeddings = Vec::with_capacity(data.len());
+        for item in data {
+            let embedding = item
+                .get("embedding")
+                .ok_or_else(|| anyhow!("Voyage API response item missing 'embedding' field"))?
+                .as_array()
+                .ok_or_else(|| anyhow!("Voyage API 'embedding' field is not an array"))?
+                .iter()
+                .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                .collect::<Vec<f32>>();
+            embeddings.push(embedding);
+        }
+
+        Ok(embeddings)
+    }
+}
+
+#[cfg(not(test))]
+impl BatchEmbedder for VoyageProvider {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        if let Some(vec) = self.cache.get(text) {
+            return Ok(vec.as_ref().clone());
+        }
+        let embeddings = self.call_api(&[text])?;
+        let vector = embeddings
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("No embedding returned from Voyage API"))?;
+        self.cache
+            .insert(text.to_string(), Arc::new(vector.clone()));
+        Ok(vector)
+    }
+
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let mut uncached = Vec::new();
+        let mut uncached_indices = Vec::new();
+        let mut results = vec![Vec::new(); texts.len()];
+
+        for (i, text) in texts.iter().enumerate() {
+            if let Some(vec) = self.cache.get(text) {
+                results[i] = vec.as_ref().clone();
+            } else {
+                uncached.push(text.as_str());
+                uncached_indices.push(i);
+            }
+        }
+
+        if !uncached.is_empty() {
+            const VOYAGE_BATCH_SIZE: usize = 128;
+
+            for chunk_start in (0..uncached.len()).step_by(VOYAGE_BATCH_SIZE) {
+                let chunk_end = (chunk_start + VOYAGE_BATCH_SIZE).min(uncached.len());
+                let chunk: Vec<&str> = uncached[chunk_start..chunk_end].to_vec();
+
+                let embeddings = self.call_api(&chunk)?;
+
+                for (i, embedding) in embeddings.into_iter().enumerate() {
+                    let original_idx = uncached_indices[chunk_start + i];
+                    results[original_idx] = embedding.clone();
+                    self.cache
+                        .insert(texts[original_idx].clone(), Arc::new(embedding));
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn dimension(&self) -> usize {
+        VOYAGE_VECTOR_DIM
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub struct VoyageProvider {
+    #[allow(dead_code)]
+    api_key: String,
+}
+
+#[cfg(test)]
+impl VoyageProvider {
+    pub fn new(api_key: String) -> Self {
+        Self { api_key }
+    }
+}
+
+#[cfg(test)]
+impl BatchEmbedder for VoyageProvider {
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|t| vec![t.len() as f32; VOYAGE_VECTOR_DIM])
+            .collect())
+    }
+
+    fn dimension(&self) -> usize {
+        VOYAGE_VECTOR_DIM
+    }
+}
+
+pub enum EmbedderVariant {
+    Local(PooledEmbedder),
+    Voyage(VoyageProvider),
+}
+
+impl Clone for EmbedderVariant {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Local(e) => Self::Local(e.clone()),
+            Self::Voyage(e) => Self::Voyage(e.clone()),
+        }
+    }
+}
+
+impl BatchEmbedder for EmbedderVariant {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        match self {
+            Self::Local(e) => e.embed(text),
+            Self::Voyage(e) => e.embed(text),
+        }
+    }
+
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        match self {
+            Self::Local(e) => e.embed_batch(texts),
+            Self::Voyage(e) => e.embed_batch(texts),
+        }
+    }
+
+    fn dimension(&self) -> usize {
+        match self {
+            Self::Local(e) => e.dimension(),
+            Self::Voyage(e) => e.dimension(),
+        }
+    }
+}
+
+pub fn create_embedder_from_config() -> Result<EmbedderVariant> {
+    let config = Config::load()?;
+
+    match config.embedding.provider {
+        EmbeddingProviderType::Local => Ok(EmbedderVariant::Local(PooledEmbedder::default())),
+        EmbeddingProviderType::Voyage => {
+            let api_key = config
+                .embedding
+                .api_key
+                .ok_or_else(|| anyhow!("Voyage provider requires an API key in config"))?;
+            Ok(EmbedderVariant::Voyage(VoyageProvider::new(api_key)))
+        }
+    }
 }
 
 #[cfg(test)]

@@ -80,6 +80,12 @@ pub enum Commands {
         )]
         batch_size: Option<usize>,
     },
+    /// Show or create configuration
+    Config {
+        /// Create a default config file if none exists
+        #[arg(long)]
+        init: bool,
+    },
 }
 
 pub fn resolve_repo_path(path: Option<PathBuf>) -> Result<PathBuf> {

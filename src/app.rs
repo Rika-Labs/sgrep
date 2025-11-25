@@ -10,7 +10,8 @@ use indicatif::HumanDuration;
 use tracing::{info, warn};
 
 use crate::cli::{resolve_repo_path, Cli, Commands};
-use crate::embedding::{self, Embedder, PooledEmbedder};
+use crate::config::{Config, EmbeddingProviderType};
+use crate::embedding::{self, create_embedder_from_config, Embedder, PooledEmbedder};
 use crate::output::JsonResponse;
 use crate::{indexer, search, store, watch};
 
@@ -21,6 +22,11 @@ pub fn run() -> Result<()> {
 }
 
 pub fn run_with_cli(cli: Cli) -> Result<()> {
+    // Handle config command early (doesn't need embedder)
+    if let Commands::Config { init } = &cli.command {
+        return handle_config(*init);
+    }
+
     let embedder = build_embedder(cli.offline, cli.device.clone())?;
 
     match cli.command {
@@ -44,6 +50,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             debounce_ms,
             batch_size,
         } => handle_watch(embedder, path, debounce_ms, batch_size),
+        Commands::Config { .. } => unreachable!(), // Handled above
     }
 }
 
@@ -63,17 +70,95 @@ fn build_embedder(
         env::set_var("SGREP_DEVICE", device);
     }
 
-    embedding::configure_offline_env(offline)?;
+    let config = Config::load()?;
 
-    let use_pooled = env::var("SGREP_USE_POOLED_EMBEDDER")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
+    match config.embedding.provider {
+        EmbeddingProviderType::Local => {
+            embedding::configure_offline_env(offline)?;
 
-    Ok(if use_pooled {
-        Arc::new(PooledEmbedder::default())
+            let use_pooled = env::var("SGREP_USE_POOLED_EMBEDDER")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(true);
+
+            Ok(if use_pooled {
+                Arc::new(PooledEmbedder::default())
+            } else {
+                Arc::new(Embedder::default())
+            })
+        }
+        EmbeddingProviderType::Voyage => {
+            if offline {
+                anyhow::bail!(
+                    "Voyage provider requires network access. Either disable offline mode or switch to local provider in config."
+                );
+            }
+
+            info!("Using Voyage Code 3 API for embeddings");
+            let embedder = create_embedder_from_config()?;
+            Ok(Arc::new(embedder))
+        }
+    }
+}
+
+fn handle_config(init: bool) -> Result<()> {
+    let config_path = Config::config_path();
+
+    if init {
+        if config_path.exists() {
+            println!(
+                "{} Config already exists at {}",
+                style("ℹ").cyan(),
+                config_path.display()
+            );
+        } else {
+            let path = Config::create_default_config()?;
+            println!(
+                "{} Created config at {}",
+                style("✔").green(),
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+
+    // Show current config
+    println!(
+        "{} Config path: {}",
+        style("ℹ").cyan(),
+        config_path.display()
+    );
+
+    if config_path.exists() {
+        let config = Config::load()?;
+        let provider_name = match config.embedding.provider {
+            EmbeddingProviderType::Local => "local (mxbai-embed-xsmall-v1)",
+            EmbeddingProviderType::Voyage => "voyage (voyage-code-3)",
+        };
+        println!("  Provider: {}", style(provider_name).bold());
+        if config.embedding.provider == EmbeddingProviderType::Voyage {
+            println!(
+                "  API Key: {}",
+                if config.embedding.api_key.is_some() {
+                    "configured"
+                } else {
+                    "missing"
+                }
+            );
+        }
     } else {
-        Arc::new(Embedder::default())
-    })
+        println!("  No config file found (using defaults)");
+        println!(
+            "  Provider: {}",
+            style("local (mxbai-embed-xsmall-v1)").bold()
+        );
+        println!();
+        println!(
+            "  Run {} to create a config file",
+            style("sgrep config --init").cyan()
+        );
+    }
+
+    Ok(())
 }
 
 fn handle_index(
@@ -129,6 +214,7 @@ fn handle_index(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_search(
     embedder: Arc<dyn embedding::BatchEmbedder>,
     query: &str,

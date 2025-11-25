@@ -66,8 +66,8 @@ sgrep search "retry logic" --context
 If no index exists, sgrep will automatically create one on first search. To manually index:
 
 ```bash
-sgrep index              # Index current directory
-sgrep index --force      # Rebuild from scratch
+sgrep index           # Index current directory
+sgrep index --force   # Rebuild from scratch
 ```
 
 ## Watch Mode
@@ -75,9 +75,13 @@ sgrep index --force      # Rebuild from scratch
 The plugin automatically manages `sgrep watch` during Claude sessions. For manual watch:
 
 ```bash
-sgrep watch              # Watch current repo
+sgrep watch           # Watch current directory
 sgrep watch --debounce-ms 200
 ```
+
+## Embedding Providers
+
+sgrep supports local (default) and remote (Voyage) embeddings. Check with `sgrep config`.
 
 ## Examples
 

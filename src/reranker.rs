@@ -30,7 +30,7 @@ impl Default for RerankerConfig {
 mod real_impl {
     use super::*;
     use anyhow::anyhow;
-    use fastembed::{TextRerank, RerankInitOptions, RerankerModel};
+    use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
     use std::sync::Mutex;
 
     const RERANKER_MODEL: RerankerModel = RerankerModel::BGERerankerBase;
@@ -66,10 +66,7 @@ mod real_impl {
                 .map_err(|e| anyhow!("Reranking failed: {}", e))?;
 
             // Results come sorted by score descending
-            Ok(results
-                .into_iter()
-                .map(|r| (r.index, r.score))
-                .collect())
+            Ok(results.into_iter().map(|r| (r.index, r.score)).collect())
         }
     }
 }
@@ -118,7 +115,11 @@ mod tests {
     #[test]
     fn mock_reranker_returns_all_documents() {
         let reranker = MockReranker;
-        let docs = vec!["short", "medium length doc", "this is the longest document here"];
+        let docs = vec![
+            "short",
+            "medium length doc",
+            "this is the longest document here",
+        ];
 
         let result = reranker.rerank("query", &docs).unwrap();
 
@@ -128,7 +129,11 @@ mod tests {
     #[test]
     fn mock_reranker_prefers_longer_documents() {
         let reranker = MockReranker;
-        let docs = vec!["short", "this is the longest document here", "medium length"];
+        let docs = vec![
+            "short",
+            "this is the longest document here",
+            "medium length",
+        ];
 
         let result = reranker.rerank("query", &docs).unwrap();
 

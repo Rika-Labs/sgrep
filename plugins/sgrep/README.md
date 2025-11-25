@@ -84,9 +84,18 @@ The plugin uses the following directories:
 - **Watch PIDs**: `~/.sgrep/watch-pids/` - Stores process IDs for cleanup
 - **Indexes**: `~/.sgrep/indexes/` - sgrep index storage (managed by sgrep itself)
 
-You can configure sgrep behavior using environment variables:
+You can configure sgrep behavior:
 
+**Config file** (`~/.config/sgrep/config.toml`):
+```toml
+[embedding]
+provider = "local"    # or "voyage" for best accuracy
+# api_key = "pa-..."  # Required for voyage provider
+```
+
+**Environment variables:**
 - `SGREP_HOME`: Override default data directory
+- `SGREP_CONFIG`: Override config file path
 - `SGREP_DEVICE`: Set device (cpu|cuda|coreml)
 - `SGREP_BATCH_SIZE`: Override embedding batch size
 

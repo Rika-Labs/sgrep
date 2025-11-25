@@ -82,7 +82,15 @@ fn chunk_with_tree(
     let file_context = extract_file_context(source, &root, language);
 
     // Recursively collect semantic nodes with their parent context
-    collect_semantic_nodes(&root, source, path, language, modified_at, &file_context, &mut chunks);
+    collect_semantic_nodes(
+        &root,
+        source,
+        path,
+        language,
+        modified_at,
+        &file_context,
+        &mut chunks,
+    );
 
     chunks
 }
@@ -185,11 +193,27 @@ fn collect_semantic_nodes(
             // Don't recurse into this node if we already captured it
             // But do recurse for container types that might have nested items
             if is_container_node(kind) {
-                collect_semantic_nodes(&child, source, path, language, modified_at, file_context, chunks);
+                collect_semantic_nodes(
+                    &child,
+                    source,
+                    path,
+                    language,
+                    modified_at,
+                    file_context,
+                    chunks,
+                );
             }
         } else {
             // Continue searching in non-semantic nodes
-            collect_semantic_nodes(&child, source, path, language, modified_at, file_context, chunks);
+            collect_semantic_nodes(
+                &child,
+                source,
+                path,
+                language,
+                modified_at,
+                file_context,
+                chunks,
+            );
         }
     }
 }
@@ -759,6 +783,10 @@ impl Foo {
         assert!(!chunks.is_empty());
         // At least one chunk should exist
         let has_foo = chunks.iter().any(|c| c.text.contains("Foo"));
-        assert!(has_foo, "Expected Foo in chunks: {:?}", chunks.iter().map(|c| &c.text).collect::<Vec<_>>());
+        assert!(
+            has_foo,
+            "Expected Foo in chunks: {:?}",
+            chunks.iter().map(|c| &c.text).collect::<Vec<_>>()
+        );
     }
 }

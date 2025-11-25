@@ -81,6 +81,17 @@ sgrep watch              # Watch current repo
 sgrep watch --debounce-ms 200
 ```
 
+## Configuration
+
+Check or create embedding provider configuration:
+
+```bash
+sgrep config          # Show current configuration
+sgrep config --init   # Create default config file
+```
+
+sgrep supports local (default) and remote (Voyage) embeddings. Config lives at `~/.config/sgrep/config.toml`.
+
 ## Examples
 
 **Find authentication code:**

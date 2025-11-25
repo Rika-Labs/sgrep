@@ -135,7 +135,11 @@ impl IndexStore {
         Ok(Some(index))
     }
 
-    fn load_mmap_format(&self, index_path: &Path, vectors_path: &Path) -> Result<Option<RepositoryIndex>> {
+    fn load_mmap_format(
+        &self,
+        index_path: &Path,
+        vectors_path: &Path,
+    ) -> Result<Option<RepositoryIndex>> {
         let partial = self.read_partial_index(index_path)?;
         let mmap = self.open_vectors_mmap(vectors_path)?;
         let (format_version, vector_dim) = parse_vectors_header(&mmap)?;
@@ -162,12 +166,14 @@ impl IndexStore {
     }
 
     fn open_vectors_mmap(&self, path: &Path) -> Result<Mmap> {
-        let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+        let file =
+            File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
         Ok(unsafe { Mmap::map(&file)? })
     }
 
     fn write_vectors_file(&self, path: &Path, index: &RepositoryIndex) -> Result<()> {
-        let file = File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
+        let file =
+            File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
         let mut writer = BufWriter::new(file);
 
         writer.write_all(&INDEX_FORMAT_VERSION.to_le_bytes())?;
@@ -183,7 +189,8 @@ impl IndexStore {
     }
 
     fn write_binary_vectors_file(&self, path: &Path, index: &RepositoryIndex) -> Result<()> {
-        let file = File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
+        let file =
+            File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
         let mut writer = BufWriter::new(file);
 
         // Header: version (4 bytes) + num_words per vector (4 bytes)
@@ -285,7 +292,11 @@ pub struct IndexMetadata {
 impl RepositoryIndex {
     pub fn new(metadata: IndexMetadata, chunks: Vec<CodeChunk>, vectors: Vec<Vec<f32>>) -> Self {
         debug_assert_eq!(chunks.len(), vectors.len());
-        Self { metadata, chunks, vectors }
+        Self {
+            metadata,
+            chunks,
+            vectors,
+        }
     }
 }
 
@@ -333,7 +344,9 @@ impl MmapIndex {
     }
 
     pub fn to_repository_index(&self) -> RepositoryIndex {
-        let vectors: Vec<Vec<f32>> = (0..self.len()).map(|i| self.get_vector(i).to_vec()).collect();
+        let vectors: Vec<Vec<f32>> = (0..self.len())
+            .map(|i| self.get_vector(i).to_vec())
+            .collect();
         RepositoryIndex {
             metadata: self.metadata.clone(),
             chunks: self.chunks.clone(),

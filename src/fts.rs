@@ -161,7 +161,11 @@ impl Bm25Index {
             term_freqs.push(tf);
         }
 
-        let avg_doc_len = if num_docs > 0 { total_len as f32 / num_docs as f32 } else { 0.0 };
+        let avg_doc_len = if num_docs > 0 {
+            total_len as f32 / num_docs as f32
+        } else {
+            0.0
+        };
 
         Self {
             doc_freq,
@@ -195,8 +199,8 @@ impl Bm25Index {
             let idf = ((self.num_docs as f32 - df + 0.5) / (df + 0.5) + 1.0).ln();
 
             // TF component with length normalization
-            let tf_norm = (tf * (BM25_K1 + 1.0)) /
-                         (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * doc_len / self.avg_doc_len));
+            let tf_norm = (tf * (BM25_K1 + 1.0))
+                / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * doc_len / self.avg_doc_len));
 
             score += idf * tf_norm;
         }
@@ -303,9 +307,9 @@ mod tests {
     #[test]
     fn test_bm25_prefers_rare_terms() {
         let docs = vec![
-            "fn common() { common(); common(); }",  // "common" appears 3 times
-            "fn common() { rare(); }",               // "rare" appears 1 time, "common" 1 time
-            "fn common() {}",                        // "common" appears 1 time
+            "fn common() { common(); common(); }", // "common" appears 3 times
+            "fn common() { rare(); }",             // "rare" appears 1 time, "common" 1 time
+            "fn common() {}",                      // "common" appears 1 time
         ];
         let doc_refs: Vec<&str> = docs.iter().map(|s| &**s).collect();
         let index = Bm25Index::build(&doc_refs);

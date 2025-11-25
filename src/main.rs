@@ -3,6 +3,7 @@ use anyhow::Result;
 mod app;
 mod chunker;
 mod cli;
+mod config;
 mod embedding;
 mod fts;
 mod indexer;

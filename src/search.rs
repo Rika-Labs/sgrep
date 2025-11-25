@@ -54,12 +54,18 @@ pub struct SearchEngine {
 
 impl SearchEngine {
     pub fn new(embedder: Arc<dyn BatchEmbedder>) -> Self {
-        Self { embedder, reranker: None }
+        Self {
+            embedder,
+            reranker: None,
+        }
     }
 
     #[allow(dead_code)]
     pub fn with_reranker(embedder: Arc<dyn BatchEmbedder>, reranker: Arc<dyn Reranker>) -> Self {
-        Self { embedder, reranker: Some(reranker) }
+        Self {
+            embedder,
+            reranker: Some(reranker),
+        }
     }
 
     pub fn search(
@@ -139,7 +145,14 @@ impl SearchEngine {
             .filter(|(_, (chunk, _))| fts::matches_filters(&options.filters, chunk))
             .map(|(idx, (chunk, vector))| {
                 let bm25_score = bm25_index.score(query, idx);
-                self.score_chunk(chunk, vector, &query_vec, &keywords, bm25_score, options.include_context)
+                self.score_chunk(
+                    chunk,
+                    vector,
+                    &query_vec,
+                    &keywords,
+                    bm25_score,
+                    options.include_context,
+                )
             })
             .collect();
 
@@ -168,7 +181,11 @@ impl SearchEngine {
         let bm25_index = fts::Bm25Index::build(&doc_texts);
 
         let query_binary = quantize_to_binary(&query_vec);
-        let index_binary: Vec<Vec<u64>> = index.vectors.iter().map(|v| quantize_to_binary(v)).collect();
+        let index_binary: Vec<Vec<u64>> = index
+            .vectors
+            .iter()
+            .map(|v| quantize_to_binary(v))
+            .collect();
         let shortlist_size = (fetch_limit * BINARY_SHORTLIST_FACTOR).min(index.vectors.len());
         let candidates = binary_shortlist(&query_binary, &index_binary, shortlist_size);
 
@@ -217,7 +234,8 @@ impl SearchEngine {
                 .map_err(|e| anyhow::anyhow!("HNSW add failed: {}", e))?;
         }
 
-        let candidates = self.search_hnsw_candidates(&hnsw, &query_vec, fetch_limit, index.vectors.len())?;
+        let candidates =
+            self.search_hnsw_candidates(&hnsw, &query_vec, fetch_limit, index.vectors.len())?;
 
         let mut matches: Vec<SearchResult> = candidates
             .into_iter()
@@ -274,7 +292,14 @@ impl SearchEngine {
                 }
                 let vector = index.get_vector(i);
                 let bm25_score = bm25_index.score(query, i);
-                Some(self.score_chunk(chunk, vector, &query_vec, &keywords, bm25_score, options.include_context))
+                Some(self.score_chunk(
+                    chunk,
+                    vector,
+                    &query_vec,
+                    &keywords,
+                    bm25_score,
+                    options.include_context,
+                ))
             })
             .collect();
 
@@ -308,7 +333,8 @@ impl SearchEngine {
                 .map_err(|e| anyhow::anyhow!("HNSW add failed: {}", e))?;
         }
 
-        let candidates = self.search_hnsw_candidates(&hnsw, &query_vec, fetch_limit, index.len())?;
+        let candidates =
+            self.search_hnsw_candidates(&hnsw, &query_vec, fetch_limit, index.len())?;
 
         let mut matches: Vec<SearchResult> = candidates
             .into_iter()
@@ -397,8 +423,8 @@ impl SearchEngine {
             multi: false,
         };
 
-        let hnsw = Index::new(&options)
-            .map_err(|e| anyhow::anyhow!("HNSW creation failed: {}", e))?;
+        let hnsw =
+            Index::new(&options).map_err(|e| anyhow::anyhow!("HNSW creation failed: {}", e))?;
         hnsw.reserve(capacity)
             .map_err(|e| anyhow::anyhow!("HNSW reserve failed: {}", e))?;
         Ok(hnsw)
@@ -435,9 +461,9 @@ impl SearchEngine {
         let bm25_normalized = (bm25_score / 10.0).min(1.0);
 
         let score = SEMANTIC_WEIGHT * semantic
-                  + BM25_WEIGHT * bm25_normalized
-                  + KEYWORD_WEIGHT * keyword
-                  + RECENCY_WEIGHT * recency;
+            + BM25_WEIGHT * bm25_normalized
+            + KEYWORD_WEIGHT * keyword
+            + RECENCY_WEIGHT * recency;
 
         SearchResult {
             chunk: chunk.clone(),
@@ -493,7 +519,9 @@ impl SearchEngine {
 
                 // Ensure results are sorted by the new blended score
                 reordered.sort_by(|a, b| {
-                    b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 });
 
                 // Truncate to original limit
@@ -520,7 +548,12 @@ impl SearchResult {
         if self.show_full_context {
             self.chunk.text.clone()
         } else {
-            self.chunk.text.lines().take(12).collect::<Vec<_>>().join("\n")
+            self.chunk
+                .text
+                .lines()
+                .take(12)
+                .collect::<Vec<_>>()
+                .join("\n")
         }
     }
 }
@@ -550,7 +583,9 @@ fn recency_boost(chunk: &CodeChunk) -> f32 {
 fn select_top_k(matches: &mut Vec<SearchResult>, k: usize) {
     if matches.len() > k {
         matches.select_nth_unstable_by(k, |a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         matches.truncate(k);
     }
@@ -559,7 +594,9 @@ fn select_top_k(matches: &mut Vec<SearchResult>, k: usize) {
 
 fn sort_by_score(matches: &mut [SearchResult]) {
     matches.sort_by(|a, b| {
-        b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 }
 
@@ -575,7 +612,10 @@ fn quantize_to_binary(vector: &[f32]) -> Vec<u64> {
 }
 
 fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x ^ y).count_ones()).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x ^ y).count_ones())
+        .sum()
 }
 
 fn binary_shortlist(
@@ -604,7 +644,9 @@ fn binary_shortlist_precomputed(
 ) -> Vec<usize> {
     let mut distances: Vec<(usize, u32)> = (0..index.len())
         .filter_map(|i| {
-            index.get_binary_vector(i).map(|v| (i, hamming_distance(query_binary, v)))
+            index
+                .get_binary_vector(i)
+                .map(|v| (i, hamming_distance(query_binary, v)))
         })
         .collect();
 
@@ -628,7 +670,10 @@ mod tests {
 
     impl BatchEmbedder for MockEmbedder {
         fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-            Ok(texts.iter().map(|t| vec![t.len() as f32, 1.0, 0.0, 0.0]).collect())
+            Ok(texts
+                .iter()
+                .map(|t| vec![t.len() as f32, 1.0, 0.0, 0.0])
+                .collect())
         }
 
         fn dimension(&self) -> usize {
@@ -699,15 +744,24 @@ mod tests {
             make_chunk("fn bar() {}", "rust", "b.rs"),
             make_chunk("fn baz() {}", "rust", "c.rs"),
         ];
-        let vectors: Vec<Vec<f32>> = chunks.iter()
+        let vectors: Vec<Vec<f32>> = chunks
+            .iter()
             .map(|c| embedder.embed(&c.text).unwrap())
             .collect();
 
-        let results = engine.search(
-            &make_index(chunks, vectors),
-            "function",
-            SearchOptions { limit: 2, include_context: false, glob: vec![], filters: vec![], rerank: false },
-        ).unwrap();
+        let results = engine
+            .search(
+                &make_index(chunks, vectors),
+                "function",
+                SearchOptions {
+                    limit: 2,
+                    include_context: false,
+                    glob: vec![],
+                    filters: vec![],
+                    rerank: false,
+                },
+            )
+            .unwrap();
 
         assert_eq!(results.len(), 2);
     }
@@ -721,21 +775,24 @@ mod tests {
             make_chunk("fn test1() {}", "rust", "src/auth.rs"),
             make_chunk("fn test2() {}", "rust", "tests/auth.rs"),
         ];
-        let vectors: Vec<Vec<f32>> = chunks.iter()
+        let vectors: Vec<Vec<f32>> = chunks
+            .iter()
             .map(|c| embedder.embed(&c.text).unwrap())
             .collect();
 
-        let results = engine.search(
-            &make_index(chunks, vectors),
-            "test",
-            SearchOptions {
-                limit: 10,
-                include_context: false,
-                glob: vec!["src/**/*.rs".to_string()],
-                filters: vec![],
-                rerank: false,
-            },
-        ).unwrap();
+        let results = engine
+            .search(
+                &make_index(chunks, vectors),
+                "test",
+                SearchOptions {
+                    limit: 10,
+                    include_context: false,
+                    glob: vec!["src/**/*.rs".to_string()],
+                    filters: vec![],
+                    rerank: false,
+                },
+            )
+            .unwrap();
 
         assert_eq!(results.len(), 1);
         assert!(results[0].chunk.path.to_string_lossy().contains("src"));
@@ -750,21 +807,24 @@ mod tests {
             make_chunk("fn test() {}", "rust", "test.rs"),
             make_chunk("def test():", "python", "test.py"),
         ];
-        let vectors: Vec<Vec<f32>> = chunks.iter()
+        let vectors: Vec<Vec<f32>> = chunks
+            .iter()
             .map(|c| embedder.embed(&c.text).unwrap())
             .collect();
 
-        let results = engine.search(
-            &make_index(chunks, vectors),
-            "test",
-            SearchOptions {
-                limit: 10,
-                include_context: false,
-                glob: vec![],
-                filters: vec!["lang=rust".to_string()],
-                rerank: false,
-            },
-        ).unwrap();
+        let results = engine
+            .search(
+                &make_index(chunks, vectors),
+                "test",
+                SearchOptions {
+                    limit: 10,
+                    include_context: false,
+                    glob: vec![],
+                    filters: vec!["lang=rust".to_string()],
+                    rerank: false,
+                },
+            )
+            .unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].chunk.language, "rust");
@@ -773,7 +833,10 @@ mod tests {
     #[test]
     fn snippet_truncates_without_context() {
         let chunk = make_chunk(
-            &(1..=14).map(|i| format!("line{}", i)).collect::<Vec<_>>().join("\n"),
+            &(1..=14)
+                .map(|i| format!("line{}", i))
+                .collect::<Vec<_>>()
+                .join("\n"),
             "rust",
             "test.rs",
         );
@@ -791,7 +854,10 @@ mod tests {
     #[test]
     fn snippet_shows_full_with_context() {
         let chunk = make_chunk(
-            &(1..=14).map(|i| format!("line{}", i)).collect::<Vec<_>>().join("\n"),
+            &(1..=14)
+                .map(|i| format!("line{}", i))
+                .collect::<Vec<_>>()
+                .join("\n"),
             "rust",
             "test.rs",
         );
@@ -824,10 +890,38 @@ mod tests {
     fn select_top_k_returns_highest_scores() {
         let chunk = make_chunk("test", "rust", "test.rs");
         let mut matches = vec![
-            SearchResult { chunk: chunk.clone(), score: 0.3, semantic_score: 0.3, bm25_score: 0.0, keyword_score: 0.0, show_full_context: false },
-            SearchResult { chunk: chunk.clone(), score: 0.9, semantic_score: 0.9, bm25_score: 0.0, keyword_score: 0.0, show_full_context: false },
-            SearchResult { chunk: chunk.clone(), score: 0.6, semantic_score: 0.6, bm25_score: 0.0, keyword_score: 0.0, show_full_context: false },
-            SearchResult { chunk: chunk.clone(), score: 0.1, semantic_score: 0.1, bm25_score: 0.0, keyword_score: 0.0, show_full_context: false },
+            SearchResult {
+                chunk: chunk.clone(),
+                score: 0.3,
+                semantic_score: 0.3,
+                bm25_score: 0.0,
+                keyword_score: 0.0,
+                show_full_context: false,
+            },
+            SearchResult {
+                chunk: chunk.clone(),
+                score: 0.9,
+                semantic_score: 0.9,
+                bm25_score: 0.0,
+                keyword_score: 0.0,
+                show_full_context: false,
+            },
+            SearchResult {
+                chunk: chunk.clone(),
+                score: 0.6,
+                semantic_score: 0.6,
+                bm25_score: 0.0,
+                keyword_score: 0.0,
+                show_full_context: false,
+            },
+            SearchResult {
+                chunk: chunk.clone(),
+                score: 0.1,
+                semantic_score: 0.1,
+                bm25_score: 0.0,
+                keyword_score: 0.0,
+                show_full_context: false,
+            },
         ];
 
         select_top_k(&mut matches, 2);
@@ -843,17 +937,32 @@ mod tests {
         let engine = SearchEngine::new(embedder.clone());
 
         let chunks: Vec<CodeChunk> = (0..600)
-            .map(|i| make_chunk(&format!("fn func{}() {{}}", i), "rust", &format!("file{}.rs", i)))
+            .map(|i| {
+                make_chunk(
+                    &format!("fn func{}() {{}}", i),
+                    "rust",
+                    &format!("file{}.rs", i),
+                )
+            })
             .collect();
-        let vectors: Vec<Vec<f32>> = chunks.iter()
+        let vectors: Vec<Vec<f32>> = chunks
+            .iter()
             .map(|c| embedder.embed(&c.text).unwrap())
             .collect();
 
-        let results = engine.search(
-            &make_index(chunks, vectors),
-            "function",
-            SearchOptions { limit: 10, include_context: false, glob: vec![], filters: vec![], rerank: false },
-        ).unwrap();
+        let results = engine
+            .search(
+                &make_index(chunks, vectors),
+                "function",
+                SearchOptions {
+                    limit: 10,
+                    include_context: false,
+                    glob: vec![],
+                    filters: vec![],
+                    rerank: false,
+                },
+            )
+            .unwrap();
 
         assert_eq!(results.len(), 10);
     }
@@ -874,7 +983,9 @@ mod tests {
 
     #[test]
     fn quantize_to_binary_handles_large_vectors() {
-        let vector: Vec<f32> = (0..128).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let vector: Vec<f32> = (0..128)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
         let binary = quantize_to_binary(&vector);
 
         assert_eq!(binary.len(), 2);
@@ -926,17 +1037,32 @@ mod tests {
         let engine = SearchEngine::new(embedder.clone());
 
         let chunks: Vec<CodeChunk> = (0..1100)
-            .map(|i| make_chunk(&format!("fn func{}() {{}}", i), "rust", &format!("file{}.rs", i)))
+            .map(|i| {
+                make_chunk(
+                    &format!("fn func{}() {{}}", i),
+                    "rust",
+                    &format!("file{}.rs", i),
+                )
+            })
             .collect();
-        let vectors: Vec<Vec<f32>> = chunks.iter()
+        let vectors: Vec<Vec<f32>> = chunks
+            .iter()
             .map(|c| embedder.embed(&c.text).unwrap())
             .collect();
 
-        let results = engine.search(
-            &make_index(chunks, vectors),
-            "function",
-            SearchOptions { limit: 10, include_context: false, glob: vec![], filters: vec![], rerank: false },
-        ).unwrap();
+        let results = engine
+            .search(
+                &make_index(chunks, vectors),
+                "function",
+                SearchOptions {
+                    limit: 10,
+                    include_context: false,
+                    glob: vec![],
+                    filters: vec![],
+                    rerank: false,
+                },
+            )
+            .unwrap();
 
         assert_eq!(results.len(), 10);
     }
@@ -952,18 +1078,31 @@ mod tests {
         // Create chunks with different lengths - MockReranker prefers longer documents
         let chunks = vec![
             make_chunk("short", "rust", "a.rs"),
-            make_chunk("this is a much longer document that should be preferred", "rust", "b.rs"),
+            make_chunk(
+                "this is a much longer document that should be preferred",
+                "rust",
+                "b.rs",
+            ),
             make_chunk("medium length", "rust", "c.rs"),
         ];
-        let vectors: Vec<Vec<f32>> = chunks.iter()
+        let vectors: Vec<Vec<f32>> = chunks
+            .iter()
             .map(|c| embedder.embed(&c.text).unwrap())
             .collect();
 
-        let results = engine.search(
-            &make_index(chunks, vectors),
-            "query",
-            SearchOptions { limit: 3, include_context: false, glob: vec![], filters: vec![], rerank: true },
-        ).unwrap();
+        let results = engine
+            .search(
+                &make_index(chunks, vectors),
+                "query",
+                SearchOptions {
+                    limit: 3,
+                    include_context: false,
+                    glob: vec![],
+                    filters: vec![],
+                    rerank: true,
+                },
+            )
+            .unwrap();
 
         // MockReranker prefers longer documents, so the longest should be first
         assert_eq!(results.len(), 3);
@@ -982,16 +1121,25 @@ mod tests {
             make_chunk("fn foo() {}", "rust", "a.rs"),
             make_chunk("fn bar() {}", "rust", "b.rs"),
         ];
-        let vectors: Vec<Vec<f32>> = chunks.iter()
+        let vectors: Vec<Vec<f32>> = chunks
+            .iter()
             .map(|c| embedder.embed(&c.text).unwrap())
             .collect();
 
         // Search with rerank: false
-        let results = engine.search(
-            &make_index(chunks, vectors),
-            "function",
-            SearchOptions { limit: 2, include_context: false, glob: vec![], filters: vec![], rerank: false },
-        ).unwrap();
+        let results = engine
+            .search(
+                &make_index(chunks, vectors),
+                "function",
+                SearchOptions {
+                    limit: 2,
+                    include_context: false,
+                    glob: vec![],
+                    filters: vec![],
+                    rerank: false,
+                },
+            )
+            .unwrap();
 
         assert_eq!(results.len(), 2);
         // Results should be in semantic score order, not reranked
@@ -1006,16 +1154,25 @@ mod tests {
             make_chunk("fn foo() {}", "rust", "a.rs"),
             make_chunk("fn bar() {}", "rust", "b.rs"),
         ];
-        let vectors: Vec<Vec<f32>> = chunks.iter()
+        let vectors: Vec<Vec<f32>> = chunks
+            .iter()
             .map(|c| embedder.embed(&c.text).unwrap())
             .collect();
 
         // Even with rerank: true, should work without panicking
-        let results = engine.search(
-            &make_index(chunks, vectors),
-            "function",
-            SearchOptions { limit: 2, include_context: false, glob: vec![], filters: vec![], rerank: true },
-        ).unwrap();
+        let results = engine
+            .search(
+                &make_index(chunks, vectors),
+                "function",
+                SearchOptions {
+                    limit: 2,
+                    include_context: false,
+                    glob: vec![],
+                    filters: vec![],
+                    rerank: true,
+                },
+            )
+            .unwrap();
 
         assert_eq!(results.len(), 2);
     }

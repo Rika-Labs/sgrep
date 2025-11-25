@@ -196,7 +196,10 @@ impl Indexer {
 
         let mut file_to_chunks: HashMap<PathBuf, Vec<usize>> = HashMap::new();
         for (idx, chunk) in chunks.iter().enumerate() {
-            file_to_chunks.entry(chunk.path.clone()).or_default().push(idx);
+            file_to_chunks
+                .entry(chunk.path.clone())
+                .or_default()
+                .push(idx);
         }
         let total_files = file_to_chunks.len();
 
@@ -204,10 +207,8 @@ impl Indexer {
         pb.set_position(0);
         pb.reset_elapsed();
         pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} Indexing files ({pos}/{len}) • {msg}",
-            )
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+            ProgressStyle::with_template("{spinner:.green} Indexing files ({pos}/{len}) • {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_bar()),
         );
         pb.set_message("starting...");
         pb.enable_steady_tick(Duration::from_millis(100));
@@ -262,12 +263,12 @@ impl Indexer {
             let mut batch_texts: Vec<String> = Vec::new();
             let mut batch_indices: Vec<usize> = Vec::new();
 
-            for idx in batch_start..batch_end {
-                if cache.contains_key(&chunks[idx].hash) {
+            for (idx, chunk) in chunks.iter().enumerate().take(batch_end).skip(batch_start) {
+                if cache.contains_key(&chunk.hash) {
                     continue;
                 }
                 batch_indices.push(idx);
-                batch_texts.push(chunks[idx].text.clone());
+                batch_texts.push(chunk.text.clone());
             }
 
             if !batch_texts.is_empty() {
@@ -295,7 +296,10 @@ impl Indexer {
         let mut files_completed = 0usize;
 
         for (file_path, chunk_indices) in &file_to_chunks {
-            if chunk_indices.iter().all(|idx| embedded_chunks.contains(idx)) {
+            if chunk_indices
+                .iter()
+                .all(|idx| embedded_chunks.contains(idx))
+            {
                 completed_files.insert(file_path.clone());
                 files_completed += 1;
             }
@@ -317,29 +321,58 @@ impl Indexer {
             pb.finish_with_message("all cached");
         } else {
             pb.set_message("loading AI model...");
+            // Warm up the model with a single embedding
             let _ = self.embedder.embed(&pending_chunks[0].1);
 
-            for (idx, text) in pending_chunks.into_iter() {
+            // Process in batches for efficiency, but update progress per-chunk for UX
+            // Batch size tuned for optimal throughput while maintaining responsive progress
+            let embed_batch_size = env::var("SGREP_EMBED_BATCH_SIZE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(32)
+                .clamp(8, 128);
+
+            let mut chunk_idx = 0;
+            while chunk_idx < pending_chunks.len() {
                 if cancelled.load(Ordering::SeqCst) {
                     return Err(anyhow!("Indexing cancelled"));
                 }
 
-                let vec = self.embedder.embed(&text)?;
-                vectors[idx] = Some(vec);
-                embedded_chunks.insert(idx);
+                // Collect a batch of texts to embed
+                let batch_end = (chunk_idx + embed_batch_size).min(pending_chunks.len());
+                let batch_texts: Vec<String> = pending_chunks[chunk_idx..batch_end]
+                    .iter()
+                    .map(|(_, text)| text.clone())
+                    .collect();
 
-                for (file_path, chunk_indices) in &file_to_chunks {
-                    if !completed_files.contains(file_path)
-                        && chunk_indices.iter().all(|&i| embedded_chunks.contains(&i))
-                    {
-                        completed_files.insert(file_path.clone());
-                        files_completed += 1;
-                        pb.set_position(files_completed as u64);
-                        let display_path = file_path.strip_prefix(root).unwrap_or(file_path).display();
-                        pb.set_message(format!("{}", display_path));
+                // Embed the entire batch at once (much faster than one-at-a-time)
+                let batch_vectors = self.embedder.embed_batch(&batch_texts)?;
+
+                // Process results and update progress sequentially for UX
+                for (i, vec) in batch_vectors.into_iter().enumerate() {
+                    let (global_idx, _) = &pending_chunks[chunk_idx + i];
+                    vectors[*global_idx] = Some(vec);
+                    embedded_chunks.insert(*global_idx);
+
+                    // Update file progress - files appear to complete sequentially
+                    for (file_path, chunk_indices) in &file_to_chunks {
+                        if !completed_files.contains(file_path)
+                            && chunk_indices
+                                .iter()
+                                .all(|&idx| embedded_chunks.contains(&idx))
+                        {
+                            completed_files.insert(file_path.clone());
+                            files_completed += 1;
+                            pb.set_position(files_completed as u64);
+                            let display_path =
+                                file_path.strip_prefix(root).unwrap_or(file_path).display();
+                            pb.set_message(format!("{}", display_path));
+                        }
                     }
+                    pb.tick();
                 }
-                pb.tick();
+
+                chunk_idx = batch_end;
             }
         }
 
@@ -660,6 +693,7 @@ impl Indexer {
         }
 
         // Flatten and sort by path for determinism
+        #[allow(clippy::type_complexity)]
         let mut entries: Vec<(PathBuf, Vec<(CodeChunk, Vec<f32>)>)> = by_path.into_iter().collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -967,8 +1001,33 @@ fn estimate_tokens(text: &str) -> usize {
 fn is_operator_or_punctuation(ch: char) -> bool {
     matches!(
         ch,
-        '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ';' | ':' | ',' | '.' | '=' | '+' | '-'
-            | '*' | '/' | '%' | '!' | '&' | '|' | '^' | '~' | '?' | '@' | '#' | '$' | '\\'
+        '(' | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '<'
+            | '>'
+            | ';'
+            | ':'
+            | ','
+            | '.'
+            | '='
+            | '+'
+            | '-'
+            | '*'
+            | '/'
+            | '%'
+            | '!'
+            | '&'
+            | '|'
+            | '^'
+            | '~'
+            | '?'
+            | '@'
+            | '#'
+            | '$'
+            | '\\'
     )
 }
 
@@ -1118,7 +1177,11 @@ mod tests {
             .output()
             .ok();
 
-        fs::write(test_repo.join(".gitignore"), "/node_modules\n/dist\n.vercel\n").unwrap();
+        fs::write(
+            test_repo.join(".gitignore"),
+            "/node_modules\n/dist\n.vercel\n",
+        )
+        .unwrap();
 
         let node_modules = test_repo.join("node_modules");
         fs::create_dir_all(&node_modules).unwrap();
@@ -2020,7 +2083,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn chunks_embedded_one_at_a_time() {
+    fn chunks_embedded_in_batches() {
         let call_count = Arc::new(AtomicUsize::new(0));
         let embedder = Arc::new(ProgressTrackingEmbedder {
             call_count: call_count.clone(),
@@ -2029,11 +2092,15 @@ mod tests {
         let indexer = Indexer::new(embedder);
 
         let _home = set_test_home();
-        let repo = std::env::temp_dir().join(format!("sgrep_one_at_a_time_{}", Uuid::new_v4()));
+        let repo = std::env::temp_dir().join(format!("sgrep_batched_{}", Uuid::new_v4()));
         fs::create_dir_all(&repo).unwrap();
 
         for i in 0..5 {
-            fs::write(repo.join(format!("file{}.rs", i)), format!("fn func{}() {{}}", i)).unwrap();
+            fs::write(
+                repo.join(format!("file{}.rs", i)),
+                format!("fn func{}() {{}}", i),
+            )
+            .unwrap();
         }
 
         let report = indexer
@@ -2048,9 +2115,11 @@ mod tests {
 
         assert!(report.chunks_indexed >= 5);
         let calls = call_count.load(Ordering::SeqCst);
+        // With batching, we should have fewer calls than chunks (batches are more efficient)
+        // At minimum we need 1 call for warmup + at least 1 batch call
         assert!(
-            calls >= report.chunks_indexed,
-            "Expected {} calls (one per chunk), got {}",
+            calls >= 1 && calls <= report.chunks_indexed,
+            "Expected batched calls (1 to {}), got {}",
             report.chunks_indexed,
             calls
         );

@@ -5,10 +5,10 @@ use std::time::Duration;
 use anyhow::Result;
 use notify::EventKind;
 
-#[cfg(not(test))]
-use crate::indexer::{DirtySet, IndexRequest, Indexer};
 #[cfg(test)]
 use crate::indexer::Indexer;
+#[cfg(not(test))]
+use crate::indexer::{DirtySet, IndexRequest, Indexer};
 #[cfg(not(test))]
 use crate::store::IndexStore;
 #[cfg(not(test))]

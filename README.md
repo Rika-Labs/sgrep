@@ -11,7 +11,7 @@
 Natural-language search that works like `grep`. Fast, local, and works with coding agents.
 
 - **Semantic:** Finds concepts ("auth middleware", "retry logic"), not just strings.
-- **Local & Private:** Real ML embeddings powered by mxbai-embed-xsmall-v1 (22.7M params, 384-dim, runs locally via ONNX).
+- **Local & Private:** Default local embeddings via mxbai-embed-xsmall-v1 (22.7M params, 384-dim, runs via ONNX). Optional remote provider (Voyage Code 3) for best-in-class code search accuracy.
 - **Auto-Isolated:** Every repository transparently receives its own index under `~/.sgrep/indexes/<hash>`.
 - **Adaptive:** Rayon-powered chunking/indexing automatically scales across cores while keeping laptops cool.
 - **Agent-Ready:** Designed for coding agents: stable CLI surface, structured JSON output via `--json`.
@@ -131,7 +131,7 @@ sgrep search --json "retry logic" | jq
   "index": {
     "repo_path": "/path/to/repo",
     "repo_hash": "<blake3>",
-    "vector_dim": 384,
+    "vector_dim": 384,  // 384 for local, 1024 for voyage
     "indexed_at": "2025-11-23T05:00:00Z",
     "total_files": 123,
     "total_chunks": 456
@@ -150,7 +150,6 @@ sgrep search --json "retry logic" | jq
   ]
 }
 ```
-```
 
 ### `sgrep index`
 
@@ -161,7 +160,7 @@ Manually indexes the repository. Useful if you want to pre-warm the cache or if 
 - **Adaptive Throttling:** Monitors your RAM and CPU usage. If your system gets hot, indexing slows down automatically.
 
 ```bash
-sgrep index              # Index current dir
+sgrep index                 # Index current directory
 sgrep index ../other-repo   # Index specific path
 sgrep index --force         # Rebuild from scratch
 ```
@@ -171,20 +170,29 @@ sgrep index --force         # Rebuild from scratch
 Runs a notify-based watcher that incrementally re-embeds touched files with a smart debounce window.
 
 ```bash
-sgrep watch                 # Watch current repo
+sgrep watch                         # Watch current directory
 sgrep watch ../service --debounce-ms 200
+```
+
+### `sgrep config`
+
+Show or create configuration for embedding providers.
+
+```bash
+sgrep config          # Show current configuration
+sgrep config --init   # Create default config file
 ```
 
 ## Performance & Architecture
 
 sgrep is designed to be a "good citizen" on your machine:
 
-1. **Real Embeddings:** Uses mxbai-embed-xsmall-v1, a fast embedding model (22.7M params) that runs locally via ONNX. First run downloads the model (~24MB) once.
+1. **Dual-Mode Embeddings:** Default local model (mxbai-embed-xsmall-v1, 22.7M params, 384-dim) runs via ONNX. Optional Voyage Code 3 API (1024-dim) for best-in-class code search accuracy.
 2. **Parallel Processing:** By default, uses a pool of embedding model instances (one per CPU core, max 8) to process batches in parallel. This provides 3-6x speedup on multi-core systems compared to sequential processing.
 3. **The Thermostat:** Indexing adjusts concurrency in real-time based on memory pressure and CPU speed. It won't freeze your laptop.
 4. **Smart Chunking:** Uses `tree-sitter` to split code by function/class boundaries, ensuring embeddings capture complete logical blocks.
 5. **Deduplication:** Identical code blocks (boilerplate, license headers) are embedded once and cached, saving space and time.
-6. **Hybrid Search:** 70% semantic similarity + 20% keyword matching (path/filename boosted) + 10% recency for optimal results.
+6. **Hybrid Search:** 60% semantic similarity + 25% BM25 + 10% keyword matching (path/filename boosted) + 5% recency for optimal results.
 
 **Target metrics:**
 
@@ -196,11 +204,36 @@ sgrep is designed to be a "good citizen" on your machine:
 
 ## Configuration
 
+### Embedding Providers
+
+sgrep supports two embedding providers, configured via `~/.config/sgrep/config.toml` (or platform equivalent):
+
+| Provider | Model | Dimensions | Speed | Best For |
+|----------|-------|------------|-------|----------|
+| `local` (default) | mxbai-embed-xsmall-v1 | 384 | Fast (~5s) | Privacy, offline use |
+| `voyage` | voyage-code-3 | 1024 | Medium | Best code search accuracy |
+
+**Setup Voyage (optional):**
+
+```bash
+sgrep config --init   # Create config file
+```
+
+Edit the config file to enable Voyage:
+
+```toml
+[embedding]
+provider = "voyage"
+api_key = "pa-..."    # Get yours at https://voyageai.com
+```
+
+Then re-index: `sgrep index --force`
+
+**Rate limits (Voyage starter tier):** 10K TPM, 3 RPM. sgrep handles rate limiting automatically.
+
 ### Automatic Repository Isolation
 
 sgrep automatically creates a unique index for each repository based on repository paths. Indexes live under `~/.sgrep/indexes/<hash>`.
-
-**Examples:**
 
 ```bash
 cd ~/work/myproject        # Auto-detected and indexed
@@ -212,27 +245,23 @@ sgrep search "helper functions"
 
 Stores are isolated automatically — no manual configuration needed!
 
-### Manual Configuration
+### Environment Variables
 
-- **Data location:** `~/.sgrep/` (configurable via `SGREP_HOME`)
-- **Model cache:** `~/.cache/fastembed/` (embedding models downloaded once on first use)
-- **Hardware choice:** sgrep auto-detects CoreML on Apple Silicon and CUDA on NVIDIA. Override with `--device cpu|cuda|coreml` or `SGREP_DEVICE=cpu|cuda|coreml`.
-- **Batch size:** Auto-tunes (CPU 256, GPU 512). Override with `--batch-size N` or `SGREP_BATCH_SIZE=N` (16–2048). Larger batches improve throughput; smaller batches reduce memory.
-- **Embedder pool size:** By default, creates multiple model instances (one per CPU core, max 8) for parallel processing. Override with `SGREP_EMBED_POOL_SIZE=N` to set the number of instances. Set `SGREP_USE_POOLED_EMBEDDER=false` to disable pooling and use a single model instance.
-- **Env Vars:**
-  - `SGREP_HOME`: Override default data directory
-  - `SGREP_EMBEDDER_POOL_SIZE`: Number of model instances in the pool (default: CPU cores, max 8)
-  - `SGREP_USE_POOLED_EMBEDDER`: Enable/disable pooled embedder (default: `true`)
-  - `RUST_LOG=sgrep=debug`: Enable tracing spans for chunking, embedding, and storage
-  - `RAYON_NUM_THREADS=4`: Limit concurrency on thermally constrained laptops
-
-Upcoming `sgrep.toml` will let you pin exclusions and concurrency limits.
+- `SGREP_HOME`: Override default data directory (`~/.sgrep/`)
+- `SGREP_CONFIG`: Override config file path
+- `SGREP_DEVICE`: Hardware choice (`cpu|cuda|coreml`)
+- `SGREP_BATCH_SIZE`: Embedding batch size (16–2048)
+- `SGREP_EMBEDDER_POOL_SIZE`: Number of model instances (default: CPU cores, max 8)
+- `SGREP_USE_POOLED_EMBEDDER`: Enable/disable pooled embedder (default: `true`)
+- `RUST_LOG=sgrep=debug`: Enable tracing spans for chunking, embedding, and storage
+- `RAYON_NUM_THREADS=4`: Limit concurrency on thermally constrained laptops
 
 ### CLI Help Quick Reference
 
 - `sgrep --help` — global flags (including `--device`).
 - `sgrep index --help` — indexing options (`--batch-size`, `--force`).
 - `sgrep watch --help` — watch options (`--batch-size`, `--debounce-ms`).
+- `sgrep config --help` — configuration options.
 
 ## Development
 
@@ -248,8 +277,9 @@ cargo clippy
 - **Index feels stale?** Run `sgrep index` to refresh.
 - **Weird results?** Clear `~/.sgrep/indexes/<repo>` and re-index to reset caches.
 - **Slow indexing?** Set `RAYON_NUM_THREADS=4` to limit concurrency on thermally constrained laptops.
-- **No index found?** Run `sgrep index` (auto-detects repo path if omitted).
+- **No index found?** Run `sgrep index` (indexes current directory).
 - **Air-gapped / flaky network?** Use `sgrep --offline index` (or `SGREP_OFFLINE=1`) to disable network fetches. Make sure the model cache exists under `~/.sgrep/cache/fastembed` first (run once online or copy the model there). If offline mode reports a missing model, fetch once with connectivity, then rerun.
+- **Switching providers?** After changing provider in config, run `sgrep index --force` to rebuild the index with the new embeddings.
 
 ## Attribution
 
