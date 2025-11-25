@@ -9,14 +9,12 @@ use serde::Deserialize;
 pub enum EmbeddingProviderType {
     #[default]
     Local,
-    OpenAI,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EmbeddingConfig {
     #[serde(default)]
     pub provider: EmbeddingProviderType,
-    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -38,16 +36,6 @@ impl Config {
 
         let config: Config = toml::from_str(&contents)
             .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?;
-
-        if config.embedding.provider == EmbeddingProviderType::OpenAI
-            && config.embedding.api_key.is_none()
-        {
-            anyhow::bail!(
-                "OpenAI provider selected but no API key provided.\n\
-                 Add 'api_key = \"sk-...\"' to [embedding] section in {}",
-                config_path.display()
-            );
-        }
 
         Ok(config)
     }
@@ -79,7 +67,6 @@ impl Config {
 
         let default_config = r#"[embedding]
 provider = "local"
-# api_key = "sk-..."
 "#;
 
         fs::write(&config_path, default_config)
@@ -99,7 +86,6 @@ mod tests {
     fn default_config_uses_local_provider() {
         let config = Config::default();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
-        assert!(config.embedding.api_key.is_none());
     }
 
     #[test]
@@ -110,18 +96,6 @@ provider = "local"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
-    }
-
-    #[test]
-    fn parse_openai_config() {
-        let toml = r#"
-[embedding]
-provider = "openai"
-api_key = "sk-test-key"
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.embedding.provider, EmbeddingProviderType::OpenAI);
-        assert_eq!(config.embedding.api_key, Some("sk-test-key".to_string()));
     }
 
     #[test]
@@ -138,28 +112,6 @@ api_key = "sk-test-key"
         env::set_var("SGREP_CONFIG", temp.join("nonexistent.toml"));
         let config = Config::load().unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
-        env::remove_var("SGREP_CONFIG");
-    }
-
-    #[test]
-    #[serial]
-    fn load_openai_without_api_key_errors() {
-        let temp = std::env::temp_dir().join(format!("sgrep_config_test_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&temp).unwrap();
-        let config_path = temp.join("config.toml");
-        std::fs::write(
-            &config_path,
-            r#"
-[embedding]
-provider = "openai"
-"#,
-        )
-        .unwrap();
-
-        env::set_var("SGREP_CONFIG", &config_path);
-        let result = Config::load();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("API key"));
         env::remove_var("SGREP_CONFIG");
     }
 

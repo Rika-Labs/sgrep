@@ -11,7 +11,7 @@
 Natural-language search that works like `grep`. Fast, local, and works with coding agents.
 
 - **Semantic:** Finds concepts ("auth middleware", "retry logic"), not just strings.
-- **Local & Private:** Default local embeddings via mxbai-embed-xsmall-v1 (22.7M params, 384-dim, runs via ONNX). Optional OpenAI embeddings (text-embedding-3-small, 1536-dim) for high-throughput cloud usage.
+- **Local & Private:** Local embeddings via mxbai-embed-xsmall-v1 (22.7M params, 384-dim, runs via ONNX).
 - **Auto-Isolated:** Every repository transparently receives its own index under `~/.sgrep/indexes/<hash>`.
 - **Adaptive:** Rayon-powered chunking/indexing automatically scales across cores while keeping laptops cool.
 - **Agent-Ready:** Designed for coding agents: stable CLI surface, structured JSON output via `--json`.
@@ -131,7 +131,7 @@ sgrep search --json "retry logic" | jq
   "index": {
     "repo_path": "/path/to/repo",
     "repo_hash": "<blake3>",
-    "vector_dim": 384,  // 384 for local, 1536 for openai
+    "vector_dim": 384
     "indexed_at": "2025-11-23T05:00:00Z",
     "total_files": 123,
     "total_chunks": 456
@@ -187,8 +187,8 @@ sgrep config --init   # Create default config file
 
 sgrep is designed to be a "good citizen" on your machine:
 
-1. **Dual-Mode Embeddings:** Default local model (mxbai-embed-xsmall-v1, 22.7M params, 384-dim) runs via ONNX. Optional OpenAI API (text-embedding-3-small, 1536-dim) for high-throughput cloud usage.
-2. **Parallel Processing:** By default, uses a pool of embedding model instances (one per CPU core, max 8) to process batches in parallel. This provides 3-6x speedup on multi-core systems compared to sequential processing.
+1. **Local Embeddings:** Local model (mxbai-embed-xsmall-v1, 22.7M params, 384-dim) runs via ONNX.
+2. **Sequential Processing:** Processes embeddings sequentially to avoid ONNX thread contention and keep your system responsive.
 3. **The Thermostat:** Indexing adjusts concurrency in real-time based on memory pressure and CPU speed. It won't freeze your laptop.
 4. **Smart Chunking:** Uses `tree-sitter` to split code by function/class boundaries, ensuring embeddings capture complete logical blocks.
 5. **Deduplication:** Identical code blocks (boilerplate, license headers) are embedded once and cached, saving space and time.
@@ -204,32 +204,20 @@ sgrep is designed to be a "good citizen" on your machine:
 
 ## Configuration
 
-### Embedding Providers
+### Embedding Provider
 
-sgrep supports two embedding providers, configured via `~/.sgrep/config.toml`:
-
-| Provider | Model | Dimensions | Speed | Best For |
-|----------|-------|------------|-------|----------|
-| `local` (default) | mxbai-embed-xsmall-v1 | 384 | Fast (~5s) | Privacy, offline use |
-| `openai` | text-embedding-3-small | 1536 | Fast | High throughput, cloud usage |
-
-**Setup OpenAI (optional):**
+sgrep uses local embeddings via mxbai-embed-xsmall-v1 (384 dimensions), configured via `~/.sgrep/config.toml`:
 
 ```bash
 sgrep config --init   # Create config file
 ```
 
-Edit the config file to enable OpenAI:
+The default config:
 
 ```toml
 [embedding]
-provider = "openai"
-api_key = "sk-..."    # Get yours at https://platform.openai.com
+provider = "local"
 ```
-
-Then re-index: `sgrep index --force`
-
-**Pricing:** $0.02 per 1M tokens. Very generous rate limits (1M+ TPM).
 
 ### Automatic Repository Isolation
 
@@ -251,7 +239,7 @@ Stores are isolated automatically — no manual configuration needed!
 - `SGREP_CONFIG`: Override config file path
 - `SGREP_DEVICE`: Hardware choice (`cpu|cuda|coreml`)
 - `SGREP_BATCH_SIZE`: Embedding batch size (16–2048)
-- `SGREP_EMBEDDER_POOL_SIZE`: Number of model instances (default: CPU cores, max 8)
+- `SGREP_EMBEDDER_POOL_SIZE`: Number of model instances (default: 1)
 - `SGREP_USE_POOLED_EMBEDDER`: Enable/disable pooled embedder (default: `true`)
 - `RUST_LOG=sgrep=debug`: Enable tracing spans for chunking, embedding, and storage
 - `RAYON_NUM_THREADS=4`: Limit concurrency on thermally constrained laptops
@@ -279,7 +267,6 @@ cargo clippy
 - **Slow indexing?** Set `RAYON_NUM_THREADS=4` to limit concurrency on thermally constrained laptops.
 - **No index found?** Run `sgrep index` (indexes current directory).
 - **Air-gapped / flaky network?** Use `sgrep --offline index` (or `SGREP_OFFLINE=1`) to disable network fetches. Make sure the model cache exists under `~/.sgrep/cache/fastembed` first (run once online or copy the model there). If offline mode reports a missing model, fetch once with connectivity, then rerun.
-- **Switching providers?** After changing provider in config, run `sgrep index --force` to rebuild the index with the new embeddings.
 
 ## Attribution
 

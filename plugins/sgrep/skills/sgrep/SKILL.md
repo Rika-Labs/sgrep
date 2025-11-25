@@ -79,9 +79,9 @@ sgrep watch           # Watch current directory
 sgrep watch --debounce-ms 200
 ```
 
-## Embedding Providers
+## Embedding Provider
 
-sgrep supports local (default) and OpenAI embeddings. Check with `sgrep config`.
+sgrep uses local embeddings. Check with `sgrep config`.
 
 ## Examples
 

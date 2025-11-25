@@ -23,9 +23,13 @@ use crate::store::{IndexMetadata, IndexStore, RepositoryIndex};
 
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024; // skip very large assets
 const BINARY_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp", "svg", "ico", "webp", "avif", "psd", "mp4", "mov", "avi",
-    "mp3", "wav", "flac", "ogg", "pdf", "zip", "gz", "bz2", "7z", "rar", "tar", "exe", "dll", "so",
-    "a", "bin", "class", "wasm", "woff", "woff2", "ttf", "otf",
+    "png", "jpg", "jpeg", "gif", "bmp", "svg", "ico", "webp", "avif", "psd", "tiff", "tif", "jxl",
+    "heic", "heif", "jp2", "jpx", "pic", "icns", "cur", "raw", "arw", "cr2", "nef", "dng", "mp4",
+    "mov", "avi", "mkv", "webm", "wmv", "flv", "m4v", "mp3", "wav", "flac", "ogg", "aac", "m4a",
+    "wma", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "zip", "gz", "bz2", "7z", "rar",
+    "tar", "xz", "zst", "exe", "dll", "so", "a", "dylib", "bin", "msi", "class", "wasm", "pyc",
+    "pyo", "woff", "woff2", "ttf", "otf", "eot", "glb", "gltf", "obj", "fbx", "stl", "blend",
+    "sqlite", "sqlite3", "db", "mdb",
 ];
 pub struct IndexRequest {
     pub path: PathBuf,

@@ -10,8 +10,8 @@ use indicatif::HumanDuration;
 use tracing::{info, warn};
 
 use crate::cli::{resolve_repo_path, Cli, Commands};
-use crate::config::{Config, EmbeddingProviderType};
-use crate::embedding::{self, create_embedder_from_config, Embedder, PooledEmbedder};
+use crate::config::Config;
+use crate::embedding::{self, Embedder, PooledEmbedder};
 use crate::output::JsonResponse;
 use crate::{indexer, search, store, watch};
 
@@ -70,34 +70,17 @@ fn build_embedder(
         env::set_var("SGREP_DEVICE", device);
     }
 
-    let config = Config::load()?;
+    embedding::configure_offline_env(offline)?;
 
-    match config.embedding.provider {
-        EmbeddingProviderType::Local => {
-            embedding::configure_offline_env(offline)?;
+    let use_pooled = env::var("SGREP_USE_POOLED_EMBEDDER")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
 
-            let use_pooled = env::var("SGREP_USE_POOLED_EMBEDDER")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(true);
-
-            Ok(if use_pooled {
-                Arc::new(PooledEmbedder::default())
-            } else {
-                Arc::new(Embedder::default())
-            })
-        }
-        EmbeddingProviderType::OpenAI => {
-            if offline {
-                anyhow::bail!(
-                    "OpenAI provider requires network access. Either disable offline mode or switch to local provider in config."
-                );
-            }
-
-            info!("Using OpenAI text-embedding-3-small for embeddings");
-            let embedder = create_embedder_from_config()?;
-            Ok(Arc::new(embedder))
-        }
-    }
+    Ok(if use_pooled {
+        Arc::new(PooledEmbedder::default())
+    } else {
+        Arc::new(Embedder::default())
+    })
 }
 
 fn handle_config(init: bool) -> Result<()> {
@@ -129,22 +112,7 @@ fn handle_config(init: bool) -> Result<()> {
     );
 
     if config_path.exists() {
-        let config = Config::load()?;
-        let provider_name = match config.embedding.provider {
-            EmbeddingProviderType::Local => "local (mxbai-embed-xsmall-v1)",
-            EmbeddingProviderType::OpenAI => "openai (text-embedding-3-small)",
-        };
-        println!("  Provider: {}", style(provider_name).bold());
-        if config.embedding.provider == EmbeddingProviderType::OpenAI {
-            println!(
-                "  API Key: {}",
-                if config.embedding.api_key.is_some() {
-                    "configured"
-                } else {
-                    "missing"
-                }
-            );
-        }
+        println!("  Provider: {}", style("local (mxbai-embed-xsmall-v1)").bold());
     } else {
         println!("  No config file found (using defaults)");
         println!(
