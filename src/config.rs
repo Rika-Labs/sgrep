@@ -57,16 +57,12 @@ impl Config {
             return PathBuf::from(path);
         }
 
-        if let Some(dirs) = directories::ProjectDirs::from("dev", "RikaLabs", "sgrep") {
-            return dirs.config_dir().join("config.toml");
+        if let Ok(home) = env::var("SGREP_HOME") {
+            return PathBuf::from(home).join("config.toml");
         }
 
         if let Some(home) = env::var_os("HOME") {
-            let mut path = PathBuf::from(home);
-            path.push(".config");
-            path.push("sgrep");
-            path.push("config.toml");
-            return path;
+            return PathBuf::from(home).join(".sgrep").join("config.toml");
         }
 
         PathBuf::from(".sgrep").join("config.toml")

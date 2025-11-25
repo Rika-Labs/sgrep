@@ -86,7 +86,7 @@ The plugin uses the following directories:
 
 You can configure sgrep behavior:
 
-**Config file** (`~/.config/sgrep/config.toml`):
+**Config file** (`~/.sgrep/config.toml`):
 ```toml
 [embedding]
 provider = "local"    # or "voyage" for best accuracy

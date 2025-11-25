@@ -12,7 +12,7 @@
 - `cargo test` runs all unit tests (module-local); narrow scope with `cargo test search::tests::`.
 - Useful diagnostics: `RUST_LOG=sgrep=debug cargo run -- search "query"` for tracing.
 - Offline indexing: `sgrep --offline index` (or `SGREP_OFFLINE=1`) disables network fetches. Ensure the model cache exists at `~/.sgrep/cache/fastembed` (run once with network or copy the model) or you'll get a clear error up front.
-- Config management: `sgrep config` shows current provider; `sgrep config --init` creates default config file. Config lives at `~/.config/sgrep/config.toml` (or platform equivalent).
+- Config management: `sgrep config` shows current provider; `sgrep config --init` creates default config file. Config lives at `~/.sgrep/config.toml`.
 
 ## Coding Style & Naming Conventions
 - Rust 2021, toolchain `rust-version = 1.75`; 4-space indentation. Always run `cargo fmt`.

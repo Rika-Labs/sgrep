@@ -206,7 +206,7 @@ sgrep is designed to be a "good citizen" on your machine:
 
 ### Embedding Providers
 
-sgrep supports two embedding providers, configured via `~/.config/sgrep/config.toml` (or platform equivalent):
+sgrep supports two embedding providers, configured via `~/.sgrep/config.toml`:
 
 | Provider | Model | Dimensions | Speed | Best For |
 |----------|-------|------------|-------|----------|
