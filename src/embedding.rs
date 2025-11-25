@@ -193,15 +193,12 @@ impl Embedder {
 
         if !uncached.is_empty() {
             let mut model = self.model.lock().unwrap();
-            for (i, text) in uncached.iter().enumerate() {
-                let embeddings = model.embed(vec![*text], None)?;
-                let embedding = embeddings
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("No embedding generated"))?;
-                let idx = uncached_indices[i];
+            let embeddings = model.embed(uncached.clone(), None)?;
+
+            for (embedding, &idx) in embeddings.iter().zip(&uncached_indices) {
                 results[idx] = embedding.clone();
-                self.cache.insert(texts[idx].clone(), Arc::new(embedding));
+                self.cache
+                    .insert(texts[idx].clone(), Arc::new(embedding.clone()));
             }
         }
 

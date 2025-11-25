@@ -18,7 +18,6 @@ use rayon::prelude::*;
 use tracing::{info, warn};
 
 use crate::chunker::{self, CodeChunk};
-use crate::config::{Config, EmbeddingProviderType};
 use crate::embedding::BatchEmbedder;
 use crate::store::{IndexMetadata, IndexStore, RepositoryIndex};
 
@@ -322,64 +321,30 @@ impl Indexer {
             pb.finish_with_message("all cached");
         } else {
             pb.set_message("loading AI model...");
-            // Warm up the model with a single embedding
             let _ = self.embedder.embed(&pending_chunks[0].1);
 
-            // Batch size: 1 for local (mxbai), larger for voyage
-            let default_batch_size = match Config::load()
-                .map(|c| c.embedding.provider)
-                .unwrap_or_default()
-            {
-                EmbeddingProviderType::Local => 1,
-                EmbeddingProviderType::Voyage => 32,
-            };
-            let embed_batch_size = env::var("SGREP_EMBED_BATCH_SIZE")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(default_batch_size)
-                .max(1);
-
-            let mut chunk_idx = 0;
-            while chunk_idx < pending_chunks.len() {
+            for (idx, text) in pending_chunks.into_iter() {
                 if cancelled.load(Ordering::SeqCst) {
                     return Err(anyhow!("Indexing cancelled"));
                 }
 
-                // Collect a batch of texts to embed
-                let batch_end = (chunk_idx + embed_batch_size).min(pending_chunks.len());
-                let batch_texts: Vec<String> = pending_chunks[chunk_idx..batch_end]
-                    .iter()
-                    .map(|(_, text)| text.clone())
-                    .collect();
+                let vec = self.embedder.embed(&text)?;
+                vectors[idx] = Some(vec);
+                embedded_chunks.insert(idx);
 
-                // Embed the entire batch at once (much faster than one-at-a-time)
-                let batch_vectors = self.embedder.embed_batch(&batch_texts)?;
-
-                // Process results and update progress sequentially for UX
-                for (i, vec) in batch_vectors.into_iter().enumerate() {
-                    let (global_idx, _) = &pending_chunks[chunk_idx + i];
-                    vectors[*global_idx] = Some(vec);
-                    embedded_chunks.insert(*global_idx);
-
-                    // Update file progress - files appear to complete sequentially
-                    for (file_path, chunk_indices) in &file_to_chunks {
-                        if !completed_files.contains(file_path)
-                            && chunk_indices
-                                .iter()
-                                .all(|&idx| embedded_chunks.contains(&idx))
-                        {
-                            completed_files.insert(file_path.clone());
-                            files_completed += 1;
-                            pb.set_position(files_completed as u64);
-                            let display_path =
-                                file_path.strip_prefix(root).unwrap_or(file_path).display();
-                            pb.set_message(format!("{}", display_path));
-                        }
+                for (file_path, chunk_indices) in &file_to_chunks {
+                    if !completed_files.contains(file_path)
+                        && chunk_indices.iter().all(|&i| embedded_chunks.contains(&i))
+                    {
+                        completed_files.insert(file_path.clone());
+                        files_completed += 1;
+                        pb.set_position(files_completed as u64);
+                        let display_path =
+                            file_path.strip_prefix(root).unwrap_or(file_path).display();
+                        pb.set_message(format!("{}", display_path));
                     }
-                    pb.tick();
                 }
-
-                chunk_idx = batch_end;
+                pb.tick();
             }
         }
 
@@ -2122,8 +2087,7 @@ mod tests {
 
         assert!(report.chunks_indexed >= 5);
         let calls = call_count.load(Ordering::SeqCst);
-        // With batch size 1 for local provider: 1 warmup + N chunk calls
-        // calls should be around chunks_indexed + 1 (warmup)
+        // With one-at-a-time embedding: 1 warmup + N chunk calls
         assert!(
             calls >= 1 && calls <= report.chunks_indexed + 2,
             "Expected calls (1 to {}), got {}",
