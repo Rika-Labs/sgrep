@@ -124,6 +124,7 @@ mod tests {
             chunk,
             score: 0.5,
             semantic_score: 0.4,
+            bm25_score: 0.0,
             keyword_score: 0.1,
             show_full_context: false,
         };

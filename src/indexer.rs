@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -74,6 +74,7 @@ impl Indexer {
         Self { embedder }
     }
 
+    #[allow(dead_code)]
     pub fn new_concrete<E: BatchEmbedder + 'static>(embedder: Arc<E>) -> Self {
         Self { embedder }
     }
@@ -232,7 +233,6 @@ impl Indexer {
         struct Batch {
             indices: Vec<usize>,
             texts: Vec<String>,
-            hashes: Vec<String>,
         }
 
         let mut batches: Vec<Batch> = Vec::new();
@@ -261,7 +261,6 @@ impl Indexer {
 
             let mut batch_texts: Vec<String> = Vec::new();
             let mut batch_indices: Vec<usize> = Vec::new();
-            let mut batch_hashes: Vec<String> = Vec::new();
 
             for idx in batch_start..batch_end {
                 if cache.contains_key(&chunks[idx].hash) {
@@ -269,14 +268,12 @@ impl Indexer {
                 }
                 batch_indices.push(idx);
                 batch_texts.push(chunks[idx].text.clone());
-                batch_hashes.push(chunks[idx].hash.clone());
             }
 
             if !batch_texts.is_empty() {
                 batches.push(Batch {
                     indices: batch_indices,
                     texts: batch_texts,
-                    hashes: batch_hashes,
                 });
             }
 
@@ -980,6 +977,7 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::fs;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration as StdDuration;
     use uuid::Uuid;
 
