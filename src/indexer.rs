@@ -19,6 +19,7 @@ use tracing::{info, warn};
 
 use crate::chunker::{self, CodeChunk};
 use crate::embedding::BatchEmbedder;
+use crate::graph::{CodeGraph, SymbolExtractor};
 use crate::store::{IndexMetadata, IndexStore, RepositoryIndex};
 
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024; // skip very large assets
@@ -46,6 +47,8 @@ pub struct IndexReport {
     pub timings: Option<IndexTimings>,
     pub cache_hits: usize,
     pub cache_misses: usize,
+    pub graph_symbols: usize,
+    pub graph_edges: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -65,6 +68,7 @@ pub struct IndexTimings {
     pub walk: Duration,
     pub chunk: Duration,
     pub embed: Duration,
+    pub graph: Duration,
     pub write: Duration,
 }
 
@@ -154,10 +158,13 @@ impl Indexer {
                     walk: walk_duration,
                     chunk: Duration::ZERO,
                     embed: Duration::ZERO,
+                    graph: Duration::ZERO,
                     write: Duration::ZERO,
                 }),
                 cache_hits: 0,
                 cache_misses: 0,
+                graph_symbols: 0,
+                graph_edges: 0,
             });
         }
 
@@ -370,6 +377,12 @@ impl Indexer {
 
         pb.finish_with_message("embedding complete");
 
+        // Build the knowledge graph
+        let graph_start = Instant::now();
+        let graph = self.build_graph(root, &files);
+        let graph_stats = graph.stats();
+        let graph_duration = graph_start.elapsed();
+
         let write_start = Instant::now();
         let metadata = IndexMetadata {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -383,6 +396,7 @@ impl Indexer {
 
         let repository_index = RepositoryIndex::new(metadata, chunks, vectors);
         store.save(&repository_index)?;
+        store.save_graph(&graph)?;
         let write_duration = write_start.elapsed();
 
         Ok(IndexReport {
@@ -393,10 +407,13 @@ impl Indexer {
                 walk: walk_duration,
                 chunk: chunk_duration,
                 embed: embed_duration,
+                graph: graph_duration,
                 write: write_duration,
             }),
             cache_hits,
             cache_misses,
+            graph_symbols: graph_stats.total_symbols,
+            graph_edges: graph_stats.total_edges,
         })
     }
 
@@ -682,6 +699,18 @@ impl Indexer {
             }
         }
 
+        // Build/update the knowledge graph
+        let graph_start = Instant::now();
+        let all_files: Vec<PathBuf> = chunks
+            .iter()
+            .map(|c| root.join(&c.path))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let graph = self.build_graph(&root, &all_files);
+        let graph_stats = graph.stats();
+        let graph_duration = graph_start.elapsed();
+
         let write_start = Instant::now();
         let metadata = IndexMetadata {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -699,6 +728,7 @@ impl Indexer {
 
         let repository_index = RepositoryIndex::new(metadata, chunks, vectors);
         store.save(&repository_index)?;
+        store.save_graph(&graph)?;
         let write_duration = write_start.elapsed();
 
         Ok(IndexReport {
@@ -709,10 +739,13 @@ impl Indexer {
                 walk: Duration::ZERO,
                 chunk: chunk_duration,
                 embed: embed_duration,
+                graph: graph_duration,
                 write: write_duration,
             }),
             cache_hits,
             cache_misses,
+            graph_symbols: graph_stats.total_symbols,
+            graph_edges: graph_stats.total_edges,
         })
     }
 
@@ -740,6 +773,65 @@ impl Indexer {
         }
 
         Err(last_err.unwrap_or_else(|| anyhow!("embedding failed for batch")))
+    }
+
+    /// Build the code knowledge graph from source files
+    fn build_graph(&self, root: &Path, files: &[PathBuf]) -> CodeGraph {
+        let mut graph = CodeGraph::new();
+        let mut extractor = SymbolExtractor::new();
+
+        for path in files {
+            let language = detect_language_for_graph(path);
+            if language.is_none() {
+                continue;
+            }
+            let lang = language.unwrap();
+
+            let source = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let relative_path = path.strip_prefix(root).unwrap_or(path);
+
+            match extractor.extract_from_file(relative_path, &source, lang) {
+                Ok((symbols, edges, imports)) => {
+                    for symbol in symbols {
+                        graph.add_symbol(symbol);
+                    }
+                    for edge in edges {
+                        graph.add_edge(edge);
+                    }
+                    for import in imports {
+                        graph.add_import(import);
+                    }
+                }
+                Err(e) => {
+                    warn!("path" = %path.display(), "error" = %e, "msg" = "failed to extract symbols");
+                }
+            }
+        }
+
+        graph
+    }
+}
+
+/// Detect language for graph extraction (only languages with tree-sitter support)
+fn detect_language_for_graph(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    match ext.as_str() {
+        "rs" => Some("rust"),
+        "py" => Some("python"),
+        "ts" => Some("typescript"),
+        "tsx" => Some("tsx"),
+        "js" | "jsx" => Some("javascript"),
+        "go" => Some("go"),
+        "java" => Some("java"),
+        "c" | "h" => Some("c"),
+        "cpp" | "cc" | "cxx" | "hpp" => Some("cpp"),
+        "cs" => Some("csharp"),
+        "rb" => Some("ruby"),
+        _ => None,
     }
 }
 

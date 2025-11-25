@@ -19,7 +19,6 @@ use once_cell::sync::Lazy;
 #[cfg(not(test))]
 use std::io::Write;
 
-
 #[cfg(not(test))]
 const MXBAI_MODEL_NAME: &str = "mxbai-embed-xsmall-v1";
 #[cfg(not(test))]
@@ -638,7 +637,6 @@ fn has_nvidia_gpu() -> bool {
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
-
 
 #[cfg(test)]
 mod tests {

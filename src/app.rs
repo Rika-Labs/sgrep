@@ -112,7 +112,10 @@ fn handle_config(init: bool) -> Result<()> {
     );
 
     if config_path.exists() {
-        println!("  Provider: {}", style("local (mxbai-embed-xsmall-v1)").bold());
+        println!(
+            "  Provider: {}",
+            style("local (mxbai-embed-xsmall-v1)").bold()
+        );
     } else {
         println!("  No config file found (using defaults)");
         println!(
@@ -156,13 +159,23 @@ fn handle_index(
         HumanDuration(report.duration)
     );
 
+    // Show graph statistics
+    if report.graph_symbols > 0 {
+        println!(
+            "  {} symbols extracted, {} relationships",
+            report.graph_symbols,
+            report.graph_edges
+        );
+    }
+
     if profile {
         if let Some(t) = report.timings {
             println!(
-                "  walk: {} | chunk: {} | embed: {} | write: {}",
+                "  walk: {} | chunk: {} | embed: {} | graph: {} | write: {}",
                 HumanDuration(t.walk),
                 HumanDuration(t.chunk),
                 HumanDuration(t.embed),
+                HumanDuration(t.graph),
                 HumanDuration(t.write)
             );
         }
@@ -194,13 +207,18 @@ fn handle_search(
     json: bool,
 ) -> Result<()> {
     let start = Instant::now();
-    let engine = search::SearchEngine::new(embedder.clone());
+    let mut engine = search::SearchEngine::new(embedder.clone());
+
+    // Try to load the code graph for hybrid search
+    let store_result = store::IndexStore::new(path)?;
+    if let Ok(Some(graph)) = store_result.load_graph() {
+        engine.set_graph(graph);
+    }
 
     // Try mmap-based search first for zero-copy performance
-    let store_result = store::IndexStore::new(path)?;
     if let Ok(Some(mmap_index)) = store_result.load_mmap() {
         if mmap_index.metadata.vector_dim == embedder.dimension() {
-            let results = engine.search_mmap(
+            let results = engine.search_hybrid_mmap(
                 &mmap_index,
                 query,
                 search::SearchOptions {
@@ -219,7 +237,7 @@ fn handle_search(
 
     // Fall back to standard loading
     let index = load_or_index(path, embedder.clone())?;
-    let results = engine.search(
+    let results = engine.search_hybrid(
         &index,
         query,
         search::SearchOptions {
@@ -312,6 +330,14 @@ fn rebuild_index(
         report.chunks_indexed,
         HumanDuration(report.duration)
     );
+
+    if report.graph_symbols > 0 {
+        eprintln!(
+            "  {} symbols extracted, {} relationships",
+            report.graph_symbols,
+            report.graph_edges
+        );
+    }
 
     let store = store::IndexStore::new(path)?;
     let index = store.load()?.ok_or_else(|| {

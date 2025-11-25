@@ -11,11 +11,13 @@ use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 
 use crate::chunker::CodeChunk;
+use crate::graph::CodeGraph;
 
 const INDEX_FILE: &str = "index.bin.zst";
 const VECTORS_FILE: &str = "vectors.bin";
 const BINARY_VECTORS_FILE: &str = "binary_vectors.bin";
-const INDEX_FORMAT_VERSION: u32 = 3;
+const GRAPH_FILE: &str = "graph.bin.zst";
+const INDEX_FORMAT_VERSION: u32 = 4; // Bumped for graph support
 const VECTOR_HEADER_SIZE: usize = 8;
 const BYTES_PER_F32: usize = 4;
 const BYTES_PER_U64: usize = 8;
@@ -76,6 +78,35 @@ impl IndexStore {
         self.write_index_file(&index_path, index)?;
 
         Ok(())
+    }
+
+    /// Save the code graph
+    pub fn save_graph(&self, graph: &CodeGraph) -> Result<()> {
+        let graph_path = self.root.join(GRAPH_FILE);
+        let bytes = bincode::serialize(graph)?;
+        let compressed = zstd::stream::encode_all(bytes.as_slice(), 3)?;
+        fs::write(&graph_path, compressed)
+            .with_context(|| format!("Failed to write graph to {}", graph_path.display()))?;
+        Ok(())
+    }
+
+    /// Load the code graph
+    pub fn load_graph(&self) -> Result<Option<CodeGraph>> {
+        let graph_path = self.root.join(GRAPH_FILE);
+        if !graph_path.exists() {
+            return Ok(None);
+        }
+
+        let bytes = fs::read(&graph_path)
+            .with_context(|| format!("Failed to read graph from {}", graph_path.display()))?;
+        let decompressed = zstd::stream::decode_all(bytes.as_slice())?;
+        let graph: CodeGraph = bincode::deserialize(&decompressed)?;
+        Ok(Some(graph))
+    }
+
+    /// Check if graph exists
+    pub fn has_graph(&self) -> bool {
+        self.root.join(GRAPH_FILE).exists()
     }
 
     pub fn load_mmap(&self) -> Result<Option<MmapIndex>> {
