@@ -18,6 +18,7 @@ use rayon::prelude::*;
 use tracing::{info, warn};
 
 use crate::chunker::{self, CodeChunk};
+use crate::config::{Config, EmbeddingProviderType};
 use crate::embedding::BatchEmbedder;
 use crate::store::{IndexMetadata, IndexStore, RepositoryIndex};
 
@@ -324,13 +325,19 @@ impl Indexer {
             // Warm up the model with a single embedding
             let _ = self.embedder.embed(&pending_chunks[0].1);
 
-            // Process in batches for efficiency, but update progress per-chunk for UX
-            // Batch size tuned for optimal throughput while maintaining responsive progress
+            // Batch size: 1 for local (mxbai), larger for voyage
+            let default_batch_size = match Config::load()
+                .map(|c| c.embedding.provider)
+                .unwrap_or_default()
+            {
+                EmbeddingProviderType::Local => 1,
+                EmbeddingProviderType::Voyage => 32,
+            };
             let embed_batch_size = env::var("SGREP_EMBED_BATCH_SIZE")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(32)
-                .clamp(8, 128);
+                .unwrap_or(default_batch_size)
+                .max(1);
 
             let mut chunk_idx = 0;
             while chunk_idx < pending_chunks.len() {
@@ -2115,12 +2122,12 @@ mod tests {
 
         assert!(report.chunks_indexed >= 5);
         let calls = call_count.load(Ordering::SeqCst);
-        // With batching, we should have fewer calls than chunks (batches are more efficient)
-        // At minimum we need 1 call for warmup + at least 1 batch call
+        // With batch size 1 for local provider: 1 warmup + N chunk calls
+        // calls should be around chunks_indexed + 1 (warmup)
         assert!(
-            calls >= 1 && calls <= report.chunks_indexed,
-            "Expected batched calls (1 to {}), got {}",
-            report.chunks_indexed,
+            calls >= 1 && calls <= report.chunks_indexed + 2,
+            "Expected calls (1 to {}), got {}",
+            report.chunks_indexed + 2,
             calls
         );
 
