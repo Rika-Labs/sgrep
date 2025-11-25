@@ -89,8 +89,8 @@ You can configure sgrep behavior:
 **Config file** (`~/.sgrep/config.toml`):
 ```toml
 [embedding]
-provider = "local"    # or "voyage" for best accuracy
-# api_key = "pa-..."  # Required for voyage provider
+provider = "local"    # or "openai" for high throughput
+# api_key = "sk-..."  # Required for openai provider
 ```
 
 **Environment variables:**

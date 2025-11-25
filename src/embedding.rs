@@ -35,16 +35,13 @@ use tracing::warn;
 const DEFAULT_MAX_CACHE: u64 = 100_000;
 pub const DEFAULT_VECTOR_DIM: usize = 384;
 
-/// Voyage Code 3 embedding dimension
-pub const VOYAGE_VECTOR_DIM: usize = 1024;
+pub const OPENAI_VECTOR_DIM: usize = 1536;
 
-/// Voyage API endpoint
 #[cfg(not(test))]
-const VOYAGE_API_URL: &str = "https://api.voyageai.com/v1/embeddings";
+const OPENAI_API_URL: &str = "https://api.openai.com/v1/embeddings";
 
-/// Voyage model for code embeddings
 #[cfg(not(test))]
-const VOYAGE_MODEL: &str = "voyage-code-3";
+const OPENAI_MODEL: &str = "text-embedding-3-small";
 
 /// Minimal interface so the indexer can be tested with stub embedders.
 pub trait BatchEmbedder: Send + Sync {
@@ -652,111 +649,93 @@ fn has_nvidia_gpu() -> bool {
 }
 
 #[cfg(not(test))]
-const VOYAGE_TPM_LIMIT: usize = 10_000;
-#[cfg(not(test))]
-const VOYAGE_RPM_LIMIT: usize = 3;
-#[cfg(not(test))]
-const VOYAGE_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
-
-#[cfg(not(test))]
-pub struct VoyageProvider {
+pub struct OpenAIProvider {
     api_key: String,
     cache: Cache<String, Arc<Vec<f32>>>,
-    request_times: Arc<Mutex<Vec<std::time::Instant>>>,
-    tokens_used: Arc<Mutex<Vec<(std::time::Instant, usize)>>>,
 }
 
 #[cfg(not(test))]
-impl Clone for VoyageProvider {
+impl Clone for OpenAIProvider {
     fn clone(&self) -> Self {
         Self {
             api_key: self.api_key.clone(),
             cache: self.cache.clone(),
-            request_times: self.request_times.clone(),
-            tokens_used: self.tokens_used.clone(),
         }
     }
 }
 
 #[cfg(not(test))]
-impl VoyageProvider {
+impl OpenAIProvider {
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
             cache: Cache::builder().max_capacity(DEFAULT_MAX_CACHE).build(),
-            request_times: Arc::new(Mutex::new(Vec::new())),
-            tokens_used: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    fn estimate_tokens(text: &str) -> usize {
-        (text.len() / 4).max(1)
-    }
-
-    fn wait_for_rate_limit(&self, estimated_tokens: usize) {
-        loop {
-            let now = std::time::Instant::now();
-            let cutoff = now - VOYAGE_RATE_LIMIT_WINDOW;
-
-            {
-                let mut times = self.request_times.lock().unwrap();
-                times.retain(|t| *t > cutoff);
-
-                let mut tokens = self.tokens_used.lock().unwrap();
-                tokens.retain(|(t, _)| *t > cutoff);
-
-                let total_tokens: usize = tokens.iter().map(|(_, t)| *t).sum();
-
-                if times.len() < VOYAGE_RPM_LIMIT
-                    && total_tokens + estimated_tokens <= VOYAGE_TPM_LIMIT
-                {
-                    times.push(now);
-                    tokens.push((now, estimated_tokens));
-                    return;
-                }
-            }
-
-            std::thread::sleep(Duration::from_millis(500));
         }
     }
 
     fn call_api(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         use std::io::Read;
 
-        let estimated_tokens: usize = texts.iter().map(|t| Self::estimate_tokens(t)).sum();
-        self.wait_for_rate_limit(estimated_tokens);
-
         let request_body = serde_json::json!({
-            "model": VOYAGE_MODEL,
-            "input": texts,
-            "input_type": "document"
+            "model": OPENAI_MODEL,
+            "input": texts
         });
 
-        let response = ureq::post(VOYAGE_API_URL)
-            .set("Authorization", &format!("Bearer {}", self.api_key))
-            .set("Content-Type", "application/json")
-            .send_json(&request_body)
-            .map_err(|e| anyhow!("Voyage API request failed: {}", e))?;
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(60))
+            .build();
+
+        let mut retries = 0;
+        let max_retries = 5;
+        let response = loop {
+            let result = agent
+                .post(OPENAI_API_URL)
+                .set("Authorization", &format!("Bearer {}", self.api_key))
+                .set("Content-Type", "application/json")
+                .send_json(&request_body);
+
+            match result {
+                Ok(resp) => break resp,
+                Err(ureq::Error::Status(429, _)) => {
+                    retries += 1;
+                    if retries >= max_retries {
+                        anyhow::bail!(
+                            "OpenAI API rate limit exceeded after {} retries",
+                            max_retries
+                        );
+                    }
+                    let wait_secs = 2u64.pow(retries);
+                    tracing::warn!(
+                        "Rate limited by OpenAI API, waiting {}s (retry {}/{})",
+                        wait_secs,
+                        retries,
+                        max_retries
+                    );
+                    std::thread::sleep(Duration::from_secs(wait_secs));
+                }
+                Err(e) => anyhow::bail!("OpenAI API request failed: {}", e),
+            }
+        };
 
         let mut body = String::new();
         response.into_reader().read_to_string(&mut body)?;
 
         let json: serde_json::Value = serde_json::from_str(&body)
-            .with_context(|| format!("Failed to parse Voyage API response: {}", body))?;
+            .with_context(|| format!("Failed to parse OpenAI API response: {}", body))?;
 
         let data = json
             .get("data")
-            .ok_or_else(|| anyhow!("Voyage API response missing 'data' field"))?
+            .ok_or_else(|| anyhow!("OpenAI API response missing 'data' field"))?
             .as_array()
-            .ok_or_else(|| anyhow!("Voyage API 'data' field is not an array"))?;
+            .ok_or_else(|| anyhow!("OpenAI API 'data' field is not an array"))?;
 
         let mut embeddings = Vec::with_capacity(data.len());
         for item in data {
             let embedding = item
                 .get("embedding")
-                .ok_or_else(|| anyhow!("Voyage API response item missing 'embedding' field"))?
+                .ok_or_else(|| anyhow!("OpenAI API response item missing 'embedding' field"))?
                 .as_array()
-                .ok_or_else(|| anyhow!("Voyage API 'embedding' field is not an array"))?
+                .ok_or_else(|| anyhow!("OpenAI API 'embedding' field is not an array"))?
                 .iter()
                 .map(|v| v.as_f64().unwrap_or(0.0) as f32)
                 .collect::<Vec<f32>>();
@@ -768,7 +747,7 @@ impl VoyageProvider {
 }
 
 #[cfg(not(test))]
-impl BatchEmbedder for VoyageProvider {
+impl BatchEmbedder for OpenAIProvider {
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
         if let Some(vec) = self.cache.get(text) {
             return Ok(vec.as_ref().clone());
@@ -777,7 +756,7 @@ impl BatchEmbedder for VoyageProvider {
         let vector = embeddings
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("No embedding returned from Voyage API"))?;
+            .ok_or_else(|| anyhow!("No embedding returned from OpenAI API"))?;
         self.cache
             .insert(text.to_string(), Arc::new(vector.clone()));
         Ok(vector)
@@ -798,10 +777,10 @@ impl BatchEmbedder for VoyageProvider {
         }
 
         if !uncached.is_empty() {
-            const VOYAGE_BATCH_SIZE: usize = 128;
+            const OPENAI_BATCH_SIZE: usize = 2048;
 
-            for chunk_start in (0..uncached.len()).step_by(VOYAGE_BATCH_SIZE) {
-                let chunk_end = (chunk_start + VOYAGE_BATCH_SIZE).min(uncached.len());
+            for chunk_start in (0..uncached.len()).step_by(OPENAI_BATCH_SIZE) {
+                let chunk_end = (chunk_start + OPENAI_BATCH_SIZE).min(uncached.len());
                 let chunk: Vec<&str> = uncached[chunk_start..chunk_end].to_vec();
 
                 let embeddings = self.call_api(&chunk)?;
@@ -819,48 +798,48 @@ impl BatchEmbedder for VoyageProvider {
     }
 
     fn dimension(&self) -> usize {
-        VOYAGE_VECTOR_DIM
+        OPENAI_VECTOR_DIM
     }
 }
 
 #[cfg(test)]
 #[derive(Clone)]
-pub struct VoyageProvider {
+pub struct OpenAIProvider {
     #[allow(dead_code)]
     api_key: String,
 }
 
 #[cfg(test)]
-impl VoyageProvider {
+impl OpenAIProvider {
     pub fn new(api_key: String) -> Self {
         Self { api_key }
     }
 }
 
 #[cfg(test)]
-impl BatchEmbedder for VoyageProvider {
+impl BatchEmbedder for OpenAIProvider {
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         Ok(texts
             .iter()
-            .map(|t| vec![t.len() as f32; VOYAGE_VECTOR_DIM])
+            .map(|t| vec![t.len() as f32; OPENAI_VECTOR_DIM])
             .collect())
     }
 
     fn dimension(&self) -> usize {
-        VOYAGE_VECTOR_DIM
+        OPENAI_VECTOR_DIM
     }
 }
 
 pub enum EmbedderVariant {
     Local(PooledEmbedder),
-    Voyage(VoyageProvider),
+    OpenAI(OpenAIProvider),
 }
 
 impl Clone for EmbedderVariant {
     fn clone(&self) -> Self {
         match self {
             Self::Local(e) => Self::Local(e.clone()),
-            Self::Voyage(e) => Self::Voyage(e.clone()),
+            Self::OpenAI(e) => Self::OpenAI(e.clone()),
         }
     }
 }
@@ -869,21 +848,21 @@ impl BatchEmbedder for EmbedderVariant {
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
         match self {
             Self::Local(e) => e.embed(text),
-            Self::Voyage(e) => e.embed(text),
+            Self::OpenAI(e) => e.embed(text),
         }
     }
 
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         match self {
             Self::Local(e) => e.embed_batch(texts),
-            Self::Voyage(e) => e.embed_batch(texts),
+            Self::OpenAI(e) => e.embed_batch(texts),
         }
     }
 
     fn dimension(&self) -> usize {
         match self {
             Self::Local(e) => e.dimension(),
-            Self::Voyage(e) => e.dimension(),
+            Self::OpenAI(e) => e.dimension(),
         }
     }
 }
@@ -893,12 +872,12 @@ pub fn create_embedder_from_config() -> Result<EmbedderVariant> {
 
     match config.embedding.provider {
         EmbeddingProviderType::Local => Ok(EmbedderVariant::Local(PooledEmbedder::default())),
-        EmbeddingProviderType::Voyage => {
+        EmbeddingProviderType::OpenAI => {
             let api_key = config
                 .embedding
                 .api_key
-                .ok_or_else(|| anyhow!("Voyage provider requires an API key in config"))?;
-            Ok(EmbedderVariant::Voyage(VoyageProvider::new(api_key)))
+                .ok_or_else(|| anyhow!("OpenAI provider requires an API key in config"))?;
+            Ok(EmbedderVariant::OpenAI(OpenAIProvider::new(api_key)))
         }
     }
 }

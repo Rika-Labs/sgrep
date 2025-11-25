@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/main.rs` wires the CLI; `search.rs` orchestrates hybrid semantic + keyword search; `indexer.rs` builds and refreshes indexes; `chunker.rs` handles tree-sitter chunking; `embedding.rs` manages the embedding pool and providers (local mxbai + Voyage API); `config.rs` handles config file parsing; `store.rs` persists metadata; `fts.rs` covers keyword scoring; `watch.rs` handles incremental re-indexing.
+- `src/main.rs` wires the CLI; `search.rs` orchestrates hybrid semantic + keyword search; `indexer.rs` builds and refreshes indexes; `chunker.rs` handles tree-sitter chunking; `embedding.rs` manages the embedding pool and providers (local mxbai + OpenAI API); `config.rs` handles config file parsing; `store.rs` persists metadata; `fts.rs` covers keyword scoring; `watch.rs` handles incremental re-indexing.
 - `plugins/sgrep/` contains the Claude Code plugin (hooks, skills). Update `plugins/sgrep/README.md` when changing agent behavior.
 - `scripts/install.sh` is the installer; `default-ignore.txt` lists default exclusions; `target/` holds build artifacts (use `cargo clean` to reset).
 

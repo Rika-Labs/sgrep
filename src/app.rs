@@ -86,14 +86,14 @@ fn build_embedder(
                 Arc::new(Embedder::default())
             })
         }
-        EmbeddingProviderType::Voyage => {
+        EmbeddingProviderType::OpenAI => {
             if offline {
                 anyhow::bail!(
-                    "Voyage provider requires network access. Either disable offline mode or switch to local provider in config."
+                    "OpenAI provider requires network access. Either disable offline mode or switch to local provider in config."
                 );
             }
 
-            info!("Using Voyage Code 3 API for embeddings");
+            info!("Using OpenAI text-embedding-3-small for embeddings");
             let embedder = create_embedder_from_config()?;
             Ok(Arc::new(embedder))
         }
@@ -132,10 +132,10 @@ fn handle_config(init: bool) -> Result<()> {
         let config = Config::load()?;
         let provider_name = match config.embedding.provider {
             EmbeddingProviderType::Local => "local (mxbai-embed-xsmall-v1)",
-            EmbeddingProviderType::Voyage => "voyage (voyage-code-3)",
+            EmbeddingProviderType::OpenAI => "openai (text-embedding-3-small)",
         };
         println!("  Provider: {}", style(provider_name).bold());
-        if config.embedding.provider == EmbeddingProviderType::Voyage {
+        if config.embedding.provider == EmbeddingProviderType::OpenAI {
             println!(
                 "  API Key: {}",
                 if config.embedding.api_key.is_some() {
@@ -478,9 +478,12 @@ mod tests {
         let prev_token = env::var("TOKENIZERS_PARALLELISM").ok();
         let prev_offline = env::var("SGREP_OFFLINE").ok();
         let prev_device = env::var("SGREP_DEVICE").ok();
+        let prev_config = env::var("SGREP_CONFIG").ok();
         env::remove_var("TOKENIZERS_PARALLELISM");
         env::remove_var("SGREP_OFFLINE");
         env::remove_var("SGREP_DEVICE");
+        // Use non-existent config to force local provider
+        env::set_var("SGREP_CONFIG", "/nonexistent/config.toml");
         let _ = build_embedder(true, Some("cpu".into())).unwrap();
         assert_eq!(env::var("TOKENIZERS_PARALLELISM").unwrap(), "true");
         assert_eq!(env::var("SGREP_OFFLINE").unwrap(), "1");
@@ -499,6 +502,11 @@ mod tests {
             env::set_var("SGREP_DEVICE", val);
         } else {
             env::remove_var("SGREP_DEVICE");
+        }
+        if let Some(val) = prev_config {
+            env::set_var("SGREP_CONFIG", val);
+        } else {
+            env::remove_var("SGREP_CONFIG");
         }
     }
 

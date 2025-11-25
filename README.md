@@ -11,7 +11,7 @@
 Natural-language search that works like `grep`. Fast, local, and works with coding agents.
 
 - **Semantic:** Finds concepts ("auth middleware", "retry logic"), not just strings.
-- **Local & Private:** Default local embeddings via mxbai-embed-xsmall-v1 (22.7M params, 384-dim, runs via ONNX). Optional remote provider (Voyage Code 3) for best-in-class code search accuracy.
+- **Local & Private:** Default local embeddings via mxbai-embed-xsmall-v1 (22.7M params, 384-dim, runs via ONNX). Optional OpenAI embeddings (text-embedding-3-small, 1536-dim) for high-throughput cloud usage.
 - **Auto-Isolated:** Every repository transparently receives its own index under `~/.sgrep/indexes/<hash>`.
 - **Adaptive:** Rayon-powered chunking/indexing automatically scales across cores while keeping laptops cool.
 - **Agent-Ready:** Designed for coding agents: stable CLI surface, structured JSON output via `--json`.
@@ -131,7 +131,7 @@ sgrep search --json "retry logic" | jq
   "index": {
     "repo_path": "/path/to/repo",
     "repo_hash": "<blake3>",
-    "vector_dim": 384,  // 384 for local, 1024 for voyage
+    "vector_dim": 384,  // 384 for local, 1536 for openai
     "indexed_at": "2025-11-23T05:00:00Z",
     "total_files": 123,
     "total_chunks": 456
@@ -187,7 +187,7 @@ sgrep config --init   # Create default config file
 
 sgrep is designed to be a "good citizen" on your machine:
 
-1. **Dual-Mode Embeddings:** Default local model (mxbai-embed-xsmall-v1, 22.7M params, 384-dim) runs via ONNX. Optional Voyage Code 3 API (1024-dim) for best-in-class code search accuracy.
+1. **Dual-Mode Embeddings:** Default local model (mxbai-embed-xsmall-v1, 22.7M params, 384-dim) runs via ONNX. Optional OpenAI API (text-embedding-3-small, 1536-dim) for high-throughput cloud usage.
 2. **Parallel Processing:** By default, uses a pool of embedding model instances (one per CPU core, max 8) to process batches in parallel. This provides 3-6x speedup on multi-core systems compared to sequential processing.
 3. **The Thermostat:** Indexing adjusts concurrency in real-time based on memory pressure and CPU speed. It won't freeze your laptop.
 4. **Smart Chunking:** Uses `tree-sitter` to split code by function/class boundaries, ensuring embeddings capture complete logical blocks.
@@ -211,25 +211,25 @@ sgrep supports two embedding providers, configured via `~/.sgrep/config.toml`:
 | Provider | Model | Dimensions | Speed | Best For |
 |----------|-------|------------|-------|----------|
 | `local` (default) | mxbai-embed-xsmall-v1 | 384 | Fast (~5s) | Privacy, offline use |
-| `voyage` | voyage-code-3 | 1024 | Medium | Best code search accuracy |
+| `openai` | text-embedding-3-small | 1536 | Fast | High throughput, cloud usage |
 
-**Setup Voyage (optional):**
+**Setup OpenAI (optional):**
 
 ```bash
 sgrep config --init   # Create config file
 ```
 
-Edit the config file to enable Voyage:
+Edit the config file to enable OpenAI:
 
 ```toml
 [embedding]
-provider = "voyage"
-api_key = "pa-..."    # Get yours at https://voyageai.com
+provider = "openai"
+api_key = "sk-..."    # Get yours at https://platform.openai.com
 ```
 
 Then re-index: `sgrep index --force`
 
-**Rate limits (Voyage starter tier):** 10K TPM, 3 RPM. sgrep handles rate limiting automatically.
+**Pricing:** $0.02 per 1M tokens. Very generous rate limits (1M+ TPM).
 
 ### Automatic Repository Isolation
 

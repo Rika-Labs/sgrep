@@ -90,7 +90,7 @@ sgrep config          # Show current configuration
 sgrep config --init   # Create default config file
 ```
 
-sgrep supports local (default) and remote (Voyage) embeddings. Config lives at `~/.sgrep/config.toml`.
+sgrep supports local (default) and OpenAI embeddings. Config lives at `~/.sgrep/config.toml`.
 
 ## Examples
 

@@ -9,7 +9,7 @@ use serde::Deserialize;
 pub enum EmbeddingProviderType {
     #[default]
     Local,
-    Voyage,
+    OpenAI,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -39,12 +39,12 @@ impl Config {
         let config: Config = toml::from_str(&contents)
             .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?;
 
-        if config.embedding.provider == EmbeddingProviderType::Voyage
+        if config.embedding.provider == EmbeddingProviderType::OpenAI
             && config.embedding.api_key.is_none()
         {
             anyhow::bail!(
-                "Voyage provider selected but no API key provided.\n\
-                 Add 'api_key = \"pa-...\"' to [embedding] section in {}",
+                "OpenAI provider selected but no API key provided.\n\
+                 Add 'api_key = \"sk-...\"' to [embedding] section in {}",
                 config_path.display()
             );
         }
@@ -79,7 +79,7 @@ impl Config {
 
         let default_config = r#"[embedding]
 provider = "local"
-# api_key = "pa-..."
+# api_key = "sk-..."
 "#;
 
         fs::write(&config_path, default_config)
@@ -113,15 +113,15 @@ provider = "local"
     }
 
     #[test]
-    fn parse_voyage_config() {
+    fn parse_openai_config() {
         let toml = r#"
 [embedding]
-provider = "voyage"
-api_key = "pa-test-key"
+provider = "openai"
+api_key = "sk-test-key"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.embedding.provider, EmbeddingProviderType::Voyage);
-        assert_eq!(config.embedding.api_key, Some("pa-test-key".to_string()));
+        assert_eq!(config.embedding.provider, EmbeddingProviderType::OpenAI);
+        assert_eq!(config.embedding.api_key, Some("sk-test-key".to_string()));
     }
 
     #[test]
@@ -143,7 +143,7 @@ api_key = "pa-test-key"
 
     #[test]
     #[serial]
-    fn load_voyage_without_api_key_errors() {
+    fn load_openai_without_api_key_errors() {
         let temp = std::env::temp_dir().join(format!("sgrep_config_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp).unwrap();
         let config_path = temp.join("config.toml");
@@ -151,7 +151,7 @@ api_key = "pa-test-key"
             &config_path,
             r#"
 [embedding]
-provider = "voyage"
+provider = "openai"
 "#,
         )
         .unwrap();

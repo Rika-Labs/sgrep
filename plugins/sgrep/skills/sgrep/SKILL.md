@@ -81,7 +81,7 @@ sgrep watch --debounce-ms 200
 
 ## Embedding Providers
 
-sgrep supports local (default) and remote (Voyage) embeddings. Check with `sgrep config`.
+sgrep supports local (default) and OpenAI embeddings. Check with `sgrep config`.
 
 ## Examples
 
