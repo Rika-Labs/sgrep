@@ -171,7 +171,8 @@ plugins/sgrep/
 ├── .claude-plugin/
 │   └── plugin.json          # Plugin manifest
 ├── skills/
-│   └── sgrep.md             # Skill definition
+│   └── sgrep/
+│       └── SKILL.md         # Skill definition (2025 schema)
 ├── hooks/
 │   ├── hooks.json           # Hook configurations
 │   └── scripts/

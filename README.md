@@ -11,7 +11,7 @@
 Natural-language search that works like `grep`. Fast, local, and works with coding agents.
 
 - **Semantic:** Finds concepts ("auth middleware", "retry logic"), not just strings.
-- **Local & Private:** Real ML embeddings powered by BGE-small-en-v1.5-q (quantized, 384-dim, runs locally via ONNX).
+- **Local & Private:** Real ML embeddings powered by mxbai-embed-xsmall-v1 (22.7M params, 384-dim, runs locally via ONNX).
 - **Auto-Isolated:** Every repository transparently receives its own index under `~/.sgrep/indexes/<hash>`.
 - **Adaptive:** Rayon-powered chunking/indexing automatically scales across cores while keeping laptops cool.
 - **Agent-Ready:** Designed for coding agents: stable CLI surface, structured JSON output via `--json`.
@@ -157,7 +157,7 @@ sgrep watch ../service --debounce-ms 200
 
 sgrep is designed to be a "good citizen" on your machine:
 
-1. **Real Embeddings:** Uses BGE-small-en-v1.5-q, a quantized SOTA model (33M params) that runs locally via FastEmbed + ONNX. First run downloads the model (~24MB) once.
+1. **Real Embeddings:** Uses mxbai-embed-xsmall-v1, a fast embedding model (22.7M params) that runs locally via ONNX. First run downloads the model (~24MB) once.
 2. **Parallel Processing:** By default, uses a pool of embedding model instances (one per CPU core, max 8) to process batches in parallel. This provides 3-6x speedup on multi-core systems compared to sequential processing.
 3. **The Thermostat:** Indexing adjusts concurrency in real-time based on memory pressure and CPU speed. It won't freeze your laptop.
 4. **Smart Chunking:** Uses `tree-sitter` to split code by function/class boundaries, ensuring embeddings capture complete logical blocks.
@@ -227,6 +227,7 @@ cargo clippy
 - **Weird results?** Clear `~/.sgrep/indexes/<repo>` and re-index to reset caches.
 - **Slow indexing?** Set `RAYON_NUM_THREADS=4` to limit concurrency on thermally constrained laptops.
 - **No index found?** Run `sgrep index` (auto-detects repo path if omitted).
+- **Air-gapped / flaky network?** Use `sgrep --offline index` (or `SGREP_OFFLINE=1`) to disable network fetches. Make sure the model cache exists under `~/.sgrep/cache/fastembed` first (run once online or copy the model there). If offline mode reports a missing model, fetch once with connectivity, then rerun.
 
 ## Attribution
 
