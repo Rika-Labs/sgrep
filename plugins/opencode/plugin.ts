@@ -16,32 +16,18 @@ export const SgrepOpenCodePlugin: Plugin = async ({ $, directory }) => ({
   },
 });
 
-export default SgrepOpenCodePlugin;
-
 type JsonMatch = {
   path: string;
   start_line: number;
   end_line: number;
   language: string;
   score: number;
-  semantic_score: number;
-  keyword_score: number;
   snippet: string;
 };
 
 type JsonResponse = {
-  query: string;
-  limit: number;
-  duration_ms: number;
   results: JsonMatch[];
-  index: {
-    repo_path: string;
-    repo_hash: string;
-    vector_dim: number;
-    indexed_at: string;
-    total_files: number;
-    total_chunks: number;
-  };
+  index: object;
 };
 
 function formatResults(results: JsonMatch[]): string {
@@ -59,7 +45,7 @@ function isJsonResponse(value: unknown): value is JsonResponse {
     return false;
   }
   const obj = value as Record<string, unknown>;
-  return Array.isArray(obj.results);
+  return Array.isArray(obj.results) && typeof obj.index === "object";
 }
 
 async function runSearch(
