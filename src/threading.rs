@@ -49,10 +49,10 @@ impl ThreadConfig {
         let budget = max_threads
             .filter(|&t| t > 0)
             .unwrap_or((total_cores * percent) / 100)
-            .max(2);
+            .max(1);
 
-        let onnx_threads = (budget / 4).clamp(2, 4);
-        let rayon_threads = budget.saturating_sub(onnx_threads / 2).max(2);
+        let onnx_threads = (budget / 4).clamp(1, 4);
+        let rayon_threads = budget.saturating_sub(onnx_threads / 2).max(1);
         let walker_threads = rayon_threads.min(8);
 
         Self {
@@ -132,8 +132,8 @@ mod tests {
     #[test]
     fn thread_config_respects_minimum_threads() {
         let config = ThreadConfig::compute(Some(1), None);
-        assert!(config.rayon_threads >= 2);
-        assert!(config.onnx_threads >= 2);
+        assert!(config.rayon_threads >= 1);
+        assert!(config.onnx_threads >= 1);
         assert!(config.walker_threads >= 1);
     }
 
@@ -179,7 +179,7 @@ mod tests {
     fn onnx_threads_capped_at_4() {
         let config = ThreadConfig::compute(Some(32), Some(CpuPreset::High));
         assert!(config.onnx_threads <= 4);
-        assert!(config.onnx_threads >= 2);
+        assert!(config.onnx_threads >= 1);
     }
 
     #[test]
@@ -191,12 +191,12 @@ mod tests {
     #[test]
     fn thread_config_handles_small_budgets() {
         let config = ThreadConfig::compute(Some(2), None);
-        assert!(config.rayon_threads >= 2);
-        assert!(config.onnx_threads >= 2);
+        assert!(config.rayon_threads >= 1);
+        assert!(config.onnx_threads >= 1);
 
         let config = ThreadConfig::compute(Some(3), None);
-        assert!(config.rayon_threads >= 2);
-        assert!(config.onnx_threads >= 2);
+        assert!(config.rayon_threads >= 1);
+        assert!(config.onnx_threads >= 1);
     }
 
     #[test]
@@ -292,10 +292,10 @@ mod tests {
     fn thread_config_reasonable_defaults_for_common_core_counts() {
         for cores in [4, 8, 10, 12, 16, 32] {
             let budget = (cores * 75) / 100;
-            let config = ThreadConfig::compute(Some(budget.max(2)), Some(CpuPreset::Auto));
+            let config = ThreadConfig::compute(Some(budget.max(1)), Some(CpuPreset::Auto));
 
-            assert!(config.rayon_threads >= 2, "rayon >= 2 for {} cores", cores);
-            assert!(config.onnx_threads >= 2, "onnx >= 2 for {} cores", cores);
+            assert!(config.rayon_threads >= 1, "rayon >= 1 for {} cores", cores);
+            assert!(config.onnx_threads >= 1, "onnx >= 1 for {} cores", cores);
             assert!(config.walker_threads <= 8, "walker <= 8 for {} cores", cores);
             assert!(
                 config.rayon_threads + config.onnx_threads <= cores + 4,
