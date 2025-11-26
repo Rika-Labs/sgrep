@@ -123,4 +123,46 @@ provider = "local"
         assert_eq!(Config::config_path(), PathBuf::from(custom_path));
         env::remove_var("SGREP_CONFIG");
     }
+
+    #[test]
+    #[serial]
+    fn config_path_uses_sgrep_home() {
+        env::remove_var("SGREP_CONFIG");
+        let home_path = "/custom/sgrep/home";
+        env::set_var("SGREP_HOME", home_path);
+        assert_eq!(Config::config_path(), PathBuf::from(home_path).join("config.toml"));
+        env::remove_var("SGREP_HOME");
+    }
+
+    #[test]
+    #[serial]
+    fn load_valid_config_file() {
+        let temp = std::env::temp_dir().join(format!("sgrep_cfg_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let config_file = temp.join("config.toml");
+        std::fs::write(&config_file, "[embedding]\nprovider = \"local\"\n").unwrap();
+        env::set_var("SGREP_CONFIG", &config_file);
+
+        let config = Config::load().unwrap();
+        assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
+
+        env::remove_var("SGREP_CONFIG");
+        std::fs::remove_dir_all(&temp).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn create_default_config_creates_file() {
+        let temp = std::env::temp_dir().join(format!("sgrep_create_{}", uuid::Uuid::new_v4()));
+        let config_file = temp.join("config.toml");
+        env::set_var("SGREP_CONFIG", &config_file);
+
+        let path = Config::create_default_config().unwrap();
+        assert!(path.exists());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("local"));
+
+        env::remove_var("SGREP_CONFIG");
+        std::fs::remove_dir_all(&temp).ok();
+    }
 }

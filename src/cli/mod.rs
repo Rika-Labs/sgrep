@@ -131,7 +131,11 @@ mod tests {
     fn cli_parses_config_show_model_dir() {
         let cli = Cli::parse_from(["sgrep", "config", "--show-model-dir"]);
         match cli.command {
-            Commands::Config { show_model_dir, verify_model, init } => {
+            Commands::Config {
+                show_model_dir,
+                verify_model,
+                init,
+            } => {
                 assert!(show_model_dir);
                 assert!(!verify_model);
                 assert!(!init);
@@ -144,7 +148,11 @@ mod tests {
     fn cli_parses_config_verify_model() {
         let cli = Cli::parse_from(["sgrep", "config", "--verify-model"]);
         match cli.command {
-            Commands::Config { show_model_dir, verify_model, init } => {
+            Commands::Config {
+                show_model_dir,
+                verify_model,
+                init,
+            } => {
                 assert!(!show_model_dir);
                 assert!(verify_model);
                 assert!(!init);
@@ -157,7 +165,11 @@ mod tests {
     fn cli_parses_config_init() {
         let cli = Cli::parse_from(["sgrep", "config", "--init"]);
         match cli.command {
-            Commands::Config { show_model_dir, verify_model, init } => {
+            Commands::Config {
+                show_model_dir,
+                verify_model,
+                init,
+            } => {
                 assert!(!show_model_dir);
                 assert!(!verify_model);
                 assert!(init);

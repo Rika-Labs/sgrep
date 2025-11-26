@@ -28,7 +28,7 @@ const DIR_VECTORS_FILE: &str = "dir_vectors.bin";
 const VECTORS_FILE: &str = "vectors.bin";
 const BINARY_VECTORS_FILE: &str = "binary_vectors.bin";
 const GRAPH_FILE: &str = "graph.bin.zst";
-const INDEX_FORMAT_VERSION: u32 = 4;
+const INDEX_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone)]
 pub struct IndexStore {
@@ -132,11 +132,13 @@ impl IndexStore {
         let mut hier: HierarchicalIndex = bincode::deserialize(&decompressed)?;
 
         if file_vectors_path.exists() {
-            hier.file_vectors = self.read_hierarchy_vectors(&file_vectors_path, hier.files.len())?;
+            hier.file_vectors =
+                self.read_hierarchy_vectors(&file_vectors_path, hier.files.len())?;
         }
 
         if dir_vectors_path.exists() {
-            hier.dir_vectors = self.read_hierarchy_vectors(&dir_vectors_path, hier.directories.len())?;
+            hier.dir_vectors =
+                self.read_hierarchy_vectors(&dir_vectors_path, hier.directories.len())?;
         }
 
         Ok(Some(hier))
@@ -151,8 +153,8 @@ impl IndexStore {
             return Ok(());
         }
 
-        let file = File::create(path)
-            .with_context(|| format!("Failed to create {}", path.display()))?;
+        let file =
+            File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
         let mut writer = BufWriter::new(file);
 
         let vector_dim = vectors.first().map(|v| v.len()).unwrap_or(0) as u32;
@@ -523,6 +525,87 @@ mod tests {
 
         assert!(mmap_index.is_empty());
         assert_eq!(mmap_index.len(), 0);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn save_and_load_graph_roundtrip() {
+        use crate::graph::{CodeGraph, Symbol, SymbolKind};
+
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("graph");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let mut graph = CodeGraph::new();
+        graph.add_symbol(Symbol {
+            id: Uuid::new_v4(),
+            name: "test_fn".to_string(),
+            qualified_name: "test_fn".to_string(),
+            kind: SymbolKind::Function,
+            file_path: PathBuf::from("test.rs"),
+            start_line: 1,
+            end_line: 5,
+            language: "rust".to_string(),
+            signature: "fn test_fn()".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        store.save_graph(&graph).unwrap();
+        assert!(store.has_graph());
+
+        let loaded = store.load_graph().unwrap().unwrap();
+        assert_eq!(loaded.symbols.len(), 1);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn load_graph_returns_none_when_missing() {
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("no_graph");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        assert!(!store.has_graph());
+        assert!(store.load_graph().unwrap().is_none());
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn save_and_load_hierarchy_roundtrip() {
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("hier");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let hier = HierarchicalIndex::new();
+
+        store.save_hierarchy(&hier).unwrap();
+        assert!(store.has_hierarchy());
+
+        let loaded = store.load_hierarchy().unwrap().unwrap();
+        assert_eq!(loaded.files.len(), 0);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn load_hierarchy_returns_none_when_missing() {
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("no_hier");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        assert!(!store.has_hierarchy());
+        assert!(store.load_hierarchy().unwrap().is_none());
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

@@ -5,7 +5,7 @@ use anyhow::Result;
 use tree_sitter::{Parser, Tree};
 use uuid::Uuid;
 
-use super::symbols::{Edge, EdgeKind, ImportRelation, Symbol, SymbolKind, is_container_kind};
+use super::symbols::{is_container_kind, Edge, EdgeKind, ImportRelation, Symbol, SymbolKind};
 
 pub struct SymbolExtractor {
     parsers: HashMap<String, Parser>,
@@ -97,7 +97,9 @@ impl SymbolExtractor {
             let kind = child.kind();
 
             if let Some(symbol_kind) = classify_node_kind(kind, language) {
-                if let Some(symbol) = self.extract_symbol(&child, source, path, language, symbol_kind, parent_id) {
+                if let Some(symbol) =
+                    self.extract_symbol(&child, source, path, language, symbol_kind, parent_id)
+                {
                     let symbol_id = symbol.id;
 
                     if let Some(parent) = parent_id {
@@ -112,7 +114,15 @@ impl SymbolExtractor {
                     symbols.push(symbol);
 
                     if is_container_kind(symbol_kind) {
-                        self.collect_symbols(&child, source, path, language, Some(symbol_id), symbols, edges);
+                        self.collect_symbols(
+                            &child,
+                            source,
+                            path,
+                            language,
+                            Some(symbol_id),
+                            symbols,
+                            edges,
+                        );
                     }
 
                     self.extract_calls(&child, source, symbol_id, edges);
@@ -327,14 +337,19 @@ impl SymbolExtractor {
                         return Some(parts[1].to_string());
                     }
                 } else if text.starts_with("import ") {
-                    let module = text.trim_start_matches("import ").split_whitespace().next()?;
+                    let module = text
+                        .trim_start_matches("import ")
+                        .split_whitespace()
+                        .next()?;
                     return Some(module.to_string());
                 }
             }
             "go" => {
                 if let Some(quote_start) = text.find('"') {
                     if let Some(quote_end) = text[quote_start + 1..].find('"') {
-                        return Some(text[quote_start + 1..quote_start + 1 + quote_end].to_string());
+                        return Some(
+                            text[quote_start + 1..quote_start + 1 + quote_end].to_string(),
+                        );
                     }
                 }
             }
@@ -379,7 +394,9 @@ impl SymbolExtractor {
             "typescript" | "javascript" | "tsx" => {
                 if let Some(as_idx) = text.find(" as ") {
                     let after = &text[as_idx + 4..];
-                    let end = after.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after.len());
+                    let end = after
+                        .find(|c: char| !c.is_alphanumeric() && c != '_')
+                        .unwrap_or(after.len());
                     let alias = after[..end].trim();
                     if !alias.is_empty() {
                         return Some(alias.to_string());
@@ -413,7 +430,13 @@ impl SymbolExtractor {
         edges: &mut Vec<Edge>,
     ) {
         let _cursor = node.walk();
-        self.collect_call_expressions(&node.walk().node(), source, caller_id, edges, &mut HashSet::new());
+        self.collect_call_expressions(
+            &node.walk().node(),
+            source,
+            caller_id,
+            edges,
+            &mut HashSet::new(),
+        );
     }
 
     fn collect_call_expressions(
@@ -429,7 +452,10 @@ impl SymbolExtractor {
         for child in node.children(&mut cursor) {
             let kind = child.kind();
 
-            if matches!(kind, "call_expression" | "method_call_expression" | "function_call") {
+            if matches!(
+                kind,
+                "call_expression" | "method_call_expression" | "function_call"
+            ) {
                 if let Some(callee_name) = self.extract_callee_name(&child, source) {
                     if seen.insert(callee_name.clone()) {
                         edges.push(Edge {
@@ -596,5 +622,408 @@ fn main() {}
             .unwrap();
 
         assert!(!imports.is_empty());
+    }
+
+    #[test]
+    fn test_symbol_extractor_python() {
+        let mut extractor = SymbolExtractor::new();
+        let source = r#"
+def hello():
+    print("hello")
+
+class MyClass:
+    def __init__(self):
+        self.value = 0
+
+    def method(self):
+        return self.value
+"#;
+
+        let (symbols, _edges, _imports) = extractor
+            .extract_from_file(Path::new("test.py"), source, "python")
+            .unwrap();
+
+        assert!(!symbols.is_empty());
+        let has_hello = symbols.iter().any(|s| s.name == "hello");
+        let has_class = symbols.iter().any(|s| s.name == "MyClass");
+        assert!(has_hello || has_class);
+    }
+
+    #[test]
+    fn test_symbol_extractor_javascript() {
+        let mut extractor = SymbolExtractor::new();
+        let source = r#"
+function hello() {
+    console.log("hello");
+}
+
+class MyClass {
+    constructor() {
+        this.value = 0;
+    }
+}
+"#;
+
+        let (symbols, _edges, _imports) = extractor
+            .extract_from_file(Path::new("test.js"), source, "javascript")
+            .unwrap();
+
+        assert!(!symbols.is_empty());
+    }
+
+    #[test]
+    fn test_symbol_extractor_typescript() {
+        let mut extractor = SymbolExtractor::new();
+        let source = r#"
+function hello(): void {
+    console.log("hello");
+}
+
+interface MyInterface {
+    value: number;
+}
+
+class MyClass implements MyInterface {
+    value: number = 0;
+}
+"#;
+
+        let (symbols, _edges, _imports) = extractor
+            .extract_from_file(Path::new("test.ts"), source, "typescript")
+            .unwrap();
+
+        assert!(!symbols.is_empty());
+    }
+
+    #[test]
+    fn test_extractor_unsupported_language() {
+        let mut extractor = SymbolExtractor::new();
+        let result = extractor.extract_from_file(Path::new("test.xyz"), "content", "unsupported");
+        assert!(result.is_ok());
+        let (symbols, edges, imports) = result.unwrap();
+        assert!(symbols.is_empty());
+        assert!(edges.is_empty());
+        assert!(imports.is_empty());
+    }
+
+    #[test]
+    fn test_get_tree_sitter_language() {
+        assert!(get_tree_sitter_language("rust").is_some());
+        assert!(get_tree_sitter_language("python").is_some());
+        assert!(get_tree_sitter_language("javascript").is_some());
+        assert!(get_tree_sitter_language("typescript").is_some());
+        assert!(get_tree_sitter_language("tsx").is_some());
+        assert!(get_tree_sitter_language("go").is_some());
+        assert!(get_tree_sitter_language("java").is_some());
+        assert!(get_tree_sitter_language("c").is_some());
+        assert!(get_tree_sitter_language("cpp").is_some());
+        assert!(get_tree_sitter_language("csharp").is_some());
+        assert!(get_tree_sitter_language("ruby").is_some());
+        assert!(get_tree_sitter_language("unknown").is_none());
+    }
+
+    #[test]
+    fn test_classify_node_kind_functions() {
+        assert_eq!(
+            classify_node_kind("function_declaration", "any"),
+            Some(SymbolKind::Function)
+        );
+        assert_eq!(
+            classify_node_kind("function_item", "any"),
+            Some(SymbolKind::Function)
+        );
+        assert_eq!(
+            classify_node_kind("function_definition", "any"),
+            Some(SymbolKind::Function)
+        );
+        assert_eq!(
+            classify_node_kind("arrow_function", "any"),
+            Some(SymbolKind::Function)
+        );
+    }
+
+    #[test]
+    fn test_classify_node_kind_methods() {
+        assert_eq!(
+            classify_node_kind("method_definition", "any"),
+            Some(SymbolKind::Method)
+        );
+        assert_eq!(
+            classify_node_kind("method_declaration", "any"),
+            Some(SymbolKind::Method)
+        );
+    }
+
+    #[test]
+    fn test_classify_node_kind_classes_and_structs() {
+        assert_eq!(
+            classify_node_kind("class_declaration", "any"),
+            Some(SymbolKind::Class)
+        );
+        assert_eq!(
+            classify_node_kind("class_definition", "any"),
+            Some(SymbolKind::Class)
+        );
+        assert_eq!(
+            classify_node_kind("struct_item", "any"),
+            Some(SymbolKind::Struct)
+        );
+        assert_eq!(
+            classify_node_kind("struct_declaration", "any"),
+            Some(SymbolKind::Struct)
+        );
+        assert_eq!(
+            classify_node_kind("struct_definition", "any"),
+            Some(SymbolKind::Struct)
+        );
+        assert_eq!(
+            classify_node_kind("impl_item", "any"),
+            Some(SymbolKind::Struct)
+        );
+    }
+
+    #[test]
+    fn test_classify_node_kind_interfaces_traits() {
+        assert_eq!(
+            classify_node_kind("interface_declaration", "any"),
+            Some(SymbolKind::Interface)
+        );
+        assert_eq!(
+            classify_node_kind("trait_item", "any"),
+            Some(SymbolKind::Trait)
+        );
+        assert_eq!(
+            classify_node_kind("trait_definition", "any"),
+            Some(SymbolKind::Trait)
+        );
+    }
+
+    #[test]
+    fn test_classify_node_kind_enums() {
+        assert_eq!(
+            classify_node_kind("enum_item", "any"),
+            Some(SymbolKind::Enum)
+        );
+        assert_eq!(
+            classify_node_kind("enum_declaration", "any"),
+            Some(SymbolKind::Enum)
+        );
+    }
+
+    #[test]
+    fn test_classify_node_kind_types() {
+        assert_eq!(
+            classify_node_kind("type_alias_declaration", "any"),
+            Some(SymbolKind::Type)
+        );
+        assert_eq!(
+            classify_node_kind("type_item", "any"),
+            Some(SymbolKind::Type)
+        );
+        assert_eq!(
+            classify_node_kind("type_declaration", "any"),
+            Some(SymbolKind::Type)
+        );
+    }
+
+    #[test]
+    fn test_classify_node_kind_constants_variables() {
+        assert_eq!(
+            classify_node_kind("const_item", "any"),
+            Some(SymbolKind::Constant)
+        );
+        assert_eq!(
+            classify_node_kind("const_declaration", "any"),
+            Some(SymbolKind::Constant)
+        );
+        assert_eq!(
+            classify_node_kind("variable_declaration", "any"),
+            Some(SymbolKind::Variable)
+        );
+        assert_eq!(
+            classify_node_kind("lexical_declaration", "any"),
+            Some(SymbolKind::Variable)
+        );
+        assert_eq!(
+            classify_node_kind("let_declaration", "any"),
+            Some(SymbolKind::Variable)
+        );
+        assert_eq!(
+            classify_node_kind("static_item", "any"),
+            Some(SymbolKind::Variable)
+        );
+    }
+
+    #[test]
+    fn test_classify_node_kind_modules() {
+        assert_eq!(
+            classify_node_kind("module", "any"),
+            Some(SymbolKind::Module)
+        );
+        assert_eq!(
+            classify_node_kind("mod_item", "any"),
+            Some(SymbolKind::Module)
+        );
+        assert_eq!(
+            classify_node_kind("module_declaration", "any"),
+            Some(SymbolKind::Module)
+        );
+        assert_eq!(
+            classify_node_kind("namespace_declaration", "any"),
+            Some(SymbolKind::Namespace)
+        );
+        assert_eq!(
+            classify_node_kind("package_clause", "any"),
+            Some(SymbolKind::Package)
+        );
+        assert_eq!(
+            classify_node_kind("package_declaration", "any"),
+            Some(SymbolKind::Package)
+        );
+    }
+
+    #[test]
+    fn test_classify_node_kind_fallback_patterns() {
+        assert_eq!(
+            classify_node_kind("some_function_thing", "any"),
+            Some(SymbolKind::Function)
+        );
+        assert_eq!(
+            classify_node_kind("some_method_thing", "any"),
+            Some(SymbolKind::Method)
+        );
+        assert_eq!(
+            classify_node_kind("some_class_thing", "any"),
+            Some(SymbolKind::Class)
+        );
+        assert_eq!(
+            classify_node_kind("some_struct_thing", "any"),
+            Some(SymbolKind::Struct)
+        );
+        assert_eq!(
+            classify_node_kind("some_interface_thing", "any"),
+            Some(SymbolKind::Interface)
+        );
+        assert_eq!(
+            classify_node_kind("some_trait_thing", "any"),
+            Some(SymbolKind::Trait)
+        );
+        assert_eq!(
+            classify_node_kind("some_enum_thing", "any"),
+            Some(SymbolKind::Enum)
+        );
+        assert_eq!(classify_node_kind("unknown_kind", "any"), None);
+    }
+
+    #[test]
+    fn test_symbol_extractor_go() {
+        let mut extractor = SymbolExtractor::new();
+        let source = r#"
+package main
+
+func hello() {
+    fmt.Println("hello")
+}
+
+type MyStruct struct {
+    value int
+}
+"#;
+
+        let (symbols, _edges, _imports) = extractor
+            .extract_from_file(Path::new("test.go"), source, "go")
+            .unwrap();
+
+        assert!(!symbols.is_empty());
+    }
+
+    #[test]
+    fn test_symbol_extractor_java() {
+        let mut extractor = SymbolExtractor::new();
+        let source = r#"
+public class MyClass {
+    private int value;
+
+    public void hello() {
+        System.out.println("hello");
+    }
+}
+"#;
+
+        let (symbols, _edges, _imports) = extractor
+            .extract_from_file(Path::new("Test.java"), source, "java")
+            .unwrap();
+
+        assert!(!symbols.is_empty());
+    }
+
+    #[test]
+    fn test_symbol_extractor_c() {
+        let mut extractor = SymbolExtractor::new();
+        let source = r#"
+void hello() {
+    printf("hello");
+}
+
+struct MyStruct {
+    int value;
+};
+"#;
+
+        let (symbols, _edges, _imports) = extractor
+            .extract_from_file(Path::new("test.c"), source, "c")
+            .unwrap();
+
+        assert!(!symbols.is_empty());
+    }
+
+    #[test]
+    fn test_symbol_extractor_ruby() {
+        let mut extractor = SymbolExtractor::new();
+        let source = r#"
+def hello
+    puts "hello"
+end
+
+class MyClass
+    def initialize
+        @value = 0
+    end
+end
+"#;
+
+        let (symbols, _edges, _imports) = extractor
+            .extract_from_file(Path::new("test.rb"), source, "ruby")
+            .unwrap();
+
+        assert!(!symbols.is_empty());
+    }
+
+    #[test]
+    fn test_symbol_extractor_default() {
+        let extractor = SymbolExtractor::default();
+        assert!(extractor.parsers.is_empty());
+    }
+
+    #[test]
+    fn test_symbol_extractor_with_call_expressions() {
+        let mut extractor = SymbolExtractor::new();
+        let source = r#"
+fn caller() {
+    callee();
+    another_function();
+}
+
+fn callee() {}
+fn another_function() {}
+"#;
+
+        let (symbols, edges, _imports) = extractor
+            .extract_from_file(Path::new("test.rs"), source, "rust")
+            .unwrap();
+
+        assert!(!symbols.is_empty());
+        let call_edges: Vec<_> = edges.iter().filter(|e| e.kind == EdgeKind::Calls).collect();
+        assert!(!call_edges.is_empty());
     }
 }

@@ -52,10 +52,8 @@ pub fn compute_file_embeddings(chunks: &[CodeChunk], vectors: &[Vec<f32>]) -> Hi
     for file_path in file_paths {
         let chunk_indices = file_to_chunks.get(&file_path).unwrap();
 
-        let file_chunk_vectors: Vec<&Vec<f32>> = chunk_indices
-            .iter()
-            .map(|&idx| &vectors[idx])
-            .collect();
+        let file_chunk_vectors: Vec<&Vec<f32>> =
+            chunk_indices.iter().map(|&idx| &vectors[idx]).collect();
 
         let refs: Vec<Vec<f32>> = file_chunk_vectors.iter().map(|v| (*v).clone()).collect();
         let mut file_vector = mean_pool_vectors(&refs);
@@ -246,5 +244,40 @@ mod tests {
         let expected_norm = (0.5_f32.powi(2) + 0.5_f32.powi(2)).sqrt();
         assert!((src_vec[0] - 0.5 / expected_norm).abs() < 1e-5);
         assert!((src_vec[1] - 0.5 / expected_norm).abs() < 1e-5);
+    }
+
+    #[test]
+    fn compute_directory_embeddings_empty_hier() {
+        let mut hier = HierarchicalIndex::new();
+        compute_directory_embeddings(&mut hier);
+        assert!(hier.directories.is_empty());
+    }
+
+    #[test]
+    fn compute_directory_embeddings_file_in_root() {
+        let mut hier = HierarchicalIndex::new();
+        hier.add_file(PathBuf::from("root_file.rs"), vec![0], vec![1.0, 0.0, 0.0]);
+        compute_directory_embeddings(&mut hier);
+        assert!(!hier.directories.is_empty());
+    }
+
+    #[test]
+    fn build_hierarchical_index_full_flow() {
+        let chunks = vec![CodeChunk {
+            id: Uuid::new_v4(),
+            path: PathBuf::from("src/main.rs"),
+            language: "rust".to_string(),
+            start_line: 1,
+            end_line: 10,
+            text: "fn main()".to_string(),
+            hash: "h1".to_string(),
+            modified_at: Utc::now(),
+        }];
+        let vectors = vec![vec![1.0, 0.0, 0.0]];
+
+        let hier = build_hierarchical_index(&chunks, &vectors);
+
+        assert!(!hier.files.is_empty());
+        assert!(!hier.directories.is_empty());
     }
 }

@@ -6,7 +6,6 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
-use ureq::{Agent, AgentBuilder, Proxy};
 use encoding_rs::UTF_8;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -15,8 +14,10 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel, Special};
 use llama_cpp_2::sampling::LlamaSampler;
 use serde::{Deserialize, Serialize};
+use ureq::{Agent, AgentBuilder, Proxy};
 
 use super::Expander;
+use crate::threading::ThreadConfig;
 
 const MODEL_NAME: &str = "qwen2.5-0.5b-instruct";
 const MODEL_URL: &str = "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf";
@@ -56,9 +57,18 @@ impl QueryAnalysis {
 
         // Detect structural queries
         let structural_patterns = [
-            "who calls", "what calls", "callers of", "calls to",
-            "imports", "imported by", "defined in", "definition of",
-            "implementations of", "implementors of", "usages of", "references to",
+            "who calls",
+            "what calls",
+            "callers of",
+            "calls to",
+            "imports",
+            "imported by",
+            "defined in",
+            "definition of",
+            "implementations of",
+            "implementors of",
+            "usages of",
+            "references to",
         ];
 
         let is_structural = structural_patterns.iter().any(|p| query_lower.contains(p));
@@ -73,7 +83,10 @@ impl QueryAnalysis {
         // Detect granularity
         let granularity = if query_lower.contains("file") || query_lower.contains("where is") {
             "file"
-        } else if query_lower.contains("directory") || query_lower.contains("folder") || query_lower.contains("module") {
+        } else if query_lower.contains("directory")
+            || query_lower.contains("folder")
+            || query_lower.contains("module")
+        {
             "directory"
         } else {
             "chunk"
@@ -159,23 +172,35 @@ impl QueryExpander {
 
     /// Generate text from a prompt.
     fn generate(&self, prompt: &str) -> Result<String> {
+        let cfg = ThreadConfig::get();
+        let llama_threads = env::var("SGREP_LLM_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(cfg.onnx_threads as i32)
+            .max(1);
+
         // Create context for this generation
         let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(std::num::NonZeroU32::new(512));
+            .with_n_ctx(std::num::NonZeroU32::new(512))
+            .with_n_threads(llama_threads)
+            .with_n_threads_batch(llama_threads);
 
-        let mut ctx = self.model
+        let mut ctx = self
+            .model
             .new_context(&self.backend, ctx_params)
             .map_err(|e| anyhow!("Failed to create context: {}", e))?;
 
         // Tokenize input
-        let tokens = self.model
+        let tokens = self
+            .model
             .str_to_token(prompt, AddBos::Always)
             .map_err(|e| anyhow!("Tokenization failed: {}", e))?;
 
         // Create batch and add tokens
         let mut batch = LlamaBatch::new(512, 1);
         for (i, token) in tokens.iter().enumerate() {
-            batch.add(*token, i as i32, &[0], i == tokens.len() - 1)
+            batch
+                .add(*token, i as i32, &[0], i == tokens.len() - 1)
                 .map_err(|e| anyhow!("Failed to add token to batch: {}", e))?;
         }
 
@@ -214,7 +239,8 @@ impl QueryExpander {
 
             // Prepare next batch with the new token
             batch.clear();
-            batch.add(token, seq_pos, &[0], true)
+            batch
+                .add(token, seq_pos, &[0], true)
                 .map_err(|e| anyhow!("Failed to add token: {}", e))?;
 
             ctx.decode(&mut batch)
@@ -231,10 +257,8 @@ impl Expander for QueryExpander {
     fn expand(&self, query: &str) -> Result<Vec<String>> {
         let analysis = self.analyze(query)?;
 
-        // Start with original query
         let mut result = vec![query.to_string()];
 
-        // Add expanded queries, deduplicating
         for expansion in analysis.expanded_queries {
             let normalized = expansion.to_lowercase();
             if !result.iter().any(|r| r.to_lowercase() == normalized) {
@@ -248,7 +272,8 @@ impl Expander for QueryExpander {
 
 /// Build the prompt for query understanding.
 fn build_prompt(query: &str) -> String {
-    format!(r#"<|im_start|>system
+    format!(
+        r#"<|im_start|>system
 You are a code search query analyzer. Given a user's search query, analyze it and output a JSON object with:
 - query_type: "semantic" (natural language questions), "structural" (code relationships like callers/callees), or "hybrid" (symbol lookup)
 - intent: the user's goal (e.g., "explanation", "callers", "callees", "definition", "symbol_lookup", "usage")
@@ -260,7 +285,9 @@ Output ONLY valid JSON, no explanation.<|im_end|>
 <|im_start|>user
 {}<|im_end|>
 <|im_start|>assistant
-"#, query)
+"#,
+        query
+    )
 }
 
 /// Parse the model's response into a QueryAnalysis.
@@ -332,6 +359,17 @@ fn download_model(show_progress: bool) -> Result<PathBuf> {
         return Ok(model_path);
     }
 
+    let offline = env::var("SGREP_OFFLINE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if offline {
+        return Err(anyhow!(
+            "Query expander model not cached and offline mode is enabled.\n\
+            Run once without --offline to download the model (~400MB)."
+        ));
+    }
+
     fs::create_dir_all(&cache_dir)?;
 
     if show_progress {
@@ -339,14 +377,14 @@ fn download_model(show_progress: bool) -> Result<PathBuf> {
     }
 
     let agent = create_http_agent();
-    let response = agent.get(MODEL_URL)
-        .call()
-        .map_err(|e| anyhow!(
+    let response = agent.get(MODEL_URL).call().map_err(|e| {
+        anyhow!(
             "Failed to download model: {}\n\n\
             If HuggingFace is blocked, set HTTPS_PROXY environment variable.\n\
             Example: export HTTPS_PROXY=http://proxy:port",
             e
-        ))?;
+        )
+    })?;
 
     let mut bytes = Vec::new();
     response.into_reader().read_to_end(&mut bytes)?;

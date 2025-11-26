@@ -24,7 +24,9 @@ use binary::{binary_shortlist, binary_shortlist_precomputed, quantize_to_binary}
 use graph_hybrid::{apply_graph_boost, search_graph_only};
 use hnsw::{build_hnsw_index, search_hnsw_candidates};
 use scoring::{
-    content_based_file_boost, recency_boost, select_top_k, AdaptiveWeights as Weights,
+    content_based_file_boost, directory_match_boost, filename_match_boost, implementation_boost,
+    normalize_bm25_scores, recency_boost, reexport_file_penalty, select_top_k,
+    AdaptiveWeights as Weights,
 };
 
 const HNSW_THRESHOLD: usize = 500;
@@ -129,7 +131,9 @@ impl SearchEngine {
     /// Analyze a query using the LLM-based expander, or fall back to heuristics.
     fn analyze_query(&self, query: &str) -> QueryAnalysis {
         if let Some(ref expander) = self.query_expander {
-            expander.analyze(query).unwrap_or_else(|_| QueryAnalysis::from_heuristics(query))
+            expander
+                .analyze(query)
+                .unwrap_or_else(|_| QueryAnalysis::from_heuristics(query))
         } else {
             QueryAnalysis::from_heuristics(query)
         }
@@ -198,11 +202,9 @@ impl SearchEngine {
             limit
         };
         let globset = fts::build_globset(&options.glob);
-
-        // Use BM25F for field-aware scoring (filename, path, symbols boost)
         let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
-        let mut matches: Vec<SearchResult> = index
+        let candidates: Vec<(usize, &CodeChunk, &[f32], f32)> = index
             .chunks
             .iter()
             .zip(&index.vectors)
@@ -210,12 +212,25 @@ impl SearchEngine {
             .filter(|(_, (chunk, _))| fts::glob_matches(globset.as_ref(), &chunk.path))
             .filter(|(_, (chunk, _))| fts::matches_filters(&options.filters, chunk))
             .map(|(idx, (chunk, vector))| {
-                let bm25_score = bm25f_index.score(query, idx);
+                let bm25_raw = bm25f_index.score(query, idx);
+                (idx, chunk, vector.as_slice(), bm25_raw)
+            })
+            .collect();
+
+        let bm25_raw_scores: Vec<f32> = candidates.iter().map(|(_, _, _, bm25)| *bm25).collect();
+        let bm25_normalized = normalize_bm25_scores(&bm25_raw_scores);
+
+        let mut matches: Vec<SearchResult> = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, (_, chunk, vector, bm25_raw))| {
                 self.score_chunk(
                     chunk,
                     vector,
                     &query_vec,
-                    bm25_score,
+                    query,
+                    *bm25_raw,
+                    bm25_normalized[i],
                     options.include_context,
                     &weights,
                 )
@@ -228,19 +243,31 @@ impl SearchEngine {
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
 
-            for (idx, (chunk, vector)) in index.chunks.iter().zip(&index.vectors).enumerate() {
-                if !fts::glob_matches(globset.as_ref(), &chunk.path) {
-                    continue;
-                }
-                if !fts::matches_filters(&options.filters, chunk) {
-                    continue;
-                }
-                let bm25_score = bm25f_index.score(&expanded_query, idx);
+            let exp_candidates: Vec<(usize, &CodeChunk, &[f32], f32)> = index
+                .chunks
+                .iter()
+                .zip(&index.vectors)
+                .enumerate()
+                .filter(|(_, (chunk, _))| fts::glob_matches(globset.as_ref(), &chunk.path))
+                .filter(|(_, (chunk, _))| fts::matches_filters(&options.filters, chunk))
+                .map(|(idx, (chunk, vector))| {
+                    let bm25_raw = bm25f_index.score(&expanded_query, idx);
+                    (idx, chunk, vector.as_slice(), bm25_raw)
+                })
+                .collect();
+
+            let exp_bm25_raw: Vec<f32> =
+                exp_candidates.iter().map(|(_, _, _, bm25)| *bm25).collect();
+            let exp_bm25_norm = normalize_bm25_scores(&exp_bm25_raw);
+
+            for (i, (_, chunk, vector, bm25_raw)) in exp_candidates.iter().enumerate() {
                 let result = self.score_chunk(
                     chunk,
                     vector,
                     &expanded_vec,
-                    bm25_score,
+                    &expanded_query,
+                    *bm25_raw,
+                    exp_bm25_norm[i],
                     options.include_context,
                     &weights,
                 );
@@ -274,7 +301,6 @@ impl SearchEngine {
             limit
         };
 
-        // Use BM25F for field-aware scoring (filename, path, symbols boost)
         let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let query_binary = quantize_to_binary(&query_vec);
@@ -287,15 +313,23 @@ impl SearchEngine {
             (PRF_TOP_K.max(fetch_limit) * BINARY_SHORTLIST_FACTOR).min(index.vectors.len());
         let candidates = binary_shortlist(&query_binary, &index_binary, shortlist_size);
 
+        let bm25_raw_scores: Vec<f32> = candidates
+            .iter()
+            .map(|&idx| bm25f_index.score(query, idx))
+            .collect();
+        let bm25_normalized = normalize_bm25_scores(&bm25_raw_scores);
+
         let mut matches: Vec<SearchResult> = candidates
             .iter()
-            .map(|&idx| {
-                let bm25_score = bm25f_index.score(query, idx);
+            .enumerate()
+            .map(|(i, &idx)| {
                 self.score_chunk(
                     &index.chunks[idx],
                     &index.vectors[idx],
                     &query_vec,
-                    bm25_score,
+                    query,
+                    bm25_raw_scores[i],
+                    bm25_normalized[i],
                     options.include_context,
                     &weights,
                 )
@@ -311,13 +345,20 @@ impl SearchEngine {
             let expanded_candidates =
                 binary_shortlist(&expanded_binary, &index_binary, shortlist_size);
 
-            for idx in expanded_candidates {
-                let bm25_score = bm25f_index.score(&expanded_query, idx);
+            let exp_bm25_raw: Vec<f32> = expanded_candidates
+                .iter()
+                .map(|&idx| bm25f_index.score(&expanded_query, idx))
+                .collect();
+            let exp_bm25_norm = normalize_bm25_scores(&exp_bm25_raw);
+
+            for (i, idx) in expanded_candidates.iter().enumerate() {
                 let result = self.score_chunk(
-                    &index.chunks[idx],
-                    &index.vectors[idx],
+                    &index.chunks[*idx],
+                    &index.vectors[*idx],
                     &expanded_vec,
-                    bm25_score,
+                    &expanded_query,
+                    exp_bm25_raw[i],
+                    exp_bm25_norm[i],
                     options.include_context,
                     &weights,
                 );
@@ -351,7 +392,6 @@ impl SearchEngine {
             limit
         };
 
-        // Use BM25F for field-aware scoring (filename, path, symbols boost)
         let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let hnsw = build_hnsw_index(index.metadata.vector_dim, index.vectors.len())?;
@@ -367,21 +407,31 @@ impl SearchEngine {
             index.vectors.len(),
         )?;
 
-        let mut matches: Vec<SearchResult> = candidates
+        let valid_candidates: Vec<usize> = candidates
+            .into_iter()
+            .filter(|&idx| idx < index.chunks.len())
+            .collect();
+
+        let bm25_raw_scores: Vec<f32> = valid_candidates
             .iter()
-            .filter_map(|&idx| {
-                if idx >= index.chunks.len() {
-                    return None;
-                }
-                let bm25_score = bm25f_index.score(query, idx);
-                Some(self.score_chunk(
+            .map(|&idx| bm25f_index.score(query, idx))
+            .collect();
+        let bm25_normalized = normalize_bm25_scores(&bm25_raw_scores);
+
+        let mut matches: Vec<SearchResult> = valid_candidates
+            .iter()
+            .enumerate()
+            .map(|(i, &idx)| {
+                self.score_chunk(
                     &index.chunks[idx],
                     &index.vectors[idx],
                     &query_vec,
-                    bm25_score,
+                    query,
+                    bm25_raw_scores[i],
+                    bm25_normalized[i],
                     options.include_context,
                     &weights,
-                ))
+                )
             })
             .collect();
 
@@ -397,16 +447,25 @@ impl SearchEngine {
                 index.vectors.len(),
             )?;
 
-            for idx in expanded_candidates {
-                if idx >= index.chunks.len() {
-                    continue;
-                }
-                let bm25_score = bm25f_index.score(&expanded_query, idx);
+            let exp_valid: Vec<usize> = expanded_candidates
+                .into_iter()
+                .filter(|&idx| idx < index.chunks.len())
+                .collect();
+
+            let exp_bm25_raw: Vec<f32> = exp_valid
+                .iter()
+                .map(|&idx| bm25f_index.score(&expanded_query, idx))
+                .collect();
+            let exp_bm25_norm = normalize_bm25_scores(&exp_bm25_raw);
+
+            for (i, &idx) in exp_valid.iter().enumerate() {
                 let result = self.score_chunk(
                     &index.chunks[idx],
                     &index.vectors[idx],
                     &expanded_vec,
-                    bm25_score,
+                    &expanded_query,
+                    exp_bm25_raw[i],
+                    exp_bm25_norm[i],
                     options.include_context,
                     &weights,
                 );
@@ -440,11 +499,9 @@ impl SearchEngine {
             limit
         };
         let globset = fts::build_globset(&options.glob);
-
-        // Use BM25F for field-aware scoring (filename, path, symbols boost)
         let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
-        let mut matches: Vec<SearchResult> = (0..index.len())
+        let candidates: Vec<(usize, f32)> = (0..index.len())
             .filter_map(|i| {
                 let chunk = &index.chunks[i];
                 if !fts::glob_matches(globset.as_ref(), &chunk.path) {
@@ -453,16 +510,28 @@ impl SearchEngine {
                 if !fts::matches_filters(&options.filters, chunk) {
                     return None;
                 }
-                let vector = index.get_vector(i);
-                let bm25_score = bm25f_index.score(query, i);
-                Some(self.score_chunk(
-                    chunk,
-                    vector,
+                let bm25_raw = bm25f_index.score(query, i);
+                Some((i, bm25_raw))
+            })
+            .collect();
+
+        let bm25_raw_scores: Vec<f32> = candidates.iter().map(|(_, bm25)| *bm25).collect();
+        let bm25_normalized = normalize_bm25_scores(&bm25_raw_scores);
+
+        let mut matches: Vec<SearchResult> = candidates
+            .iter()
+            .enumerate()
+            .map(|(idx, (i, bm25_raw))| {
+                self.score_chunk(
+                    &index.chunks[*i],
+                    index.get_vector(*i),
                     &query_vec,
-                    bm25_score,
+                    query,
+                    *bm25_raw,
+                    bm25_normalized[idx],
                     options.include_context,
                     &weights,
-                ))
+                )
             })
             .collect();
 
@@ -472,21 +541,31 @@ impl SearchEngine {
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
 
-            for i in 0..index.len() {
-                let chunk = &index.chunks[i];
-                if !fts::glob_matches(globset.as_ref(), &chunk.path) {
-                    continue;
-                }
-                if !fts::matches_filters(&options.filters, chunk) {
-                    continue;
-                }
-                let vector = index.get_vector(i);
-                let bm25_score = bm25f_index.score(&expanded_query, i);
+            let exp_candidates: Vec<(usize, f32)> = (0..index.len())
+                .filter_map(|i| {
+                    let chunk = &index.chunks[i];
+                    if !fts::glob_matches(globset.as_ref(), &chunk.path) {
+                        return None;
+                    }
+                    if !fts::matches_filters(&options.filters, chunk) {
+                        return None;
+                    }
+                    let bm25_raw = bm25f_index.score(&expanded_query, i);
+                    Some((i, bm25_raw))
+                })
+                .collect();
+
+            let exp_bm25_raw: Vec<f32> = exp_candidates.iter().map(|(_, bm25)| *bm25).collect();
+            let exp_bm25_norm = normalize_bm25_scores(&exp_bm25_raw);
+
+            for (idx, (i, bm25_raw)) in exp_candidates.iter().enumerate() {
                 let result = self.score_chunk(
-                    chunk,
-                    vector,
+                    &index.chunks[*i],
+                    index.get_vector(*i),
                     &expanded_vec,
-                    bm25_score,
+                    &expanded_query,
+                    *bm25_raw,
+                    exp_bm25_norm[idx],
                     options.include_context,
                     &weights,
                 );
@@ -520,7 +599,6 @@ impl SearchEngine {
             limit
         };
 
-        // Use BM25F for field-aware scoring (filename, path, symbols boost)
         let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let hnsw = build_hnsw_index(index.metadata.vector_dim, index.len())?;
@@ -529,28 +607,34 @@ impl SearchEngine {
                 .map_err(|e| anyhow::anyhow!("HNSW add failed: {}", e))?;
         }
 
-        let candidates = search_hnsw_candidates(
-            &hnsw,
-            &query_vec,
-            PRF_TOP_K.max(fetch_limit),
-            index.len(),
-        )?;
+        let candidates =
+            search_hnsw_candidates(&hnsw, &query_vec, PRF_TOP_K.max(fetch_limit), index.len())?;
 
-        let mut matches: Vec<SearchResult> = candidates
+        let valid_candidates: Vec<usize> = candidates
+            .into_iter()
+            .filter(|&idx| idx < index.len())
+            .collect();
+
+        let bm25_raw_scores: Vec<f32> = valid_candidates
             .iter()
-            .filter_map(|&idx| {
-                if idx >= index.len() {
-                    return None;
-                }
-                let bm25_score = bm25f_index.score(query, idx);
-                Some(self.score_chunk(
+            .map(|&idx| bm25f_index.score(query, idx))
+            .collect();
+        let bm25_normalized = normalize_bm25_scores(&bm25_raw_scores);
+
+        let mut matches: Vec<SearchResult> = valid_candidates
+            .iter()
+            .enumerate()
+            .map(|(i, &idx)| {
+                self.score_chunk(
                     &index.chunks[idx],
                     index.get_vector(idx),
                     &query_vec,
-                    bm25_score,
+                    query,
+                    bm25_raw_scores[i],
+                    bm25_normalized[i],
                     options.include_context,
                     &weights,
-                ))
+                )
             })
             .collect();
 
@@ -566,16 +650,25 @@ impl SearchEngine {
                 index.len(),
             )?;
 
-            for idx in expanded_candidates {
-                if idx >= index.len() {
-                    continue;
-                }
-                let bm25_score = bm25f_index.score(&expanded_query, idx);
+            let exp_valid: Vec<usize> = expanded_candidates
+                .into_iter()
+                .filter(|&idx| idx < index.len())
+                .collect();
+
+            let exp_bm25_raw: Vec<f32> = exp_valid
+                .iter()
+                .map(|&idx| bm25f_index.score(&expanded_query, idx))
+                .collect();
+            let exp_bm25_norm = normalize_bm25_scores(&exp_bm25_raw);
+
+            for (i, &idx) in exp_valid.iter().enumerate() {
                 let result = self.score_chunk(
                     &index.chunks[idx],
                     index.get_vector(idx),
                     &expanded_vec,
-                    bm25_score,
+                    &expanded_query,
+                    exp_bm25_raw[i],
+                    exp_bm25_norm[i],
                     options.include_context,
                     &weights,
                 );
@@ -611,7 +704,6 @@ impl SearchEngine {
         let shortlist_size =
             (PRF_TOP_K.max(fetch_limit) * BINARY_SHORTLIST_FACTOR).min(index.len());
 
-        // Use BM25F for field-aware scoring (filename, path, symbols boost)
         let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let query_binary = quantize_to_binary(&query_vec);
@@ -629,15 +721,23 @@ impl SearchEngine {
             (cands, Some(idx_bin))
         };
 
+        let bm25_raw_scores: Vec<f32> = candidates
+            .iter()
+            .map(|&idx| bm25f_index.score(query, idx))
+            .collect();
+        let bm25_normalized = normalize_bm25_scores(&bm25_raw_scores);
+
         let mut matches: Vec<SearchResult> = candidates
             .iter()
-            .map(|&idx| {
-                let bm25_score = bm25f_index.score(query, idx);
+            .enumerate()
+            .map(|(i, &idx)| {
                 self.score_chunk(
                     &index.chunks[idx],
                     index.get_vector(idx),
                     &query_vec,
-                    bm25_score,
+                    query,
+                    bm25_raw_scores[i],
+                    bm25_normalized[i],
                     options.include_context,
                     &weights,
                 )
@@ -659,13 +759,20 @@ impl SearchEngine {
                 vec![]
             };
 
-            for idx in expanded_candidates {
-                let bm25_score = bm25f_index.score(&expanded_query, idx);
+            let exp_bm25_raw: Vec<f32> = expanded_candidates
+                .iter()
+                .map(|&idx| bm25f_index.score(&expanded_query, idx))
+                .collect();
+            let exp_bm25_norm = normalize_bm25_scores(&exp_bm25_raw);
+
+            for (i, idx) in expanded_candidates.iter().enumerate() {
                 let result = self.score_chunk(
-                    &index.chunks[idx],
-                    index.get_vector(idx),
+                    &index.chunks[*idx],
+                    index.get_vector(*idx),
                     &expanded_vec,
-                    bm25_score,
+                    &expanded_query,
+                    exp_bm25_raw[i],
+                    exp_bm25_norm[i],
                     options.include_context,
                     &weights,
                 );
@@ -689,26 +796,34 @@ impl SearchEngine {
         chunk: &CodeChunk,
         vector: &[f32],
         query_vec: &[f32],
-        bm25_score: f32,
+        query: &str,
+        bm25_raw: f32,
+        bm25_normalized: f32,
         include_context: bool,
         weights: &Weights,
     ) -> SearchResult {
         let semantic = cosine_similarity(query_vec, vector);
         let recency = recency_boost(chunk);
         let file_type = content_based_file_boost(chunk);
-
-        let bm25_normalized = (bm25_score / 10.0).min(1.0);
+        let dir_match = directory_match_boost(chunk, query);
+        let reexport_penalty = reexport_file_penalty(chunk);
+        let impl_boost = implementation_boost(chunk, self.graph.as_ref());
+        let filename_boost = filename_match_boost(chunk, query);
 
         let score = weights.semantic * semantic
             + weights.bm25 * bm25_normalized
             + weights.recency * recency
-            + weights.file_type * file_type;
+            + weights.file_type * file_type
+            + dir_match
+            + reexport_penalty
+            + impl_boost
+            + filename_boost;
 
         SearchResult {
             chunk: chunk.clone(),
             score,
             semantic_score: semantic,
-            bm25_score,
+            bm25_score: bm25_raw,
             show_full_context: include_context,
         }
     }
@@ -776,7 +891,8 @@ impl SearchEngine {
                     .filter_map(|(idx, rerank_score)| {
                         if idx < results.len() {
                             let mut result = results[idx].clone();
-                            result.score = 0.3 * result.score + 0.7 * rerank_score;
+                            let rerank_boost = rerank_score * 0.4;
+                            result.score = result.score + rerank_boost;
                             Some(result)
                         } else {
                             None
@@ -819,13 +935,12 @@ impl SearchEngine {
                         );
                     }
                 }
-                self.search(index, query, options)
+                self.search_with_fallback(index, query, options, &analysis)
             }
-            QueryType::Semantic => {
-                self.search(index, query, options)
-            }
+            QueryType::Semantic => self.search_with_fallback(index, query, options, &analysis),
             QueryType::Hybrid => {
-                let mut vector_results = self.search(index, query, options.clone())?;
+                let mut vector_results =
+                    self.search_with_fallback(index, query, options.clone(), &analysis)?;
 
                 if let Some(ref graph) = self.graph {
                     apply_graph_boost(&mut vector_results, graph, query);
@@ -840,6 +955,46 @@ impl SearchEngine {
                 Ok(vector_results)
             }
         }
+    }
+
+    fn search_with_fallback(
+        &self,
+        index: &RepositoryIndex,
+        query: &str,
+        options: SearchOptions,
+        analysis: &QueryAnalysis,
+    ) -> Result<Vec<SearchResult>> {
+        let mut results = self.search(index, query, options.clone())?;
+
+        let needs_fallback =
+            results.is_empty() || results.first().map(|r| r.score < 0.3).unwrap_or(true);
+
+        if needs_fallback && !analysis.expanded_queries.is_empty() {
+            for expanded_query in analysis.expanded_queries.iter().take(3) {
+                if expanded_query == query {
+                    continue;
+                }
+
+                let expanded_results = self.search(index, expanded_query, options.clone())?;
+
+                for result in expanded_results {
+                    if !results.iter().any(|r| r.chunk.id == result.chunk.id) {
+                        let mut discounted = result;
+                        discounted.score *= 0.9;
+                        results.push(discounted);
+                    }
+                }
+            }
+
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.truncate(options.limit);
+        }
+
+        Ok(results)
     }
 
     pub fn search_hybrid_mmap(
@@ -864,13 +1019,12 @@ impl SearchEngine {
                         );
                     }
                 }
-                self.search_mmap(index, query, options)
+                self.search_mmap_with_fallback(index, query, options, &analysis)
             }
-            QueryType::Semantic => {
-                self.search_mmap(index, query, options)
-            }
+            QueryType::Semantic => self.search_mmap_with_fallback(index, query, options, &analysis),
             QueryType::Hybrid => {
-                let mut vector_results = self.search_mmap(index, query, options.clone())?;
+                let mut vector_results =
+                    self.search_mmap_with_fallback(index, query, options.clone(), &analysis)?;
 
                 if let Some(ref graph) = self.graph {
                     apply_graph_boost(&mut vector_results, graph, query);
@@ -885,6 +1039,46 @@ impl SearchEngine {
                 Ok(vector_results)
             }
         }
+    }
+
+    fn search_mmap_with_fallback(
+        &self,
+        index: &MmapIndex,
+        query: &str,
+        options: SearchOptions,
+        analysis: &QueryAnalysis,
+    ) -> Result<Vec<SearchResult>> {
+        let mut results = self.search_mmap(index, query, options.clone())?;
+
+        let needs_fallback =
+            results.is_empty() || results.first().map(|r| r.score < 0.3).unwrap_or(true);
+
+        if needs_fallback && !analysis.expanded_queries.is_empty() {
+            for expanded_query in analysis.expanded_queries.iter().take(3) {
+                if expanded_query == query {
+                    continue;
+                }
+
+                let expanded_results = self.search_mmap(index, expanded_query, options.clone())?;
+
+                for result in expanded_results {
+                    if !results.iter().any(|r| r.chunk.id == result.chunk.id) {
+                        let mut discounted = result;
+                        discounted.score *= 0.9;
+                        results.push(discounted);
+                    }
+                }
+            }
+
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.truncate(options.limit);
+        }
+
+        Ok(results)
     }
 
     fn graph_results_to_search_results(
@@ -1029,7 +1223,11 @@ impl SearchEngine {
             })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
 
         Ok(results)
@@ -1071,7 +1269,11 @@ impl SearchEngine {
             })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
 
         Ok(results)
@@ -1082,9 +1284,9 @@ impl SearchEngine {
 mod tests {
     use super::*;
     use crate::store::IndexMetadata;
+    use chrono::Utc;
     use std::path::PathBuf;
     use uuid::Uuid;
-    use chrono::Utc;
 
     #[derive(Clone, Default)]
     struct MockEmbedder;
@@ -1471,9 +1673,7 @@ mod tests {
             vec![0.5, 0.5, 0.0, 0.0],
         );
 
-        let results = engine
-            .search_files(&hier, "auth", 2)
-            .unwrap();
+        let results = engine.search_files(&hier, "auth", 2).unwrap();
 
         assert!(!results.is_empty());
         assert!(results.len() <= 2);
@@ -1515,4 +1715,379 @@ mod tests {
         assert!(!results.is_empty());
     }
 
+    #[test]
+    fn search_empty_index_returns_empty() {
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder.clone());
+        let index = make_index(vec![], vec![]);
+
+        let results = engine
+            .search(&index, "query", SearchOptions::default())
+            .unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_files_empty_hierarchy_returns_empty() {
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder.clone());
+        let hier = HierarchicalIndex::new();
+
+        let results = engine.search_files(&hier, "query", 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_directories_empty_hierarchy_returns_empty() {
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder.clone());
+        let hier = HierarchicalIndex::new();
+
+        let results = engine.search_directories(&hier, "query", 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn filter_by_language_matches_chunks() {
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder.clone());
+
+        let chunks = vec![
+            make_chunk("fn test() {}", "rust", "test.rs"),
+            make_chunk("def test():", "python", "test.py"),
+            make_chunk("function test() {}", "javascript", "test.js"),
+        ];
+        let vectors: Vec<Vec<f32>> = chunks
+            .iter()
+            .map(|c| embedder.embed(&c.text).unwrap())
+            .collect();
+
+        let results = engine
+            .search(
+                &make_index(chunks, vectors),
+                "test",
+                SearchOptions {
+                    limit: 10,
+                    include_context: false,
+                    glob: vec![],
+                    filters: vec!["lang=python".to_string()],
+                    rerank: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk.language, "python");
+    }
+
+    #[test]
+    fn multiple_glob_patterns_filter_correctly() {
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder.clone());
+
+        let chunks = vec![
+            make_chunk("fn test1() {}", "rust", "src/auth.rs"),
+            make_chunk("fn test2() {}", "rust", "src/db.rs"),
+            make_chunk("fn test3() {}", "rust", "tests/auth.rs"),
+            make_chunk("fn test4() {}", "rust", "lib/utils.rs"),
+        ];
+        let vectors: Vec<Vec<f32>> = chunks
+            .iter()
+            .map(|c| embedder.embed(&c.text).unwrap())
+            .collect();
+
+        let results = engine
+            .search(
+                &make_index(chunks, vectors),
+                "test",
+                SearchOptions {
+                    limit: 10,
+                    include_context: false,
+                    glob: vec!["src/**/*.rs".to_string()],
+                    filters: vec![],
+                    rerank: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        for r in &results {
+            assert!(r.chunk.path.starts_with("src/"));
+        }
+    }
+
+    #[test]
+    fn find_symbol_returns_empty_without_graph() {
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder);
+
+        let results = engine.find_symbol("test");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn find_callers_returns_empty_without_graph() {
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder);
+
+        let results = engine.find_callers("test");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn find_callees_returns_empty_without_graph() {
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder);
+
+        let results = engine.find_callees("test");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn graph_stats_returns_none_without_graph() {
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder);
+
+        assert!(engine.graph_stats().is_none());
+    }
+
+    #[test]
+    fn find_symbol_with_graph() {
+        use crate::graph::{CodeGraph, Symbol, SymbolKind};
+
+        let embedder = Arc::new(MockEmbedder);
+        let mut engine = SearchEngine::new(embedder);
+
+        let mut graph = CodeGraph::new();
+        graph.add_symbol(Symbol {
+            id: Uuid::new_v4(),
+            name: "authenticate".to_string(),
+            qualified_name: "auth::authenticate".to_string(),
+            kind: SymbolKind::Function,
+            file_path: PathBuf::from("src/auth.rs"),
+            start_line: 1,
+            end_line: 10,
+            language: "rust".to_string(),
+            signature: "fn authenticate()".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        engine.set_graph(graph);
+
+        let results = engine.find_symbol("authenticate");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "authenticate");
+    }
+
+    #[test]
+    fn find_callers_with_graph() {
+        use crate::graph::{CodeGraph, Edge, EdgeKind, Symbol, SymbolKind};
+
+        let embedder = Arc::new(MockEmbedder);
+        let mut engine = SearchEngine::new(embedder);
+
+        let mut graph = CodeGraph::new();
+        let callee_id = Uuid::new_v4();
+        let caller_id = Uuid::new_v4();
+
+        graph.add_symbol(Symbol {
+            id: callee_id,
+            name: "authenticate".to_string(),
+            qualified_name: "auth::authenticate".to_string(),
+            kind: SymbolKind::Function,
+            file_path: PathBuf::from("src/auth.rs"),
+            start_line: 1,
+            end_line: 10,
+            language: "rust".to_string(),
+            signature: "fn authenticate()".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        graph.add_symbol(Symbol {
+            id: caller_id,
+            name: "login".to_string(),
+            qualified_name: "login::login".to_string(),
+            kind: SymbolKind::Function,
+            file_path: PathBuf::from("src/login.rs"),
+            start_line: 1,
+            end_line: 20,
+            language: "rust".to_string(),
+            signature: "fn login()".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        graph.add_edge(Edge {
+            source_id: caller_id,
+            target_id: callee_id,
+            kind: EdgeKind::Calls,
+            metadata: None,
+        });
+
+        engine.set_graph(graph);
+
+        let callers = engine.find_callers("authenticate");
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].name, "login");
+    }
+
+    #[test]
+    fn find_callees_with_graph() {
+        use crate::graph::{CodeGraph, Edge, EdgeKind, Symbol, SymbolKind};
+
+        let embedder = Arc::new(MockEmbedder);
+        let mut engine = SearchEngine::new(embedder);
+
+        let mut graph = CodeGraph::new();
+        let caller_id = Uuid::new_v4();
+        let callee_id = Uuid::new_v4();
+
+        graph.add_symbol(Symbol {
+            id: caller_id,
+            name: "login".to_string(),
+            qualified_name: "login::login".to_string(),
+            kind: SymbolKind::Function,
+            file_path: PathBuf::from("src/login.rs"),
+            start_line: 1,
+            end_line: 20,
+            language: "rust".to_string(),
+            signature: "fn login()".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        graph.add_symbol(Symbol {
+            id: callee_id,
+            name: "authenticate".to_string(),
+            qualified_name: "auth::authenticate".to_string(),
+            kind: SymbolKind::Function,
+            file_path: PathBuf::from("src/auth.rs"),
+            start_line: 1,
+            end_line: 10,
+            language: "rust".to_string(),
+            signature: "fn authenticate()".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        graph.add_edge(Edge {
+            source_id: caller_id,
+            target_id: callee_id,
+            kind: EdgeKind::Calls,
+            metadata: None,
+        });
+
+        engine.set_graph(graph);
+
+        let callees = engine.find_callees("login");
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0].name, "authenticate");
+    }
+
+    #[test]
+    fn graph_stats_with_graph() {
+        use crate::graph::{CodeGraph, Symbol, SymbolKind};
+
+        let embedder = Arc::new(MockEmbedder);
+        let mut engine = SearchEngine::new(embedder);
+
+        let mut graph = CodeGraph::new();
+        graph.add_symbol(Symbol {
+            id: Uuid::new_v4(),
+            name: "test".to_string(),
+            qualified_name: "test::test".to_string(),
+            kind: SymbolKind::Function,
+            file_path: PathBuf::from("src/test.rs"),
+            start_line: 1,
+            end_line: 10,
+            language: "rust".to_string(),
+            signature: "fn test()".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        engine.set_graph(graph);
+
+        let stats = engine.graph_stats();
+        assert!(stats.is_some());
+        assert_eq!(stats.unwrap().total_symbols, 1);
+    }
+
+    #[test]
+    fn cosine_similarity_identical_vectors() {
+        let v1 = vec![1.0, 0.0, 0.0, 0.0];
+        let similarity = cosine_similarity(&v1, &v1);
+        assert!((similarity - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_orthogonal_vectors() {
+        let v1 = vec![1.0, 0.0, 0.0, 0.0];
+        let v2 = vec![0.0, 1.0, 0.0, 0.0];
+        let similarity = cosine_similarity(&v1, &v2);
+        assert!(similarity.abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_opposite_vectors() {
+        let v1 = vec![1.0, 0.0, 0.0, 0.0];
+        let v2 = vec![-1.0, 0.0, 0.0, 0.0];
+        let similarity = cosine_similarity(&v1, &v2);
+        assert!((similarity + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn search_with_include_context() {
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder.clone());
+
+        let chunks = vec![make_chunk("fn test() {}", "rust", "test.rs")];
+        let vectors: Vec<Vec<f32>> = chunks
+            .iter()
+            .map(|c| embedder.embed(&c.text).unwrap())
+            .collect();
+
+        let results = engine
+            .search(
+                &make_index(chunks, vectors),
+                "test",
+                SearchOptions {
+                    limit: 10,
+                    include_context: true,
+                    glob: vec![],
+                    filters: vec![],
+                    rerank: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].show_full_context);
+    }
+
+    #[test]
+    fn select_top_k_handles_less_than_k() {
+        let chunk = make_chunk("test", "rust", "test.rs");
+        let mut matches = vec![SearchResult {
+            chunk,
+            score: 0.5,
+            semantic_score: 0.5,
+            bm25_score: 0.0,
+            show_full_context: false,
+        }];
+
+        select_top_k(&mut matches, 10);
+
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn select_top_k_empty_input() {
+        let mut matches: Vec<SearchResult> = vec![];
+        select_top_k(&mut matches, 5);
+        assert!(matches.is_empty());
+    }
 }

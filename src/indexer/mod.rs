@@ -7,12 +7,12 @@ pub use batch::{
     determine_token_budget, embed_batch_with_timeout, estimate_tokens, is_operator_or_punctuation,
 };
 pub use files::{
-    build_default_excludes, canonical, collect_files, detect_language_for_graph, is_probably_binary,
-    normalize_to_relative, MAX_FILE_BYTES,
+    build_default_excludes, canonical, collect_files, detect_language_for_graph,
+    is_probably_binary, normalize_to_relative, MAX_FILE_BYTES,
 };
 pub use hierarchy::{
-    build_hierarchical_index, compute_directory_embeddings, compute_file_embeddings,
-    l2_normalize, mean_pool_vectors,
+    build_hierarchical_index, compute_directory_embeddings, compute_file_embeddings, l2_normalize,
+    mean_pool_vectors,
 };
 
 use std::collections::{HashMap, HashSet};

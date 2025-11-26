@@ -283,4 +283,25 @@ mod tests {
         assert!(!is_operator_or_punctuation(' '));
         assert!(!is_operator_or_punctuation('\n'));
     }
+
+    #[test]
+    fn adjust_batch_size_returns_base_for_zero_chunks() {
+        let adjusted = adjust_batch_size_for_progress(256, 0);
+        assert_eq!(adjusted, 256);
+    }
+
+    #[test]
+    fn adjust_batch_size_for_very_small_jobs() {
+        let adjusted = adjust_batch_size_for_progress(64, 1);
+        assert!(adjusted <= 64);
+        assert!(adjusted >= 1);
+
+        let adjusted2 = adjust_batch_size_for_progress(64, 2);
+        assert!(adjusted2 <= 64);
+        assert!(adjusted2 >= 1);
+
+        let adjusted3 = adjust_batch_size_for_progress(64, 3);
+        assert!(adjusted3 <= 64);
+        assert!(adjusted3 >= 1);
+    }
 }

@@ -17,8 +17,7 @@ pub fn build_hnsw_index(dimensions: usize, capacity: usize) -> Result<Index> {
         multi: false,
     };
 
-    let hnsw =
-        Index::new(&options).map_err(|e| anyhow::anyhow!("HNSW creation failed: {}", e))?;
+    let hnsw = Index::new(&options).map_err(|e| anyhow::anyhow!("HNSW creation failed: {}", e))?;
     hnsw.reserve(capacity)
         .map_err(|e| anyhow::anyhow!("HNSW reserve failed: {}", e))?;
     Ok(hnsw)

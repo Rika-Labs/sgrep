@@ -274,4 +274,105 @@ mod tests {
 
         fs::remove_dir_all(&test_repo).ok();
     }
+
+    #[test]
+    fn detect_language_rust() {
+        assert_eq!(detect_language_for_graph(Path::new("src/main.rs")), Some("rust"));
+    }
+
+    #[test]
+    fn detect_language_python() {
+        assert_eq!(detect_language_for_graph(Path::new("script.py")), Some("python"));
+    }
+
+    #[test]
+    fn detect_language_typescript() {
+        assert_eq!(detect_language_for_graph(Path::new("app.ts")), Some("typescript"));
+        assert_eq!(detect_language_for_graph(Path::new("App.tsx")), Some("tsx"));
+    }
+
+    #[test]
+    fn detect_language_javascript() {
+        assert_eq!(detect_language_for_graph(Path::new("app.js")), Some("javascript"));
+        assert_eq!(detect_language_for_graph(Path::new("App.jsx")), Some("javascript"));
+    }
+
+    #[test]
+    fn detect_language_go() {
+        assert_eq!(detect_language_for_graph(Path::new("main.go")), Some("go"));
+    }
+
+    #[test]
+    fn detect_language_java() {
+        assert_eq!(detect_language_for_graph(Path::new("Main.java")), Some("java"));
+    }
+
+    #[test]
+    fn detect_language_c_cpp() {
+        assert_eq!(detect_language_for_graph(Path::new("main.c")), Some("c"));
+        assert_eq!(detect_language_for_graph(Path::new("main.h")), Some("c"));
+        assert_eq!(detect_language_for_graph(Path::new("main.cpp")), Some("cpp"));
+        assert_eq!(detect_language_for_graph(Path::new("main.cc")), Some("cpp"));
+        assert_eq!(detect_language_for_graph(Path::new("main.cxx")), Some("cpp"));
+        assert_eq!(detect_language_for_graph(Path::new("main.hpp")), Some("cpp"));
+    }
+
+    #[test]
+    fn detect_language_csharp() {
+        assert_eq!(detect_language_for_graph(Path::new("Program.cs")), Some("csharp"));
+    }
+
+    #[test]
+    fn detect_language_ruby() {
+        assert_eq!(detect_language_for_graph(Path::new("script.rb")), Some("ruby"));
+    }
+
+    #[test]
+    fn detect_language_unknown() {
+        assert_eq!(detect_language_for_graph(Path::new("file.unknown")), None);
+        assert_eq!(detect_language_for_graph(Path::new("no_extension")), None);
+    }
+
+    #[test]
+    fn normalize_to_relative_non_absolute_path() {
+        let root = PathBuf::from("/some/root");
+        let path = PathBuf::from("relative/path.rs");
+        let result = normalize_to_relative(&path, &root);
+        assert_eq!(result, PathBuf::from("relative/path.rs"));
+    }
+
+    #[test]
+    #[serial]
+    fn normalize_to_relative_existing_file() {
+        let temp_dir = std::env::temp_dir().join(format!("norm_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = temp_dir.join("test.rs");
+        fs::write(&file_path, "content").unwrap();
+
+        let result = normalize_to_relative(&file_path, &temp_dir);
+        assert_eq!(result, PathBuf::from("test.rs"));
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn build_default_excludes_returns_valid_globset() {
+        let excludes = build_default_excludes();
+        assert!(excludes.is_match("node_modules/package.json"));
+        assert!(excludes.is_match("target/debug/build"));
+    }
+
+    #[test]
+    fn is_probably_binary_various_extensions() {
+        assert!(is_probably_binary(Path::new("photo.jpg")));
+        assert!(is_probably_binary(Path::new("photo.jpeg")));
+        assert!(is_probably_binary(Path::new("photo.gif")));
+        assert!(is_probably_binary(Path::new("video.mp4")));
+        assert!(is_probably_binary(Path::new("archive.zip")));
+        assert!(is_probably_binary(Path::new("archive.tar")));
+        assert!(is_probably_binary(Path::new("binary.exe")));
+        assert!(is_probably_binary(Path::new("lib.dll")));
+        assert!(!is_probably_binary(Path::new("README.md")));
+        assert!(!is_probably_binary(Path::new("config.json")));
+    }
 }

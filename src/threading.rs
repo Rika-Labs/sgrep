@@ -1,3 +1,4 @@
+use std::env;
 use std::sync::OnceLock;
 
 pub struct ThreadConfig {
@@ -63,19 +64,32 @@ impl ThreadConfig {
     }
 
     pub fn apply(&self) {
-        use std::env;
+        set_if_absent("RAYON_NUM_THREADS", &self.rayon_threads.to_string());
 
-        if env::var_os("RAYON_NUM_THREADS").is_none() {
-            env::set_var("RAYON_NUM_THREADS", self.rayon_threads.to_string());
-        }
+        let rayon_threads = env::var("RAYON_NUM_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(self.rayon_threads);
 
-        if env::var_os("ORT_NUM_THREADS").is_none() {
-            env::set_var("ORT_NUM_THREADS", self.onnx_threads.to_string());
-        }
+        // Build the global Rayon pool early so later uses can't oversubscribe.
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(rayon_threads.max(1))
+            .build_global();
 
-        if env::var_os("ORT_INTER_OP_NUM_THREADS").is_none() {
-            env::set_var("ORT_INTER_OP_NUM_THREADS", "1");
-        }
+        let onnx_threads = self.onnx_threads.to_string();
+        set_if_absent("ORT_INTRA_OP_NUM_THREADS", &onnx_threads);
+        set_if_absent("ORT_INTER_OP_NUM_THREADS", "1");
+        // Keep the legacy variable for backward compatibility; ONNX ignores it.
+        set_if_absent("ORT_NUM_THREADS", &onnx_threads);
+        // Cover common BLAS/OpenMP entry points that ONNX or tokenizers may use.
+        set_if_absent("OMP_NUM_THREADS", &onnx_threads);
+        set_if_absent("OPENBLAS_NUM_THREADS", &onnx_threads);
+        set_if_absent("MKL_NUM_THREADS", &onnx_threads);
+        set_if_absent("VECLIB_MAXIMUM_THREADS", &onnx_threads);
+        set_if_absent("NUMEXPR_NUM_THREADS", &onnx_threads);
+
+        #[cfg(not(test))]
+        self.configure_onnx_runtime();
     }
 }
 
@@ -88,6 +102,33 @@ impl CpuPreset {
             "high" => Some(Self::High),
             "background" => Some(Self::Background),
             _ => None,
+        }
+    }
+}
+
+fn set_if_absent(key: &str, value: &str) {
+    if env::var_os(key).is_none() {
+        env::set_var(key, value);
+    }
+}
+
+#[cfg(not(test))]
+impl ThreadConfig {
+    fn configure_onnx_runtime(&self) {
+        use ort::environment::GlobalThreadPoolOptions;
+
+        let opts = GlobalThreadPoolOptions::default()
+            .with_intra_threads(self.onnx_threads)
+            .and_then(|o| o.with_inter_threads(1))
+            .and_then(|o| o.with_spin_control(false));
+
+        if let Ok(opts) = opts {
+            // Commit a constrained global ONNX thread pool; if already initialized,
+            // commit() simply returns Ok(false).
+            let _ = ort::init()
+                .with_name("sgrep")
+                .with_global_thread_pool(opts)
+                .commit();
         }
     }
 }
@@ -244,28 +285,37 @@ mod tests {
     #[test]
     #[serial]
     fn apply_sets_ort_env_vars() {
-        let prev_intra = env::var("ORT_NUM_THREADS").ok();
+        let prev_intra = env::var("ORT_INTRA_OP_NUM_THREADS").ok();
         let prev_inter = env::var("ORT_INTER_OP_NUM_THREADS").ok();
-        env::remove_var("ORT_NUM_THREADS");
+        let prev_omp = env::var("OMP_NUM_THREADS").ok();
+        env::remove_var("ORT_INTRA_OP_NUM_THREADS");
         env::remove_var("ORT_INTER_OP_NUM_THREADS");
+        env::remove_var("OMP_NUM_THREADS");
 
         let config = ThreadConfig::compute(Some(8), None);
         config.apply();
 
-        let intra = env::var("ORT_NUM_THREADS").unwrap();
+        let intra = env::var("ORT_INTRA_OP_NUM_THREADS").unwrap();
         let inter = env::var("ORT_INTER_OP_NUM_THREADS").unwrap();
+        let omp = env::var("OMP_NUM_THREADS").unwrap();
         assert_eq!(intra, config.onnx_threads.to_string());
         assert_eq!(inter, "1");
+        assert_eq!(omp, config.onnx_threads.to_string());
 
         if let Some(v) = prev_intra {
-            env::set_var("ORT_NUM_THREADS", v);
+            env::set_var("ORT_INTRA_OP_NUM_THREADS", v);
         } else {
-            env::remove_var("ORT_NUM_THREADS");
+            env::remove_var("ORT_INTRA_OP_NUM_THREADS");
         }
         if let Some(v) = prev_inter {
             env::set_var("ORT_INTER_OP_NUM_THREADS", v);
         } else {
             env::remove_var("ORT_INTER_OP_NUM_THREADS");
+        }
+        if let Some(v) = prev_omp {
+            env::set_var("OMP_NUM_THREADS", v);
+        } else {
+            env::remove_var("OMP_NUM_THREADS");
         }
     }
 
@@ -296,7 +346,11 @@ mod tests {
 
             assert!(config.rayon_threads >= 1, "rayon >= 1 for {} cores", cores);
             assert!(config.onnx_threads >= 1, "onnx >= 1 for {} cores", cores);
-            assert!(config.walker_threads <= 8, "walker <= 8 for {} cores", cores);
+            assert!(
+                config.walker_threads <= 8,
+                "walker <= 8 for {} cores",
+                cores
+            );
             assert!(
                 config.rayon_threads + config.onnx_threads <= cores + 4,
                 "total threads reasonable for {} cores",

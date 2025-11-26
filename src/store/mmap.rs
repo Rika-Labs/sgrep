@@ -81,7 +81,11 @@ pub fn parse_binary_header(mmap: &Mmap) -> anyhow::Result<(u32, usize)> {
     Ok((format_version, num_words))
 }
 
-pub fn validate_vectors_size(mmap: &Mmap, vector_dim: usize, num_vectors: usize) -> anyhow::Result<()> {
+pub fn validate_vectors_size(
+    mmap: &Mmap,
+    vector_dim: usize,
+    num_vectors: usize,
+) -> anyhow::Result<()> {
     let vector_bytes = vector_dim * BYTES_PER_F32;
     let expected_size = VECTOR_HEADER_SIZE + num_vectors * vector_bytes;
     if mmap.len() < expected_size {

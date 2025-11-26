@@ -27,7 +27,12 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
     ThreadConfig::init(cli.max_threads, preset);
     ThreadConfig::get().apply();
 
-    if let Commands::Config { init, show_model_dir, verify_model } = &cli.command {
+    if let Commands::Config {
+        init,
+        show_model_dir,
+        verify_model,
+    } = &cli.command
+    {
         return handle_config(*init, *show_model_dir, *verify_model);
     }
 
@@ -89,8 +94,7 @@ fn build_embedder(
 
 fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result<()> {
     if show_model_dir {
-        let model_dir = embedding::get_fastembed_cache_dir()
-            .join("mxbai-embed-xsmall-v1");
+        let model_dir = embedding::get_fastembed_cache_dir().join("mxbai-embed-xsmall-v1");
         println!("{}", model_dir.display());
         return Ok(());
     }
@@ -147,8 +151,7 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
 }
 
 fn verify_model_files() -> Result<()> {
-    let model_dir = embedding::get_fastembed_cache_dir()
-        .join("mxbai-embed-xsmall-v1");
+    let model_dir = embedding::get_fastembed_cache_dir().join("mxbai-embed-xsmall-v1");
 
     let required = [
         "model_quantized.onnx",
@@ -158,7 +161,11 @@ fn verify_model_files() -> Result<()> {
         "tokenizer_config.json",
     ];
 
-    println!("{} Model directory: {}\n", style("ℹ").cyan(), model_dir.display());
+    println!(
+        "{} Model directory: {}\n",
+        style("ℹ").cyan(),
+        model_dir.display()
+    );
 
     let mut all_ok = true;
     for file in &required {
@@ -178,7 +185,9 @@ fn verify_model_files() -> Result<()> {
         Ok(())
     } else {
         println!("{} Some model files are missing.\n", style("✖").red());
-        println!("Download from: https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/tree/main");
+        println!(
+            "Download from: https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/tree/main"
+        );
         println!("Place files in: {}", model_dir.display());
         Err(anyhow!("Model files incomplete"))
     }
@@ -259,6 +268,16 @@ fn handle_search(
 ) -> Result<()> {
     let start = Instant::now();
     let mut engine = search::SearchEngine::new(embedder.clone());
+
+    if let Err(e) = engine.enable_query_expander() {
+        if !json {
+            eprintln!(
+                "{} Query expander unavailable: {}",
+                style("⚠").yellow(),
+                e
+            );
+        }
+    }
 
     // Try to load the code graph for hybrid search
     let store_result = store::IndexStore::new(path)?;
@@ -896,12 +915,18 @@ mod tests {
     #[test]
     #[serial]
     fn verify_model_files_returns_ok_when_present() {
-        let temp_cache = std::env::temp_dir().join(format!("sgrep_verify_ok_test_{}", Uuid::new_v4()));
+        let temp_cache =
+            std::env::temp_dir().join(format!("sgrep_verify_ok_test_{}", Uuid::new_v4()));
         let model_dir = temp_cache.join("mxbai-embed-xsmall-v1");
         std::fs::create_dir_all(&model_dir).unwrap();
 
-        for file in &["model_quantized.onnx", "tokenizer.json", "config.json",
-                      "special_tokens_map.json", "tokenizer_config.json"] {
+        for file in &[
+            "model_quantized.onnx",
+            "tokenizer.json",
+            "config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+        ] {
             std::fs::write(model_dir.join(file), b"mock").unwrap();
         }
 

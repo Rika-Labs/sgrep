@@ -111,8 +111,7 @@ impl CodeGraph {
         self.imports
             .iter()
             .filter(|imp| {
-                imp.target_path.contains(path_str.as_ref())
-                    || path_str.contains(&imp.target_path)
+                imp.target_path.contains(path_str.as_ref()) || path_str.contains(&imp.target_path)
             })
             .map(|imp| &imp.source_file)
             .collect()
@@ -189,9 +188,8 @@ impl CodeGraph {
         if let Some(symbol_ids) = self.file_symbols.remove(path) {
             let ids_set: HashSet<_> = symbol_ids.iter().collect();
 
-            self.edges.retain(|e| {
-                !ids_set.contains(&e.source_id) && !ids_set.contains(&e.target_id)
-            });
+            self.edges
+                .retain(|e| !ids_set.contains(&e.source_id) && !ids_set.contains(&e.target_id));
 
             for id in &symbol_ids {
                 if let Some(symbol) = self.symbols.remove(id) {
@@ -332,7 +330,10 @@ mod tests {
         let stats = graph.stats();
         assert_eq!(stats.total_symbols, 5);
         assert_eq!(stats.total_files, 1);
-        assert_eq!(*stats.symbols_by_kind.get(&SymbolKind::Function).unwrap(), 5);
+        assert_eq!(
+            *stats.symbols_by_kind.get(&SymbolKind::Function).unwrap(),
+            5
+        );
     }
 
     #[test]
@@ -379,5 +380,244 @@ mod tests {
         assert_eq!(graph.symbols.len(), 1);
         assert!(graph.find_by_name("func_a").is_empty());
         assert!(!graph.find_by_name("func_b").is_empty());
+    }
+
+    #[test]
+    fn test_get_symbol() {
+        let mut graph = CodeGraph::new();
+        let id = Uuid::new_v4();
+        graph.add_symbol(Symbol {
+            id,
+            name: "test".to_string(),
+            qualified_name: "test".to_string(),
+            kind: SymbolKind::Function,
+            file_path: PathBuf::from("src/lib.rs"),
+            start_line: 1,
+            end_line: 5,
+            language: "rust".to_string(),
+            signature: "fn test()".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        assert!(graph.get_symbol(&id).is_some());
+        assert!(graph.get_symbol(&Uuid::new_v4()).is_none());
+    }
+
+    #[test]
+    fn test_find_by_prefix() {
+        let mut graph = CodeGraph::new();
+        for name in ["authenticate", "authorize", "auth_helper"] {
+            graph.add_symbol(Symbol {
+                id: Uuid::new_v4(),
+                name: name.to_string(),
+                qualified_name: name.to_string(),
+                kind: SymbolKind::Function,
+                file_path: PathBuf::from("src/lib.rs"),
+                start_line: 1,
+                end_line: 5,
+                language: "rust".to_string(),
+                signature: format!("fn {}()", name),
+                parent_id: None,
+                chunk_id: None,
+            });
+        }
+
+        let found = graph.find_by_prefix("auth");
+        assert_eq!(found.len(), 3);
+    }
+
+    #[test]
+    fn test_find_implementors() {
+        let mut graph = CodeGraph::new();
+        let trait_id = Uuid::new_v4();
+        let impl_id = Uuid::new_v4();
+
+        graph.add_symbol(Symbol {
+            id: trait_id,
+            name: "MyTrait".to_string(),
+            qualified_name: "MyTrait".to_string(),
+            kind: SymbolKind::Trait,
+            file_path: PathBuf::from("src/lib.rs"),
+            start_line: 1,
+            end_line: 5,
+            language: "rust".to_string(),
+            signature: "trait MyTrait".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        graph.add_symbol(Symbol {
+            id: impl_id,
+            name: "MyStruct".to_string(),
+            qualified_name: "MyStruct".to_string(),
+            kind: SymbolKind::Struct,
+            file_path: PathBuf::from("src/lib.rs"),
+            start_line: 10,
+            end_line: 15,
+            language: "rust".to_string(),
+            signature: "struct MyStruct".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        graph.add_edge(Edge {
+            source_id: impl_id,
+            target_id: trait_id,
+            kind: EdgeKind::Implements,
+            metadata: None,
+        });
+
+        let implementors = graph.find_implementors(&trait_id);
+        assert_eq!(implementors.len(), 1);
+        assert_eq!(implementors[0].name, "MyStruct");
+    }
+
+    #[test]
+    fn test_symbols_of_kind() {
+        let mut graph = CodeGraph::new();
+        for i in 0..3 {
+            graph.add_symbol(Symbol {
+                id: Uuid::new_v4(),
+                name: format!("func_{}", i),
+                qualified_name: format!("func_{}", i),
+                kind: SymbolKind::Function,
+                file_path: PathBuf::from("src/lib.rs"),
+                start_line: i,
+                end_line: i + 5,
+                language: "rust".to_string(),
+                signature: format!("fn func_{}()", i),
+                parent_id: None,
+                chunk_id: None,
+            });
+        }
+        graph.add_symbol(Symbol {
+            id: Uuid::new_v4(),
+            name: "MyStruct".to_string(),
+            qualified_name: "MyStruct".to_string(),
+            kind: SymbolKind::Struct,
+            file_path: PathBuf::from("src/lib.rs"),
+            start_line: 100,
+            end_line: 110,
+            language: "rust".to_string(),
+            signature: "struct MyStruct".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        let functions = graph.symbols_of_kind(SymbolKind::Function);
+        assert_eq!(functions.len(), 3);
+        let structs = graph.symbols_of_kind(SymbolKind::Struct);
+        assert_eq!(structs.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_graphs() {
+        let mut graph1 = CodeGraph::new();
+        graph1.add_symbol(Symbol {
+            id: Uuid::new_v4(),
+            name: "func_a".to_string(),
+            qualified_name: "func_a".to_string(),
+            kind: SymbolKind::Function,
+            file_path: PathBuf::from("src/a.rs"),
+            start_line: 1,
+            end_line: 5,
+            language: "rust".to_string(),
+            signature: "fn func_a()".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        let mut graph2 = CodeGraph::new();
+        graph2.add_symbol(Symbol {
+            id: Uuid::new_v4(),
+            name: "func_b".to_string(),
+            qualified_name: "func_b".to_string(),
+            kind: SymbolKind::Function,
+            file_path: PathBuf::from("src/b.rs"),
+            start_line: 1,
+            end_line: 5,
+            language: "rust".to_string(),
+            signature: "fn func_b()".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        graph1.merge(graph2);
+        assert_eq!(graph1.symbols.len(), 2);
+    }
+
+    #[test]
+    fn test_find_definitions() {
+        let mut graph = CodeGraph::new();
+        graph.add_symbol(Symbol {
+            id: Uuid::new_v4(),
+            name: "foo".to_string(),
+            qualified_name: "foo".to_string(),
+            kind: SymbolKind::Function,
+            file_path: PathBuf::from("src/lib.rs"),
+            start_line: 1,
+            end_line: 5,
+            language: "rust".to_string(),
+            signature: "fn foo()".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+        graph.add_symbol(Symbol {
+            id: Uuid::new_v4(),
+            name: "foo".to_string(),
+            qualified_name: "foo".to_string(),
+            kind: SymbolKind::Struct,
+            file_path: PathBuf::from("src/lib.rs"),
+            start_line: 10,
+            end_line: 15,
+            language: "rust".to_string(),
+            signature: "struct foo".to_string(),
+            parent_id: None,
+            chunk_id: None,
+        });
+
+        let all_foos = graph.find_definitions("foo", None);
+        assert_eq!(all_foos.len(), 2);
+
+        let func_foos = graph.find_definitions("foo", Some(SymbolKind::Function));
+        assert_eq!(func_foos.len(), 1);
+    }
+
+    #[test]
+    fn test_add_import() {
+        let mut graph = CodeGraph::new();
+        graph.add_import(ImportRelation {
+            source_file: PathBuf::from("src/main.rs"),
+            target_path: "src/auth".to_string(),
+            alias: None,
+            line: 1,
+            is_type_only: false,
+        });
+
+        assert_eq!(graph.imports.len(), 1);
+    }
+
+    #[test]
+    fn test_find_imports_of() {
+        let mut graph = CodeGraph::new();
+        let file = PathBuf::from("src/main.rs");
+        graph.add_import(ImportRelation {
+            source_file: file.clone(),
+            target_path: "auth".to_string(),
+            alias: None,
+            line: 1,
+            is_type_only: false,
+        });
+        graph.add_import(ImportRelation {
+            source_file: file.clone(),
+            target_path: "utils".to_string(),
+            alias: None,
+            line: 2,
+            is_type_only: false,
+        });
+
+        let imports = graph.find_imports_of(&file);
+        assert_eq!(imports.len(), 2);
     }
 }
