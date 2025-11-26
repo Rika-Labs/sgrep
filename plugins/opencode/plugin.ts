@@ -3,7 +3,8 @@ import { type Plugin, tool } from "@opencode-ai/plugin";
 export const SgrepOpenCodePlugin: Plugin = async ({ $, directory }) => ({
   tool: {
     sgrepSearch: tool({
-      description: "Semantic code search for this repo (sgrep) — use instead of grep; returns ranked snippets",
+      description:
+        "Semantic code search for this repo (sgrep) — use instead of grep; returns ranked snippets",
       args: {
         query: tool.schema.string().describe("Search query passed to the sgrep CLI"),
         limit: tool.schema.number().int().positive().optional(),
@@ -17,24 +18,48 @@ export const SgrepOpenCodePlugin: Plugin = async ({ $, directory }) => ({
 
 export default SgrepOpenCodePlugin;
 
-type SearchItem = {
+type JsonMatch = {
   path: string;
-  start_line?: number;
-  end_line?: number;
-  score?: number;
-  snippet?: string;
-  language?: string;
+  start_line: number;
+  end_line: number;
+  language: string;
+  score: number;
+  semantic_score: number;
+  keyword_score: number;
+  snippet: string;
 };
 
-function formatResults(results: SearchItem[]): string {
+type JsonResponse = {
+  query: string;
+  limit: number;
+  duration_ms: number;
+  results: JsonMatch[];
+  index: {
+    repo_path: string;
+    repo_hash: string;
+    vector_dim: number;
+    indexed_at: string;
+    total_files: number;
+    total_chunks: number;
+  };
+};
+
+function formatResults(results: JsonMatch[]): string {
   return results
     .map((r, i) => {
-      const score = typeof r.score === "number" ? r.score.toFixed(2) : String(r.score ?? "?");
-      const loc = r.start_line && r.end_line ? `${r.start_line}-${r.end_line}` : "?";
-      const snippet = typeof r.snippet === "string" ? r.snippet.replace(/\s+/g, " ").trim() : "";
-      return `${i + 1}. ${r.path}:${loc} (score ${score}) ${snippet}`;
+      const loc = `${r.start_line}-${r.end_line}`;
+      const snippet = r.snippet.trim();
+      return `${i + 1}. ${r.path}:${loc} [${r.language}] (score: ${r.score.toFixed(2)})\n${snippet}`;
     })
-    .join("\n");
+    .join("\n\n");
+}
+
+function isJsonResponse(value: unknown): value is JsonResponse {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const obj = value as Record<string, unknown>;
+  return Array.isArray(obj.results);
 }
 
 async function runSearch(
@@ -43,23 +68,32 @@ async function runSearch(
   query: string,
   limit?: number,
 ): Promise<string> {
-  const baseCmd = limit
-    ? $`cd ${directory} && sgrep search --json --path ${directory} --limit ${limit} ${query}`
-    : $`cd ${directory} && sgrep search --json --path ${directory} ${query}`;
-  const proc = baseCmd.quiet();
-  const { stdout, stderr } = await proc;
+  const args = ["search", "--json", "--path", directory];
+  if (limit !== undefined) {
+    args.push("--limit", String(limit));
+  }
+  args.push(query);
+
+  const proc = $`sgrep ${args}`.quiet();
+  const { stdout, stderr, exitCode } = await proc;
   const out = stdout?.toString?.() ?? "";
   const err = stderr?.toString?.() ?? "";
 
+  if (exitCode !== 0) {
+    return `Error (exit ${exitCode}): ${err || out || "unknown error"}`.trim();
+  }
+
   try {
-    const parsed = JSON.parse(out) as { results?: Array<SearchItem> };
-    const results = Array.isArray(parsed.results)
-      ? parsed.results.filter((r): r is SearchItem => typeof r?.path === "string")
-      : [];
-    if (!results.length) return "(no results)";
-    return formatResults(results);
-  } catch {
-    const fallback = (out || err || "(no output)").replace(/\s+/g, " ").trim();
-    return fallback.slice(0, 500);
+    const parsed: unknown = JSON.parse(out);
+    if (!isJsonResponse(parsed)) {
+      return `Unexpected response format: ${out.slice(0, 200)}`;
+    }
+    if (parsed.results.length === 0) {
+      return "(no results)";
+    }
+    return formatResults(parsed.results);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "parse error";
+    return `Failed to parse output (${message}): ${out.slice(0, 200)}`;
   }
 }
