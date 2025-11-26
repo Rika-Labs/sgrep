@@ -30,33 +30,6 @@ pub fn extract_keywords(query: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn keyword_score(keywords: &[String], text: &str, path: &Path) -> f32 {
-    if keywords.is_empty() {
-        return 0.0;
-    }
-
-    let haystack = text.to_lowercase();
-    let path_str = path.to_string_lossy().to_lowercase();
-    let filename = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let mut score = 0.0;
-    for kw in keywords {
-        let kw_lower = kw.as_str();
-        if filename.contains(kw_lower) {
-            score += 3.0;
-        } else if path_str.contains(kw_lower) {
-            score += 2.0;
-        } else if haystack.contains(kw_lower) {
-            score += 1.0;
-        }
-    }
-    score / keywords.len() as f32
-}
-
 pub fn matches_filters(filters: &[String], chunk: &CodeChunk) -> bool {
     filters.iter().all(|filter| match filter.split_once('=') {
         Some((key, value)) => match key {
@@ -535,11 +508,10 @@ mod tests {
     }
 
     #[test]
-    fn extracts_keywords_and_scores() {
+    fn extracts_keywords() {
         let keywords = extract_keywords("where is the auth logic?");
         assert!(keywords.contains(&"auth".into()));
-        let score = keyword_score(&keywords, "auth logic lives here", Path::new("test.rs"));
-        assert!(score > 0.0);
+        assert!(keywords.contains(&"logic".into()));
     }
 
     #[test]
@@ -558,12 +530,6 @@ mod tests {
     }
 
     #[test]
-    fn keyword_score_zero_with_no_keywords() {
-        let score = keyword_score(&[], "anything", Path::new("file.rs"));
-        assert_eq!(score, 0.0);
-    }
-
-    #[test]
     fn matches_filters_handles_invalid_format() {
         let chunk = sample_chunk("rust", "src/lib.rs");
         assert!(matches_filters(&["nonsense".into()], &chunk));
@@ -574,13 +540,6 @@ mod tests {
     fn matches_filters_allows_unknown_keys() {
         let chunk = sample_chunk("rust", "src/lib.rs");
         assert!(matches_filters(&["owner=alice".into()], &chunk));
-    }
-
-    #[test]
-    fn keyword_score_prefers_path_matches() {
-        let keywords = vec!["auth".into()];
-        let score = keyword_score(&keywords, "irrelevant body", Path::new("src/auth/mod.rs"));
-        assert!(score >= 2.0);
     }
 
     #[test]

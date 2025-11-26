@@ -190,7 +190,6 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
-        let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
         let fetch_limit = if options.rerank && self.reranker.is_some() {
@@ -216,7 +215,6 @@ impl SearchEngine {
                     chunk,
                     vector,
                     &query_vec,
-                    &keywords,
                     bm25_score,
                     options.include_context,
                     &weights,
@@ -228,7 +226,6 @@ impl SearchEngine {
 
         let expanded_query = self.expand_query_with_prf(query, &matches);
         if expanded_query != query {
-            let expanded_keywords = fts::extract_keywords(&expanded_query);
             let expanded_vec = self.embedder.embed(&expanded_query)?;
 
             for (idx, (chunk, vector)) in index.chunks.iter().zip(&index.vectors).enumerate() {
@@ -243,7 +240,6 @@ impl SearchEngine {
                     chunk,
                     vector,
                     &expanded_vec,
-                    &expanded_keywords,
                     bm25_score,
                     options.include_context,
                     &weights,
@@ -270,7 +266,6 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
-        let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
         let fetch_limit = if options.rerank && self.reranker.is_some() {
@@ -300,7 +295,6 @@ impl SearchEngine {
                     &index.chunks[idx],
                     &index.vectors[idx],
                     &query_vec,
-                    &keywords,
                     bm25_score,
                     options.include_context,
                     &weights,
@@ -312,7 +306,6 @@ impl SearchEngine {
 
         let expanded_query = self.expand_query_with_prf(query, &matches);
         if expanded_query != query {
-            let expanded_keywords = fts::extract_keywords(&expanded_query);
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_binary = quantize_to_binary(&expanded_vec);
             let expanded_candidates =
@@ -324,7 +317,6 @@ impl SearchEngine {
                     &index.chunks[idx],
                     &index.vectors[idx],
                     &expanded_vec,
-                    &expanded_keywords,
                     bm25_score,
                     options.include_context,
                     &weights,
@@ -351,7 +343,6 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
-        let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
         let fetch_limit = if options.rerank && self.reranker.is_some() {
@@ -387,7 +378,6 @@ impl SearchEngine {
                     &index.chunks[idx],
                     &index.vectors[idx],
                     &query_vec,
-                    &keywords,
                     bm25_score,
                     options.include_context,
                     &weights,
@@ -399,7 +389,6 @@ impl SearchEngine {
 
         let expanded_query = self.expand_query_with_prf(query, &matches);
         if expanded_query != query {
-            let expanded_keywords = fts::extract_keywords(&expanded_query);
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_candidates = search_hnsw_candidates(
                 &hnsw,
@@ -417,7 +406,6 @@ impl SearchEngine {
                     &index.chunks[idx],
                     &index.vectors[idx],
                     &expanded_vec,
-                    &expanded_keywords,
                     bm25_score,
                     options.include_context,
                     &weights,
@@ -444,7 +432,6 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
-        let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
         let fetch_limit = if options.rerank && self.reranker.is_some() {
@@ -472,7 +459,6 @@ impl SearchEngine {
                     chunk,
                     vector,
                     &query_vec,
-                    &keywords,
                     bm25_score,
                     options.include_context,
                     &weights,
@@ -484,7 +470,6 @@ impl SearchEngine {
 
         let expanded_query = self.expand_query_with_prf(query, &matches);
         if expanded_query != query {
-            let expanded_keywords = fts::extract_keywords(&expanded_query);
             let expanded_vec = self.embedder.embed(&expanded_query)?;
 
             for i in 0..index.len() {
@@ -501,7 +486,6 @@ impl SearchEngine {
                     chunk,
                     vector,
                     &expanded_vec,
-                    &expanded_keywords,
                     bm25_score,
                     options.include_context,
                     &weights,
@@ -528,7 +512,6 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
-        let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
         let fetch_limit = if options.rerank && self.reranker.is_some() {
@@ -564,7 +547,6 @@ impl SearchEngine {
                     &index.chunks[idx],
                     index.get_vector(idx),
                     &query_vec,
-                    &keywords,
                     bm25_score,
                     options.include_context,
                     &weights,
@@ -576,7 +558,6 @@ impl SearchEngine {
 
         let expanded_query = self.expand_query_with_prf(query, &matches);
         if expanded_query != query {
-            let expanded_keywords = fts::extract_keywords(&expanded_query);
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_candidates = search_hnsw_candidates(
                 &hnsw,
@@ -594,7 +575,6 @@ impl SearchEngine {
                     &index.chunks[idx],
                     index.get_vector(idx),
                     &expanded_vec,
-                    &expanded_keywords,
                     bm25_score,
                     options.include_context,
                     &weights,
@@ -621,7 +601,6 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
-        let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
         let fetch_limit = if options.rerank && self.reranker.is_some() {
@@ -658,7 +637,6 @@ impl SearchEngine {
                     &index.chunks[idx],
                     index.get_vector(idx),
                     &query_vec,
-                    &keywords,
                     bm25_score,
                     options.include_context,
                     &weights,
@@ -670,7 +648,6 @@ impl SearchEngine {
 
         let expanded_query = self.expand_query_with_prf(query, &matches);
         if expanded_query != query {
-            let expanded_keywords = fts::extract_keywords(&expanded_query);
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_binary = quantize_to_binary(&expanded_vec);
 
@@ -688,7 +665,6 @@ impl SearchEngine {
                     &index.chunks[idx],
                     index.get_vector(idx),
                     &expanded_vec,
-                    &expanded_keywords,
                     bm25_score,
                     options.include_context,
                     &weights,
@@ -713,13 +689,11 @@ impl SearchEngine {
         chunk: &CodeChunk,
         vector: &[f32],
         query_vec: &[f32],
-        keywords: &[String],
         bm25_score: f32,
         include_context: bool,
         weights: &Weights,
     ) -> SearchResult {
         let semantic = cosine_similarity(query_vec, vector);
-        let keyword = fts::keyword_score(keywords, &chunk.text, &chunk.path);
         let recency = recency_boost(chunk);
         let file_type = content_based_file_boost(chunk);
 
@@ -727,7 +701,6 @@ impl SearchEngine {
 
         let score = weights.semantic * semantic
             + weights.bm25 * bm25_normalized
-            + weights.keyword * keyword
             + weights.recency * recency
             + weights.file_type * file_type;
 
@@ -736,7 +709,6 @@ impl SearchEngine {
             score,
             semantic_score: semantic,
             bm25_score,
-            keyword_score: keyword,
             show_full_context: include_context,
         }
     }
@@ -938,7 +910,6 @@ impl SearchEngine {
                         score: 0.8 + semantic * 0.2,
                         semantic_score: semantic,
                         bm25_score: 0.0,
-                        keyword_score: 1.0,
                         show_full_context: options.include_context,
                     });
                     break;
@@ -978,7 +949,6 @@ impl SearchEngine {
                         score: 0.8 + semantic * 0.2,
                         semantic_score: semantic,
                         bm25_score: 0.0,
-                        keyword_score: 1.0,
                         show_full_context: options.include_context,
                     });
                     break;
@@ -1263,7 +1233,6 @@ mod tests {
                 score: 0.3,
                 semantic_score: 0.3,
                 bm25_score: 0.0,
-                keyword_score: 0.0,
                 show_full_context: false,
             },
             SearchResult {
@@ -1271,7 +1240,6 @@ mod tests {
                 score: 0.9,
                 semantic_score: 0.9,
                 bm25_score: 0.0,
-                keyword_score: 0.0,
                 show_full_context: false,
             },
             SearchResult {
@@ -1279,7 +1247,6 @@ mod tests {
                 score: 0.6,
                 semantic_score: 0.6,
                 bm25_score: 0.0,
-                keyword_score: 0.0,
                 show_full_context: false,
             },
             SearchResult {
@@ -1287,7 +1254,6 @@ mod tests {
                 score: 0.1,
                 semantic_score: 0.1,
                 bm25_score: 0.0,
-                keyword_score: 0.0,
                 show_full_context: false,
             },
         ];

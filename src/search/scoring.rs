@@ -9,7 +9,6 @@ pub const RECENCY_HALF_LIFE_HOURS: f32 = 48.0;
 pub struct AdaptiveWeights {
     pub semantic: f32,
     pub bm25: f32,
-    pub keyword: f32,
     pub recency: f32,
     pub file_type: f32,
 }
@@ -28,9 +27,9 @@ impl AdaptiveWeights {
             || query_lower.starts_with("which ");
         let has_code_symbols = query.chars().any(|c| "(){}[]<>::->=>".contains(c));
 
-        let mut semantic = 0.45;
-        let mut bm25 = 0.20;
-        let mut keyword = 0.15;
+        // Weights redistributed after removing keyword scoring (BM25 handles term matching)
+        let mut semantic = 0.55;
+        let mut bm25 = 0.25;
         let recency = 0.05;
         let mut file_type = 0.15;
 
@@ -47,16 +46,15 @@ impl AdaptiveWeights {
         }
 
         if has_code_symbols {
-            keyword += 0.10;
+            bm25 += 0.10;
             semantic -= 0.05;
             file_type -= 0.05;
         }
 
-        let total = semantic + bm25 + keyword + recency + file_type;
+        let total = semantic + bm25 + recency + file_type;
         Self {
             semantic: semantic / total,
             bm25: bm25 / total,
-            keyword: keyword / total,
             recency: recency / total,
             file_type: file_type / total,
         }

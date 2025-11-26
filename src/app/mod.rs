@@ -442,8 +442,8 @@ fn render_results(
             );
             println!("{} {}", style("→").cyan(), style(header).bold());
             println!(
-                "    semantic: {:.2} | keyword: {:.2}",
-                result.semantic_score, result.keyword_score
+                "    semantic: {:.2} | bm25: {:.2}",
+                result.semantic_score, result.bm25_score
             );
             println!("{}", result.render_snippet());
             println!();
@@ -650,7 +650,6 @@ mod tests {
             score: 0.5,
             semantic_score: 0.4,
             bm25_score: 0.0,
-            keyword_score: 0.1,
             show_full_context: false,
         };
         render_results(
@@ -683,7 +682,6 @@ mod tests {
             score: 0.9,
             semantic_score: 0.8,
             bm25_score: 0.0,
-            keyword_score: 0.1,
             show_full_context: false,
         };
         render_results(
