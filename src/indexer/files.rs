@@ -35,7 +35,7 @@ pub fn collect_files(root: &Path) -> Vec<PathBuf> {
         .parents(true)
         .follow_links(false)
         .add_custom_ignore_filename(".sgrepignore")
-        .threads(num_cpus::get().min(8))
+        .threads(crate::threading::ThreadConfig::get().walker_threads)
         .build_parallel()
         .run(|| {
             let files = Arc::clone(&files);

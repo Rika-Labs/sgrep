@@ -62,6 +62,8 @@ sgrep search "retry logic" --context
 - `--glob <pattern>`: File pattern filter (repeatable)
 - `--filters key=value`: Metadata filters like `lang=rust` (repeatable)
 - `--json`: Emit structured JSON output (agent-friendly)
+- `--threads <n>`: Maximum threads for parallel operations
+- `--cpu-preset <preset>`: CPU usage preset (auto|low|medium|high|background)
 
 ## Indexing
 

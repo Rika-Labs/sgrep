@@ -97,7 +97,18 @@ provider = "local"
 - `SGREP_CONFIG`: Override config file path
 - `SGREP_DEVICE`: Set device (cpu|cuda|coreml)
 - `SGREP_BATCH_SIZE`: Override embedding batch size
+- `SGREP_MAX_THREADS`: Maximum threads for parallel operations
+- `SGREP_CPU_PRESET`: CPU usage preset (auto|low|medium|high|background)
 - `HTTP_PROXY` / `HTTPS_PROXY`: Proxy for model downloads
+
+**Thread control presets:**
+| Preset | CPU Usage | Use Case |
+| --- | --- | --- |
+| `auto` | 75% | Default balanced mode |
+| `low` | 25% | Laptop/battery saving |
+| `medium` | 50% | Multi-tasking |
+| `high` | 100% | Maximum performance |
+| `background` | 25% | Watch/daemon mode |
 
 **Model management:**
 ```bash

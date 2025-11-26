@@ -14,6 +14,14 @@ pub struct Cli {
     #[arg(global = true, long, env = "SGREP_OFFLINE", default_value_t = false)]
     pub offline: bool,
 
+    /// Maximum threads for parallel operations (0 = auto). Also reads SGREP_MAX_THREADS.
+    #[arg(global = true, long = "threads", env = "SGREP_MAX_THREADS")]
+    pub max_threads: Option<usize>,
+
+    /// CPU preset: auto (75%), low (25%), medium (50%), high (100%), background (25%). Also reads SGREP_CPU_PRESET.
+    #[arg(global = true, long = "cpu-preset", env = "SGREP_CPU_PRESET")]
+    pub cpu_preset: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
