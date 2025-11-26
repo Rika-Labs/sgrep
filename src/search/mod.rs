@@ -1,30 +1,38 @@
+mod binary;
+mod graph_hybrid;
+mod hnsw;
+mod results;
+mod scoring;
+
+pub use results::{DirectorySearchResult, FileSearchResult, SearchResult};
+pub use scoring::{cosine_similarity, AdaptiveWeights};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use chrono::Utc;
-use serde::Serialize;
-use simsimd::SpatialSimilarity;
-use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 use crate::chunker::CodeChunk;
 use crate::embedding::BatchEmbedder;
 use crate::fts;
-use crate::graph::{classify_query, CodeGraph, QueryType, Symbol};
+use crate::graph::{CodeGraph, QueryType, Symbol};
+use crate::query_expander::{QueryAnalysis, QueryExpander};
 use crate::reranker::Reranker;
-use crate::store::{MmapIndex, RepositoryIndex};
+use crate::store::{HierarchicalIndex, MmapIndex, RepositoryIndex};
+
+use binary::{binary_shortlist, binary_shortlist_precomputed, quantize_to_binary};
+use graph_hybrid::{apply_graph_boost, search_graph_only};
+use hnsw::{build_hnsw_index, search_hnsw_candidates};
+use scoring::{
+    content_based_file_boost, recency_boost, select_top_k, AdaptiveWeights as Weights,
+};
 
 const HNSW_THRESHOLD: usize = 500;
 const BINARY_QUANTIZATION_THRESHOLD: usize = 1000;
 const BINARY_SHORTLIST_FACTOR: usize = 10;
-const HNSW_CONNECTIVITY: usize = 16;
-const HNSW_EXPANSION_ADD: usize = 128;
-const HNSW_EXPANSION_SEARCH: usize = 64;
-const HNSW_OVERSAMPLE_FACTOR: usize = 4;
 const RERANK_OVERSAMPLE_FACTOR: usize = 3;
 const PRF_TOP_K: usize = 10;
 const PRF_EXPANSION_TERMS: usize = 5;
-const RECENCY_HALF_LIFE_HOURS: f32 = 48.0;
 
 #[derive(Clone)]
 pub struct SearchOptions {
@@ -47,68 +55,11 @@ impl Default for SearchOptions {
     }
 }
 
-#[derive(Clone, Copy)]
-struct AdaptiveWeights {
-    semantic: f32,
-    bm25: f32,
-    keyword: f32,
-    recency: f32,
-    file_type: f32,
-}
-
-impl AdaptiveWeights {
-    fn from_query(query: &str) -> Self {
-        let word_count = query.split_whitespace().count();
-        let query_lower = query.to_lowercase();
-
-        let is_short = word_count <= 2;
-        let is_question = query_lower.starts_with("how ")
-            || query_lower.starts_with("where ")
-            || query_lower.starts_with("what ")
-            || query_lower.starts_with("why ")
-            || query_lower.starts_with("when ")
-            || query_lower.starts_with("which ");
-        let has_code_symbols = query.chars().any(|c| "(){}[]<>::->=>".contains(c));
-
-        let mut semantic = 0.45;
-        let mut bm25 = 0.20;
-        let mut keyword = 0.15;
-        let recency = 0.05;
-        let mut file_type = 0.15;
-
-        if is_question {
-            semantic += 0.10;
-            bm25 -= 0.05;
-            file_type -= 0.05;
-        }
-
-        if is_short {
-            bm25 += 0.10;
-            semantic -= 0.05;
-            file_type -= 0.05;
-        }
-
-        if has_code_symbols {
-            keyword += 0.10;
-            semantic -= 0.05;
-            file_type -= 0.05;
-        }
-
-        let total = semantic + bm25 + keyword + recency + file_type;
-        Self {
-            semantic: semantic / total,
-            bm25: bm25 / total,
-            keyword: keyword / total,
-            recency: recency / total,
-            file_type: file_type / total,
-        }
-    }
-}
-
 pub struct SearchEngine {
     embedder: Arc<dyn BatchEmbedder>,
     reranker: Option<Arc<dyn Reranker>>,
     graph: Option<CodeGraph>,
+    query_expander: Option<QueryExpander>,
 }
 
 impl SearchEngine {
@@ -117,6 +68,7 @@ impl SearchEngine {
             embedder,
             reranker: None,
             graph: None,
+            query_expander: None,
         }
     }
 
@@ -126,17 +78,34 @@ impl SearchEngine {
             embedder,
             reranker: Some(reranker),
             graph: None,
+            query_expander: None,
         }
     }
 
-    /// Set the code graph for hybrid search
+    /// Enable the query expander for intelligent query understanding.
+    /// This downloads the Qwen2.5 model on first use (~400MB).
+    pub fn enable_query_expander(&mut self) -> Result<()> {
+        if self.query_expander.is_none() {
+            self.query_expander = Some(QueryExpander::new()?);
+        }
+        Ok(())
+    }
+
     pub fn set_graph(&mut self, graph: CodeGraph) {
         self.graph = Some(graph);
     }
 
-    /// Check if graph is available
     pub fn has_graph(&self) -> bool {
         self.graph.is_some()
+    }
+
+    /// Analyze a query using the LLM-based expander, or fall back to heuristics.
+    fn analyze_query(&self, query: &str) -> QueryAnalysis {
+        if let Some(ref expander) = self.query_expander {
+            expander.analyze(query).unwrap_or_else(|_| QueryAnalysis::from_heuristics(query))
+        } else {
+            QueryAnalysis::from_heuristics(query)
+        }
     }
 
     pub fn search(
@@ -193,7 +162,7 @@ impl SearchEngine {
         query: &str,
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
-        let weights = AdaptiveWeights::from_query(query);
+        let weights = Weights::from_query(query);
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
@@ -273,7 +242,7 @@ impl SearchEngine {
         query: &str,
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
-        let weights = AdaptiveWeights::from_query(query);
+        let weights = Weights::from_query(query);
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
@@ -354,7 +323,7 @@ impl SearchEngine {
         query: &str,
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
-        let weights = AdaptiveWeights::from_query(query);
+        let weights = Weights::from_query(query);
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
@@ -367,13 +336,13 @@ impl SearchEngine {
         let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
         let bm25_index = fts::Bm25Index::build(&doc_texts);
 
-        let hnsw = self.build_hnsw_index(index.metadata.vector_dim, index.vectors.len())?;
+        let hnsw = build_hnsw_index(index.metadata.vector_dim, index.vectors.len())?;
         for (i, vector) in index.vectors.iter().enumerate() {
             hnsw.add(i as u64, vector)
                 .map_err(|e| anyhow::anyhow!("HNSW add failed: {}", e))?;
         }
 
-        let candidates = self.search_hnsw_candidates(
+        let candidates = search_hnsw_candidates(
             &hnsw,
             &query_vec,
             PRF_TOP_K.max(fetch_limit),
@@ -405,7 +374,7 @@ impl SearchEngine {
         if expanded_query != query {
             let expanded_keywords = fts::extract_keywords(&expanded_query);
             let expanded_vec = self.embedder.embed(&expanded_query)?;
-            let expanded_candidates = self.search_hnsw_candidates(
+            let expanded_candidates = search_hnsw_candidates(
                 &hnsw,
                 &expanded_vec,
                 PRF_TOP_K.max(fetch_limit),
@@ -447,7 +416,7 @@ impl SearchEngine {
         query: &str,
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
-        let weights = AdaptiveWeights::from_query(query);
+        let weights = Weights::from_query(query);
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
@@ -531,7 +500,7 @@ impl SearchEngine {
         query: &str,
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
-        let weights = AdaptiveWeights::from_query(query);
+        let weights = Weights::from_query(query);
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
@@ -544,13 +513,13 @@ impl SearchEngine {
         let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
         let bm25_index = fts::Bm25Index::build(&doc_texts);
 
-        let hnsw = self.build_hnsw_index(index.metadata.vector_dim, index.len())?;
+        let hnsw = build_hnsw_index(index.metadata.vector_dim, index.len())?;
         for i in 0..index.len() {
             hnsw.add(i as u64, index.get_vector(i))
                 .map_err(|e| anyhow::anyhow!("HNSW add failed: {}", e))?;
         }
 
-        let candidates = self.search_hnsw_candidates(
+        let candidates = search_hnsw_candidates(
             &hnsw,
             &query_vec,
             PRF_TOP_K.max(fetch_limit),
@@ -582,7 +551,7 @@ impl SearchEngine {
         if expanded_query != query {
             let expanded_keywords = fts::extract_keywords(&expanded_query);
             let expanded_vec = self.embedder.embed(&expanded_query)?;
-            let expanded_candidates = self.search_hnsw_candidates(
+            let expanded_candidates = search_hnsw_candidates(
                 &hnsw,
                 &expanded_vec,
                 PRF_TOP_K.max(fetch_limit),
@@ -624,7 +593,7 @@ impl SearchEngine {
         query: &str,
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
-        let weights = AdaptiveWeights::from_query(query);
+        let weights = Weights::from_query(query);
         let keywords = fts::extract_keywords(query);
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
@@ -712,38 +681,6 @@ impl SearchEngine {
         Ok(matches)
     }
 
-    fn build_hnsw_index(&self, dimensions: usize, capacity: usize) -> Result<Index> {
-        let options = IndexOptions {
-            dimensions,
-            metric: MetricKind::Cos,
-            quantization: ScalarKind::F32,
-            connectivity: HNSW_CONNECTIVITY,
-            expansion_add: HNSW_EXPANSION_ADD,
-            expansion_search: HNSW_EXPANSION_SEARCH,
-            multi: false,
-        };
-
-        let hnsw =
-            Index::new(&options).map_err(|e| anyhow::anyhow!("HNSW creation failed: {}", e))?;
-        hnsw.reserve(capacity)
-            .map_err(|e| anyhow::anyhow!("HNSW reserve failed: {}", e))?;
-        Ok(hnsw)
-    }
-
-    fn search_hnsw_candidates(
-        &self,
-        hnsw: &Index,
-        query_vec: &[f32],
-        limit: usize,
-        max_candidates: usize,
-    ) -> Result<Vec<usize>> {
-        let oversample = (limit * HNSW_OVERSAMPLE_FACTOR).min(max_candidates);
-        let results = hnsw
-            .search(query_vec, oversample)
-            .map_err(|e| anyhow::anyhow!("HNSW search failed: {}", e))?;
-        Ok(results.keys.iter().map(|&k| k as usize).collect())
-    }
-
     fn score_chunk(
         &self,
         chunk: &CodeChunk,
@@ -752,7 +689,7 @@ impl SearchEngine {
         keywords: &[String],
         bm25_score: f32,
         include_context: bool,
-        weights: &AdaptiveWeights,
+        weights: &Weights,
     ) -> SearchResult {
         let semantic = cosine_similarity(query_vec, vector);
         let keyword = fts::keyword_score(keywords, &chunk.text, &chunk.path);
@@ -812,14 +749,12 @@ impl SearchEngine {
         format!("{} {}", original_query, expansion_terms.join(" "))
     }
 
-    /// Apply reranking to results if enabled and reranker is available
     fn maybe_rerank(
         &self,
         query: &str,
         results: Vec<SearchResult>,
         options: &SearchOptions,
     ) -> Vec<SearchResult> {
-        // Skip reranking if not enabled or no reranker available
         if !options.rerank {
             return results;
         }
@@ -829,15 +764,12 @@ impl SearchEngine {
             None => return results,
         };
 
-        // Skip if too few results
         if results.len() <= 1 {
             return results;
         }
 
-        // Extract document texts for reranking
         let docs: Vec<&str> = results.iter().map(|r| r.chunk.text.as_str()).collect();
 
-        // Rerank and reorder results
         match reranker.rerank(query, &docs) {
             Ok(reranked) => {
                 let mut reordered: Vec<SearchResult> = reranked
@@ -845,7 +777,6 @@ impl SearchEngine {
                     .filter_map(|(idx, rerank_score)| {
                         if idx < results.len() {
                             let mut result = results[idx].clone();
-                            // Blend rerank score with original score (rerank has higher weight)
                             result.score = 0.3 * result.score + 0.7 * rerank_score;
                             Some(result)
                         } else {
@@ -854,37 +785,33 @@ impl SearchEngine {
                     })
                     .collect();
 
-                // Ensure results are sorted by the new blended score
                 reordered.sort_by(|a, b| {
                     b.score
                         .partial_cmp(&a.score)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
 
-                // Truncate to original limit
                 reordered.truncate(options.limit);
                 reordered
             }
-            Err(_) => results, // Fall back to original results on error
+            Err(_) => results,
         }
     }
 
-    /// Hybrid search combining graph and vector approaches
     pub fn search_hybrid(
         &self,
         index: &RepositoryIndex,
         query: &str,
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
-        let query_type = classify_query(query);
+        let analysis = self.analyze_query(query);
+        let query_type = analysis.to_query_type();
 
         match query_type {
             QueryType::Structural => {
-                // Try graph-first for structural queries
                 if let Some(ref graph) = self.graph {
-                    let graph_results = self.search_graph_only(graph, query, &options);
+                    let graph_results = search_graph_only(graph, query);
                     if !graph_results.is_empty() {
-                        // Convert graph results to SearchResults using the index
                         return self.graph_results_to_search_results(
                             &graph_results,
                             index,
@@ -893,23 +820,18 @@ impl SearchEngine {
                         );
                     }
                 }
-                // Fall back to vector search
                 self.search(index, query, options)
             }
             QueryType::Semantic => {
-                // Pure semantic - use vector search
                 self.search(index, query, options)
             }
             QueryType::Hybrid => {
-                // Combine both approaches
                 let mut vector_results = self.search(index, query, options.clone())?;
 
                 if let Some(ref graph) = self.graph {
-                    // Boost results based on graph relationships
-                    self.apply_graph_boost(&mut vector_results, graph, query);
+                    apply_graph_boost(&mut vector_results, graph, query);
                 }
 
-                // Re-sort after boost
                 vector_results.sort_by(|a, b| {
                     b.score
                         .partial_cmp(&a.score)
@@ -921,19 +843,19 @@ impl SearchEngine {
         }
     }
 
-    /// Hybrid search using mmap index
     pub fn search_hybrid_mmap(
         &self,
         index: &MmapIndex,
         query: &str,
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
-        let query_type = classify_query(query);
+        let analysis = self.analyze_query(query);
+        let query_type = analysis.to_query_type();
 
         match query_type {
             QueryType::Structural => {
                 if let Some(ref graph) = self.graph {
-                    let graph_results = self.search_graph_only(graph, query, &options);
+                    let graph_results = search_graph_only(graph, query);
                     if !graph_results.is_empty() {
                         return self.graph_results_to_search_results_mmap(
                             &graph_results,
@@ -952,7 +874,7 @@ impl SearchEngine {
                 let mut vector_results = self.search_mmap(index, query, options.clone())?;
 
                 if let Some(ref graph) = self.graph {
-                    self.apply_graph_boost(&mut vector_results, graph, query);
+                    apply_graph_boost(&mut vector_results, graph, query);
                 }
 
                 vector_results.sort_by(|a, b| {
@@ -966,136 +888,6 @@ impl SearchEngine {
         }
     }
 
-    /// Search using only the graph
-    fn search_graph_only(
-        &self,
-        graph: &CodeGraph,
-        query: &str,
-        _options: &SearchOptions,
-    ) -> Vec<Symbol> {
-        let query_lower = query.to_lowercase();
-
-        // Parse structural queries
-        if query_lower.contains("callers of") || query_lower.contains("who calls") {
-            if let Some(name) = extract_symbol_name_from_query(query, &["callers of", "who calls", "what calls"]) {
-                let symbols = graph.find_by_name(&name);
-                return symbols
-                    .into_iter()
-                    .flat_map(|s| graph.find_callers(&s.id))
-                    .cloned()
-                    .collect();
-            }
-        }
-
-        if query_lower.contains("calls to") || query_lower.contains("callees of") {
-            if let Some(name) = extract_symbol_name_from_query(query, &["calls to", "callees of"]) {
-                let symbols = graph.find_by_name(&name);
-                return symbols
-                    .into_iter()
-                    .flat_map(|s| graph.find_callees(&s.id))
-                    .cloned()
-                    .collect();
-            }
-        }
-
-        if query_lower.contains("definition of") || query_lower.contains("find definition") {
-            if let Some(name) = extract_symbol_name_from_query(query, &["definition of", "find definition", "go to definition"]) {
-                return graph.find_by_name(&name).into_iter().cloned().collect();
-            }
-        }
-
-        if query_lower.contains("implementations of") || query_lower.contains("implementors of") {
-            if let Some(name) = extract_symbol_name_from_query(query, &["implementations of", "implementors of"]) {
-                let symbols = graph.find_by_name(&name);
-                return symbols
-                    .into_iter()
-                    .flat_map(|s| graph.find_implementors(&s.id))
-                    .cloned()
-                    .collect();
-            }
-        }
-
-        if query_lower.contains("imports") {
-            if let Some(name) = extract_symbol_name_from_query(query, &["imports", "what imports"]) {
-                // Find files that import the given module/file
-                let path = std::path::PathBuf::from(&name);
-                return graph
-                    .find_importers(&path)
-                    .into_iter()
-                    .flat_map(|p| graph.symbols_in_file(p))
-                    .cloned()
-                    .collect();
-            }
-        }
-
-        // Fall back to name search
-        let words: Vec<_> = query.split_whitespace().collect();
-        if words.len() <= 3 {
-            for word in words {
-                if word.len() >= 3 && !is_common_word(word) {
-                    let results = graph.find_by_name(word);
-                    if !results.is_empty() {
-                        return results.into_iter().cloned().collect();
-                    }
-                    // Try prefix match
-                    let prefix_results = graph.find_by_prefix(word);
-                    if !prefix_results.is_empty() {
-                        return prefix_results.into_iter().take(10).cloned().collect();
-                    }
-                }
-            }
-        }
-
-        vec![]
-    }
-
-    /// Apply graph-based boost to vector search results
-    fn apply_graph_boost(
-        &self,
-        results: &mut [SearchResult],
-        graph: &CodeGraph,
-        query: &str,
-    ) {
-        let query_words: Vec<_> = query
-            .split_whitespace()
-            .filter(|w| w.len() >= 3 && !is_common_word(w))
-            .collect();
-
-        for result in results.iter_mut() {
-            let file_path = &result.chunk.path;
-
-            // Check if file contains symbols matching query terms
-            let file_symbols = graph.symbols_in_file(file_path);
-            let mut boost = 0.0f32;
-
-            for symbol in file_symbols {
-                for word in &query_words {
-                    let word_lower = word.to_lowercase();
-                    if symbol.name.to_lowercase().contains(&word_lower) {
-                        boost += 0.1;
-                    }
-                }
-
-                // Boost files with more incoming references (important symbols)
-                let incoming = graph.incoming_edges(&symbol.id).len();
-                if incoming > 5 {
-                    boost += 0.05;
-                }
-            }
-
-            // Check import relationships
-            let imports = graph.find_imports_of(file_path);
-            if imports.len() > 0 {
-                // Files that import others are likely implementation files
-                boost += 0.02 * (imports.len() as f32).min(5.0);
-            }
-
-            // Apply boost (capped at 20% increase)
-            result.score *= 1.0 + boost.min(0.2);
-        }
-    }
-
-    /// Convert graph symbols to SearchResults
     fn graph_results_to_search_results(
         &self,
         symbols: &[Symbol],
@@ -1106,7 +898,6 @@ impl SearchEngine {
         let mut results = Vec::new();
 
         for symbol in symbols.iter().take(options.limit) {
-            // Find matching chunk in the index
             for (i, chunk) in index.chunks.iter().enumerate() {
                 if chunk.path == symbol.file_path
                     && chunk.start_line <= symbol.start_line
@@ -1117,7 +908,7 @@ impl SearchEngine {
 
                     results.push(SearchResult {
                         chunk: chunk.clone(),
-                        score: 0.8 + semantic * 0.2, // High base score for graph matches
+                        score: 0.8 + semantic * 0.2,
                         semantic_score: semantic,
                         bm25_score: 0.0,
                         keyword_score: 1.0,
@@ -1128,7 +919,6 @@ impl SearchEngine {
             }
         }
 
-        // Sort by score
         results.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -1138,7 +928,6 @@ impl SearchEngine {
         Ok(results)
     }
 
-    /// Convert graph symbols to SearchResults (mmap version)
     fn graph_results_to_search_results_mmap(
         &self,
         symbols: &[Symbol],
@@ -1179,7 +968,6 @@ impl SearchEngine {
         Ok(results)
     }
 
-    /// Find symbols by name
     pub fn find_symbol(&self, name: &str) -> Vec<Symbol> {
         self.graph
             .as_ref()
@@ -1187,7 +975,6 @@ impl SearchEngine {
             .unwrap_or_default()
     }
 
-    /// Find callers of a symbol
     pub fn find_callers(&self, name: &str) -> Vec<Symbol> {
         self.graph
             .as_ref()
@@ -1201,7 +988,6 @@ impl SearchEngine {
             .unwrap_or_default()
     }
 
-    /// Find what a function calls
     pub fn find_callees(&self, name: &str) -> Vec<Symbol> {
         self.graph
             .as_ref()
@@ -1215,454 +1001,84 @@ impl SearchEngine {
             .unwrap_or_default()
     }
 
-    /// Get graph statistics
     pub fn graph_stats(&self) -> Option<crate::graph::GraphStats> {
         self.graph.as_ref().map(|g| g.stats())
     }
-}
 
-/// Extract symbol name from a structural query
-fn extract_symbol_name_from_query(query: &str, patterns: &[&str]) -> Option<String> {
-    let query_lower = query.to_lowercase();
-
-    for pattern in patterns {
-        if let Some(idx) = query_lower.find(pattern) {
-            let after = &query[idx + pattern.len()..];
-            let name = after
-                .trim()
-                .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .next()?
-                .trim();
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
+    pub fn search_files(
+        &self,
+        hier: &HierarchicalIndex,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<FileSearchResult>> {
+        if hier.files.is_empty() || hier.file_vectors.is_empty() {
+            return Ok(vec![]);
         }
+
+        let query_vec = self.embedder.embed(query)?;
+
+        let mut results: Vec<FileSearchResult> = hier
+            .files
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, file_entry)| {
+                let file_vec = hier.get_file_vector(idx)?;
+                let score = cosine_similarity(&query_vec, file_vec);
+                Some(FileSearchResult {
+                    path: file_entry.path.clone(),
+                    score,
+                    chunk_count: file_entry.chunk_count(),
+                })
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(limit);
+
+        Ok(results)
     }
 
-    None
-}
-
-/// Check if a word is a common query word (not a symbol name)
-fn is_common_word(word: &str) -> bool {
-    const COMMON_WORDS: &[&str] = &[
-        "the", "and", "for", "with", "from", "this", "that", "into",
-        "when", "what", "how", "why", "does", "are", "our", "your",
-        "their", "then", "where", "find", "show", "get", "can", "will",
-        "should", "would", "could", "function", "method", "class",
-        "file", "code", "implement", "implementation", "definition",
-        "callers", "callees", "imports", "exports",
-    ];
-    COMMON_WORDS.contains(&word.to_lowercase().as_str())
-}
-
-#[derive(Clone, Serialize)]
-pub struct SearchResult {
-    pub chunk: CodeChunk,
-    pub score: f32,
-    pub semantic_score: f32,
-    pub bm25_score: f32,
-    pub keyword_score: f32,
-    pub show_full_context: bool,
-}
-
-impl SearchResult {
-    pub fn render_snippet(&self) -> String {
-        if self.show_full_context {
-            self.chunk.text.clone()
-        } else {
-            self.chunk
-                .text
-                .lines()
-                .take(12)
-                .collect::<Vec<_>>()
-                .join("\n")
+    pub fn search_directories(
+        &self,
+        hier: &HierarchicalIndex,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<DirectorySearchResult>> {
+        if hier.directories.is_empty() || hier.dir_vectors.is_empty() {
+            return Ok(vec![]);
         }
+
+        let query_vec = self.embedder.embed(query)?;
+
+        let mut results: Vec<DirectorySearchResult> = hier
+            .directories
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, dir_entry)| {
+                let dir_vec = hier.get_dir_vector(idx)?;
+                let score = cosine_similarity(&query_vec, dir_vec);
+
+                let chunk_count: usize = dir_entry
+                    .file_indices
+                    .iter()
+                    .filter_map(|&file_idx| hier.files.get(file_idx))
+                    .map(|f| f.chunk_count())
+                    .sum();
+
+                Some(DirectorySearchResult {
+                    path: dir_entry.path.clone(),
+                    score,
+                    file_count: dir_entry.file_count(),
+                    chunk_count,
+                })
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(limit);
+
+        Ok(results)
     }
-}
-
-fn cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
-    match f32::cosine(lhs, rhs) {
-        Some(distance) => ((1.0 - distance) as f32).clamp(-1.0, 1.0),
-        None => cosine_similarity_scalar(lhs, rhs),
-    }
-}
-
-fn cosine_similarity_scalar(lhs: &[f32], rhs: &[f32]) -> f32 {
-    let dot: f32 = lhs.iter().zip(rhs).map(|(a, b)| a * b).sum();
-    let norm_l: f32 = lhs.iter().map(|v| v * v).sum::<f32>().sqrt();
-    let norm_r: f32 = rhs.iter().map(|v| v * v).sum::<f32>().sqrt();
-    if norm_l == 0.0 || norm_r == 0.0 {
-        return 0.0;
-    }
-    (dot / (norm_l * norm_r)).clamp(-1.0, 1.0)
-}
-
-fn recency_boost(chunk: &CodeChunk) -> f32 {
-    let age_hours = (Utc::now() - chunk.modified_at).num_hours().max(0) as f32;
-    1.0 / (1.0 + age_hours / RECENCY_HALF_LIFE_HOURS)
-}
-
-fn content_based_file_boost(chunk: &CodeChunk) -> f32 {
-    let content_lower = chunk.text.to_lowercase();
-    let path_str = chunk.path.to_string_lossy().to_lowercase();
-    let word_count = chunk.text.split_whitespace().count().max(1) as f32;
-
-    let test_content_patterns = [
-        "assert",
-        "expect(",
-        ".tobe(",
-        ".toequal(",
-        "should.",
-        "mock",
-        "stub",
-        "fake",
-        "fixture",
-        "beforeeach",
-        "aftereach",
-        "beforeall",
-        "afterall",
-        "describe(",
-        "it(\"",
-        "it('",
-        "test(\"",
-        "test('",
-        "@test",
-        "#[test]",
-        "def test_",
-        "func test",
-    ];
-
-    let test_term_count: usize = test_content_patterns
-        .iter()
-        .map(|p| content_lower.matches(p).count())
-        .sum();
-
-    let content_test_density = (test_term_count as f32 / word_count).min(0.3);
-
-    let path_test_indicators = [
-        "test/",
-        "/test/",
-        "tests/",
-        "/tests/",
-        "__tests__/",
-        "/__tests__/",
-        "spec/",
-        "/spec/",
-        "specs/",
-        "/specs/",
-        "fixture/",
-        "/fixture/",
-        "fixtures/",
-        "/fixtures/",
-        "__testfixtures__/",
-        "/__testfixtures__/",
-        "testfixtures/",
-        "/testfixtures/",
-        "testdata/",
-        "/testdata/",
-        "test_data/",
-        "/test_data/",
-        "mock/",
-        "/mock/",
-        "mocks/",
-        "/mocks/",
-        "e2e/",
-        "/e2e/",
-        "integration/",
-        "/integration/",
-        "unit/",
-        "/unit/",
-        "unit_test/",
-        "/unit_test/",
-        "test_utils/",
-        "/test_utils/",
-        "testutils/",
-        "/testutils/",
-        "test_helpers/",
-        "/test_helpers/",
-        "testhelpers/",
-        "/testhelpers/",
-        "test_support/",
-        "/test_support/",
-        "testsupport/",
-        "/testsupport/",
-        "test_common/",
-        "/test_common/",
-        "testcommon/",
-        "/testcommon/",
-        "testlib/",
-        "/testlib/",
-        "test_lib/",
-        "/test_lib/",
-        "conftest",
-        "pytest.ini",
-        "jest.config",
-        "vitest.config",
-        ".test.",
-        "_test.",
-        ".spec.",
-        "_spec.",
-        ".test.ts",
-        ".test.js",
-        ".test.tsx",
-        ".test.jsx",
-        ".spec.ts",
-        ".spec.js",
-        ".spec.tsx",
-        ".spec.jsx",
-        "_test.go",
-        "_test.py",
-        "_test.rs",
-        "_test.java",
-        "_test.kt",
-        "_test.swift",
-        "_test.dart",
-        "test_",
-        "testcase",
-        "test_case",
-        "testhelper",
-        "test_helper",
-        "testutil",
-        "test_util",
-    ];
-
-    let path_example_indicators = [
-        "examples/",
-        "/examples/",
-        "example/",
-        "/example/",
-        "samples/",
-        "/samples/",
-        "sample/",
-        "/sample/",
-        "demo/",
-        "/demo/",
-        "demos/",
-        "/demos/",
-        "playground/",
-        "/playground/",
-        "playgrounds/",
-        "/playgrounds/",
-        "sandbox/",
-        "/sandbox/",
-        "sandboxes/",
-        "/sandboxes/",
-        "scratch/",
-        "/scratch/",
-        "scratchpad/",
-        "/scratchpad/",
-        "tutorial/",
-        "/tutorial/",
-        "tutorials/",
-        "/tutorials/",
-        "tut/",
-        "/tut/",
-        "tuts/",
-        "/tuts/",
-        "example_",
-        "sample_",
-        "demo_",
-    ];
-
-    let path_impl_indicators = [
-        "/src/",
-        "/lib/",
-        "/pkg/",
-        "/internal/",
-        "/core/",
-        "/server/",
-        "/client/",
-        "/api/",
-        "/services/",
-        "src/",
-        "lib/",
-        "pkg/",
-        "internal/",
-        "core/",
-        "server/",
-        "client/",
-        "api/",
-        "services/",
-        "/app/",
-        "/apps/",
-        "/application/",
-        "/applications/",
-        "app/",
-        "apps/",
-        "application/",
-        "applications/",
-        "/components/",
-        "/modules/",
-        "/utils/",
-        "/utilities/",
-        "components/",
-        "modules/",
-        "utils/",
-        "utilities/",
-        "/common/",
-        "/shared/",
-        "/public/",
-        "/private/",
-        "common/",
-        "shared/",
-        "public/",
-        "private/",
-        "/main/",
-        "/java/",
-        "/scala/",
-        "/python/",
-        "main/",
-        "java/",
-        "scala/",
-        "python/",
-        "/include/",
-        "/headers/",
-        "/bin/",
-        "/scripts/",
-        "include/",
-        "headers/",
-        "bin/",
-        "scripts/",
-        "/domain/",
-        "/business/",
-        "/logic/",
-        "/model/",
-        "domain/",
-        "business/",
-        "logic/",
-        "model/",
-        "/controllers/",
-        "/views/",
-        "/models/",
-        "/routes/",
-        "controllers/",
-        "views/",
-        "models/",
-        "routes/",
-        "/handlers/",
-        "/middleware/",
-        "/providers/",
-        "/repositories/",
-        "handlers/",
-        "middleware/",
-        "providers/",
-        "repositories/",
-        "/entities/",
-        "/interfaces/",
-        "/types/",
-        "/schemas/",
-        "entities/",
-        "interfaces/",
-        "types/",
-        "schemas/",
-    ];
-
-    let path_is_test = path_test_indicators.iter().any(|p| path_str.contains(p));
-    let path_is_example = path_example_indicators.iter().any(|p| path_str.contains(p));
-    let path_is_impl = path_impl_indicators.iter().any(|p| path_str.contains(p))
-        && !path_is_test
-        && !path_is_example;
-
-    let ext = chunk
-        .path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let is_doc = matches!(ext.as_str(), "md" | "mdx" | "rst" | "txt" | "adoc");
-    let is_error_doc = path_str.contains("/errors/");
-
-    let score = if is_doc {
-        if is_error_doc { 0.2 } else { 0.1 }
-    } else if path_is_test {
-        0.1
-    } else if path_is_example {
-        0.2
-    } else if path_is_impl {
-        1.0 - (content_test_density * 0.3)
-    } else {
-        0.6 - (content_test_density * 0.3)
-    };
-
-    score.clamp(0.05, 1.0)
-}
-
-fn select_top_k(matches: &mut Vec<SearchResult>, k: usize) {
-    if matches.len() > k {
-        matches.select_nth_unstable_by(k, |a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        matches.truncate(k);
-    }
-    sort_by_score(matches);
-}
-
-fn sort_by_score(matches: &mut [SearchResult]) {
-    matches.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-}
-
-fn quantize_to_binary(vector: &[f32]) -> Vec<u64> {
-    let num_words = vector.len().div_ceil(64);
-    let mut binary = vec![0u64; num_words];
-    for (i, &val) in vector.iter().enumerate() {
-        if val > 0.0 {
-            binary[i / 64] |= 1u64 << (i % 64);
-        }
-    }
-    binary
-}
-
-fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x ^ y).count_ones())
-        .sum()
-}
-
-fn binary_shortlist(
-    query_binary: &[u64],
-    index_binary: &[Vec<u64>],
-    shortlist_size: usize,
-) -> Vec<usize> {
-    let mut distances: Vec<(usize, u32)> = index_binary
-        .iter()
-        .enumerate()
-        .map(|(i, v)| (i, hamming_distance(query_binary, v)))
-        .collect();
-
-    if distances.len() > shortlist_size {
-        distances.select_nth_unstable_by_key(shortlist_size, |&(_, d)| d);
-        distances.truncate(shortlist_size);
-    }
-
-    distances.into_iter().map(|(i, _)| i).collect()
-}
-
-fn binary_shortlist_precomputed(
-    query_binary: &[u64],
-    index: &MmapIndex,
-    shortlist_size: usize,
-) -> Vec<usize> {
-    let mut distances: Vec<(usize, u32)> = (0..index.len())
-        .filter_map(|i| {
-            index
-                .get_binary_vector(i)
-                .map(|v| (i, hamming_distance(query_binary, v)))
-        })
-        .collect();
-
-    if distances.len() > shortlist_size {
-        distances.select_nth_unstable_by_key(shortlist_size, |&(_, d)| d);
-        distances.truncate(shortlist_size);
-    }
-
-    distances.into_iter().map(|(i, _)| i).collect()
 }
 
 #[cfg(test)]
@@ -1671,6 +1087,7 @@ mod tests {
     use crate::store::IndexMetadata;
     use std::path::PathBuf;
     use uuid::Uuid;
+    use chrono::Utc;
 
     #[derive(Clone, Default)]
     struct MockEmbedder;
@@ -1712,33 +1129,6 @@ mod tests {
             total_chunks: chunks.len(),
         };
         RepositoryIndex::new(metadata, chunks, vectors)
-    }
-
-    #[test]
-    fn identical_vectors_have_similarity_one() {
-        let vec = vec![1.0, 0.0, 0.0];
-        assert!((cosine_similarity(&vec, &vec) - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn orthogonal_vectors_have_similarity_zero() {
-        let vec1 = vec![1.0, 0.0, 0.0];
-        let vec2 = vec![0.0, 1.0, 0.0];
-        assert!(cosine_similarity(&vec1, &vec2).abs() < 1e-6);
-    }
-
-    #[test]
-    fn opposite_vectors_have_similarity_negative_one() {
-        let vec1 = vec![1.0, 0.0, 0.0];
-        let vec2 = vec![-1.0, 0.0, 0.0];
-        assert!((cosine_similarity(&vec1, &vec2) + 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn zero_vector_has_similarity_zero() {
-        let zero = vec![0.0, 0.0, 0.0];
-        let nonzero = vec![1.0, 0.0, 0.0];
-        assert_eq!(cosine_similarity(&zero, &nonzero), 0.0);
     }
 
     #[test]
@@ -1838,62 +1228,6 @@ mod tests {
     }
 
     #[test]
-    fn snippet_truncates_without_context() {
-        let chunk = make_chunk(
-            &(1..=14)
-                .map(|i| format!("line{}", i))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            "rust",
-            "test.rs",
-        );
-        let result = SearchResult {
-            chunk,
-            score: 0.5,
-            semantic_score: 0.5,
-            bm25_score: 0.0,
-            keyword_score: 0.0,
-            show_full_context: false,
-        };
-        assert_eq!(result.render_snippet().lines().count(), 12);
-    }
-
-    #[test]
-    fn snippet_shows_full_with_context() {
-        let chunk = make_chunk(
-            &(1..=14)
-                .map(|i| format!("line{}", i))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            "rust",
-            "test.rs",
-        );
-        let result = SearchResult {
-            chunk,
-            score: 0.5,
-            semantic_score: 0.5,
-            bm25_score: 0.0,
-            keyword_score: 0.0,
-            show_full_context: true,
-        };
-        assert_eq!(result.render_snippet().lines().count(), 14);
-    }
-
-    #[test]
-    fn recency_boost_decays_over_time() {
-        let recent = make_chunk("test", "rust", "test.rs");
-        let mut old = make_chunk("test", "rust", "test.rs");
-        old.modified_at = Utc::now() - chrono::Duration::days(30);
-
-        let recent_boost = recency_boost(&recent);
-        let old_boost = recency_boost(&old);
-
-        assert!(recent_boost > old_boost);
-        assert!(recent_boost <= 1.0);
-        assert!(old_boost > 0.0);
-    }
-
-    #[test]
     fn select_top_k_returns_highest_scores() {
         let chunk = make_chunk("test", "rust", "test.rs");
         let mut matches = vec![
@@ -1975,70 +1309,6 @@ mod tests {
     }
 
     #[test]
-    fn quantize_to_binary_sets_bits_for_positive_values() {
-        let vector = vec![1.0, -0.5, 0.3, -0.1, 0.0, 0.001];
-        let binary = quantize_to_binary(&vector);
-
-        assert_eq!(binary.len(), 1);
-        assert_eq!(binary[0] & 0b000001, 1);
-        assert_eq!(binary[0] & 0b000010, 0);
-        assert_eq!(binary[0] & 0b000100, 0b000100);
-        assert_eq!(binary[0] & 0b001000, 0);
-        assert_eq!(binary[0] & 0b010000, 0);
-        assert_eq!(binary[0] & 0b100000, 0b100000);
-    }
-
-    #[test]
-    fn quantize_to_binary_handles_large_vectors() {
-        let vector: Vec<f32> = (0..128)
-            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
-            .collect();
-        let binary = quantize_to_binary(&vector);
-
-        assert_eq!(binary.len(), 2);
-        for word in &binary {
-            assert_eq!(word.count_ones(), 32);
-        }
-    }
-
-    #[test]
-    fn hamming_distance_identical_vectors() {
-        let a = vec![0b1010101010u64];
-        assert_eq!(hamming_distance(&a, &a), 0);
-    }
-
-    #[test]
-    fn hamming_distance_completely_different() {
-        let a = vec![0u64];
-        let b = vec![u64::MAX];
-        assert_eq!(hamming_distance(&a, &b), 64);
-    }
-
-    #[test]
-    fn hamming_distance_partial_difference() {
-        let a = vec![0b1111_0000u64];
-        let b = vec![0b1111_1111u64];
-        assert_eq!(hamming_distance(&a, &b), 4);
-    }
-
-    #[test]
-    fn binary_shortlist_returns_closest_candidates() {
-        let query = vec![0b1111u64];
-        let index_binary = vec![
-            vec![0b1111u64],
-            vec![0b0000u64],
-            vec![0b1110u64],
-            vec![0b0001u64],
-        ];
-
-        let shortlist = binary_shortlist(&query, &index_binary, 2);
-
-        assert_eq!(shortlist.len(), 2);
-        assert!(shortlist.contains(&0));
-        assert!(shortlist.contains(&2));
-    }
-
-    #[test]
     fn binary_quantization_search_produces_results() {
         let embedder = Arc::new(MockEmbedder);
         let engine = SearchEngine::new(embedder.clone());
@@ -2082,7 +1352,6 @@ mod tests {
         let reranker = Arc::new(MockReranker);
         let engine = SearchEngine::with_reranker(embedder.clone(), reranker);
 
-        // Create chunks with different lengths - MockReranker prefers longer documents
         let chunks = vec![
             make_chunk("short", "rust", "a.rs"),
             make_chunk(
@@ -2111,7 +1380,6 @@ mod tests {
             )
             .unwrap();
 
-        // MockReranker prefers longer documents, so the longest should be first
         assert_eq!(results.len(), 3);
         assert!(results[0].chunk.text.contains("much longer"));
     }
@@ -2133,7 +1401,6 @@ mod tests {
             .map(|c| embedder.embed(&c.text).unwrap())
             .collect();
 
-        // Search with rerank: false
         let results = engine
             .search(
                 &make_index(chunks, vectors),
@@ -2149,13 +1416,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 2);
-        // Results should be in semantic score order, not reranked
     }
 
     #[test]
     fn reranking_skipped_without_reranker() {
         let embedder = Arc::new(MockEmbedder);
-        let engine = SearchEngine::new(embedder.clone()); // No reranker
+        let engine = SearchEngine::new(embedder.clone());
 
         let chunks = vec![
             make_chunk("fn foo() {}", "rust", "a.rs"),
@@ -2166,7 +1432,6 @@ mod tests {
             .map(|c| embedder.embed(&c.text).unwrap())
             .collect();
 
-        // Even with rerank: true, should work without panicking
         let results = engine
             .search(
                 &make_index(chunks, vectors),
@@ -2190,4 +1455,71 @@ mod tests {
         assert!(!options.rerank);
         assert_eq!(options.limit, 10);
     }
+
+    #[test]
+    fn search_files_returns_file_level_results() {
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder.clone());
+
+        let mut hier = HierarchicalIndex::new();
+        hier.add_file(
+            PathBuf::from("src/auth.rs"),
+            vec![0, 1],
+            vec![1.0, 0.0, 0.0, 0.0],
+        );
+        hier.add_file(
+            PathBuf::from("src/db.rs"),
+            vec![2],
+            vec![0.0, 1.0, 0.0, 0.0],
+        );
+        hier.add_file(
+            PathBuf::from("src/api.rs"),
+            vec![3, 4, 5],
+            vec![0.5, 0.5, 0.0, 0.0],
+        );
+
+        let results = engine
+            .search_files(&hier, "auth", 2)
+            .unwrap();
+
+        assert!(!results.is_empty());
+        assert!(results.len() <= 2);
+        for result in &results {
+            assert!(!result.path.as_os_str().is_empty());
+        }
+    }
+
+    #[test]
+    fn search_directories_returns_dir_level_results() {
+        use crate::indexer::compute_directory_embeddings;
+
+        let embedder = Arc::new(MockEmbedder);
+        let engine = SearchEngine::new(embedder.clone());
+
+        let mut hier = HierarchicalIndex::new();
+        hier.add_file(
+            PathBuf::from("src/auth/login.rs"),
+            vec![0],
+            vec![1.0, 0.0, 0.0, 0.0],
+        );
+        hier.add_file(
+            PathBuf::from("src/auth/logout.rs"),
+            vec![1],
+            vec![0.8, 0.2, 0.0, 0.0],
+        );
+        hier.add_file(
+            PathBuf::from("src/db/connection.rs"),
+            vec![2],
+            vec![0.0, 1.0, 0.0, 0.0],
+        );
+
+        compute_directory_embeddings(&mut hier);
+
+        let results = engine
+            .search_directories(&hier, "authentication", 2)
+            .unwrap();
+
+        assert!(!results.is_empty());
+    }
+
 }

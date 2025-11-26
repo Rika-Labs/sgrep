@@ -1,39 +1,34 @@
-use std::env;
+mod hierarchy;
+mod index;
+mod mmap;
+mod utils;
+
+pub use hierarchy::{DirectoryEntry, FileEntry, HierarchicalIndex, HierarchicalStats};
+pub use index::{IndexMetadata, PartialIndex, RepositoryIndex};
+pub use mmap::MmapIndex;
+
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use blake3::Hasher;
-use chrono::{DateTime, Utc};
-use directories::ProjectDirs;
 use memmap2::Mmap;
-use serde::{Deserialize, Serialize};
 
-use crate::chunker::CodeChunk;
 use crate::graph::CodeGraph;
+use mmap::{
+    parse_binary_header, parse_vectors_header, read_vectors_from_mmap, validate_vectors_size,
+    BYTES_PER_F32, VECTOR_HEADER_SIZE,
+};
+use utils::{data_dir, hash_path, quantize_to_binary};
 
 const INDEX_FILE: &str = "index.bin.zst";
+const HIERARCHY_FILE: &str = "hierarchy.bin.zst";
+const FILE_VECTORS_FILE: &str = "file_vectors.bin";
+const DIR_VECTORS_FILE: &str = "dir_vectors.bin";
 const VECTORS_FILE: &str = "vectors.bin";
 const BINARY_VECTORS_FILE: &str = "binary_vectors.bin";
 const GRAPH_FILE: &str = "graph.bin.zst";
-const INDEX_FORMAT_VERSION: u32 = 4; // Bumped for graph support
-const VECTOR_HEADER_SIZE: usize = 8;
-const BYTES_PER_F32: usize = 4;
-const BYTES_PER_U64: usize = 8;
-
-/// Quantize f32 vector to binary (1 bit per dimension)
-/// Each dimension becomes 1 if > 0.0, else 0
-fn quantize_to_binary(vector: &[f32]) -> Vec<u64> {
-    let num_words = vector.len().div_ceil(64);
-    let mut binary = vec![0u64; num_words];
-    for (i, &val) in vector.iter().enumerate() {
-        if val > 0.0 {
-            binary[i / 64] |= 1u64 << (i % 64);
-        }
-    }
-    binary
-}
+const INDEX_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone)]
 pub struct IndexStore {
@@ -80,7 +75,6 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Save the code graph
     pub fn save_graph(&self, graph: &CodeGraph) -> Result<()> {
         let graph_path = self.root.join(GRAPH_FILE);
         let bytes = bincode::serialize(graph)?;
@@ -90,7 +84,6 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Load the code graph
     pub fn load_graph(&self) -> Result<Option<CodeGraph>> {
         let graph_path = self.root.join(GRAPH_FILE);
         if !graph_path.exists() {
@@ -104,9 +97,102 @@ impl IndexStore {
         Ok(Some(graph))
     }
 
-    /// Check if graph exists
     pub fn has_graph(&self) -> bool {
         self.root.join(GRAPH_FILE).exists()
+    }
+
+    pub fn save_hierarchy(&self, hier: &HierarchicalIndex) -> Result<()> {
+        let hier_path = self.root.join(HIERARCHY_FILE);
+        let file_vectors_path = self.root.join(FILE_VECTORS_FILE);
+        let dir_vectors_path = self.root.join(DIR_VECTORS_FILE);
+
+        let bytes = bincode::serialize(hier)?;
+        let compressed = zstd::stream::encode_all(bytes.as_slice(), 3)?;
+        fs::write(&hier_path, compressed)
+            .with_context(|| format!("Failed to write hierarchy to {}", hier_path.display()))?;
+
+        self.write_hierarchy_vectors(&file_vectors_path, &hier.file_vectors)?;
+        self.write_hierarchy_vectors(&dir_vectors_path, &hier.dir_vectors)?;
+
+        Ok(())
+    }
+
+    pub fn load_hierarchy(&self) -> Result<Option<HierarchicalIndex>> {
+        let hier_path = self.root.join(HIERARCHY_FILE);
+        let file_vectors_path = self.root.join(FILE_VECTORS_FILE);
+        let dir_vectors_path = self.root.join(DIR_VECTORS_FILE);
+
+        if !hier_path.exists() {
+            return Ok(None);
+        }
+
+        let bytes = fs::read(&hier_path)
+            .with_context(|| format!("Failed to read hierarchy from {}", hier_path.display()))?;
+        let decompressed = zstd::stream::decode_all(bytes.as_slice())?;
+        let mut hier: HierarchicalIndex = bincode::deserialize(&decompressed)?;
+
+        if file_vectors_path.exists() {
+            hier.file_vectors = self.read_hierarchy_vectors(&file_vectors_path, hier.files.len())?;
+        }
+
+        if dir_vectors_path.exists() {
+            hier.dir_vectors = self.read_hierarchy_vectors(&dir_vectors_path, hier.directories.len())?;
+        }
+
+        Ok(Some(hier))
+    }
+
+    pub fn has_hierarchy(&self) -> bool {
+        self.root.join(HIERARCHY_FILE).exists()
+    }
+
+    fn write_hierarchy_vectors(&self, path: &Path, vectors: &[Vec<f32>]) -> Result<()> {
+        if vectors.is_empty() {
+            return Ok(());
+        }
+
+        let file = File::create(path)
+            .with_context(|| format!("Failed to create {}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+
+        let vector_dim = vectors.first().map(|v| v.len()).unwrap_or(0) as u32;
+        writer.write_all(&INDEX_FORMAT_VERSION.to_le_bytes())?;
+        writer.write_all(&vector_dim.to_le_bytes())?;
+
+        for vector in vectors {
+            for &val in vector {
+                writer.write_all(&val.to_le_bytes())?;
+            }
+        }
+        writer.flush()?;
+        Ok(())
+    }
+
+    fn read_hierarchy_vectors(&self, path: &Path, count: usize) -> Result<Vec<Vec<f32>>> {
+        let bytes = fs::read(path)?;
+        if bytes.len() < VECTOR_HEADER_SIZE {
+            return Ok(vec![]);
+        }
+
+        let _format_version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let vector_dim = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+
+        let mut vectors = Vec::with_capacity(count);
+        let vector_bytes = vector_dim * BYTES_PER_F32;
+
+        for i in 0..count {
+            let offset = VECTOR_HEADER_SIZE + i * vector_bytes;
+            if offset + vector_bytes > bytes.len() {
+                break;
+            }
+            let vec: Vec<f32> = bytes[offset..offset + vector_bytes]
+                .chunks_exact(BYTES_PER_F32)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            vectors.push(vec);
+        }
+
+        Ok(vectors)
     }
 
     pub fn load_mmap(&self) -> Result<Option<MmapIndex>> {
@@ -128,7 +214,6 @@ impl IndexStore {
 
         validate_vectors_size(&mmap, vector_dim, partial.chunks.len())?;
 
-        // Try to load binary vectors (optional - gracefully degrade if missing)
         let (binary_mmap, binary_words) = if binary_vectors_path.exists() {
             match self.open_vectors_mmap(&binary_vectors_path) {
                 Ok(bin_mmap) => {
@@ -224,12 +309,10 @@ impl IndexStore {
             File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
         let mut writer = BufWriter::new(file);
 
-        // Header: version (4 bytes) + num_words per vector (4 bytes)
         let num_words = index.metadata.vector_dim.div_ceil(64) as u32;
         writer.write_all(&INDEX_FORMAT_VERSION.to_le_bytes())?;
         writer.write_all(&num_words.to_le_bytes())?;
 
-        // Write binary vectors
         for vector in &index.vectors {
             let binary = quantize_to_binary(vector);
             for word in &binary {
@@ -252,165 +335,11 @@ impl IndexStore {
     }
 }
 
-fn parse_vectors_header(mmap: &Mmap) -> Result<(u32, usize)> {
-    if mmap.len() < VECTOR_HEADER_SIZE {
-        return Err(anyhow::anyhow!("Invalid vectors file: too small"));
-    }
-    let format_version = u32::from_le_bytes([mmap[0], mmap[1], mmap[2], mmap[3]]);
-    let vector_dim = u32::from_le_bytes([mmap[4], mmap[5], mmap[6], mmap[7]]) as usize;
-    Ok((format_version, vector_dim))
-}
-
-fn parse_binary_header(mmap: &Mmap) -> Result<(u32, usize)> {
-    if mmap.len() < VECTOR_HEADER_SIZE {
-        return Err(anyhow::anyhow!("Invalid binary vectors file: too small"));
-    }
-    let format_version = u32::from_le_bytes([mmap[0], mmap[1], mmap[2], mmap[3]]);
-    let num_words = u32::from_le_bytes([mmap[4], mmap[5], mmap[6], mmap[7]]) as usize;
-    Ok((format_version, num_words))
-}
-
-fn validate_vectors_size(mmap: &Mmap, vector_dim: usize, num_vectors: usize) -> Result<()> {
-    let vector_bytes = vector_dim * BYTES_PER_F32;
-    let expected_size = VECTOR_HEADER_SIZE + num_vectors * vector_bytes;
-    if mmap.len() < expected_size {
-        return Err(anyhow::anyhow!(
-            "Invalid vectors file: expected {} bytes, got {}",
-            expected_size,
-            mmap.len()
-        ));
-    }
-    Ok(())
-}
-
-fn read_vectors_from_mmap(mmap: &Mmap, vector_dim: usize, num_vectors: usize) -> Vec<Vec<f32>> {
-    let vector_bytes = vector_dim * BYTES_PER_F32;
-    (0..num_vectors)
-        .map(|i| {
-            let offset = VECTOR_HEADER_SIZE + i * vector_bytes;
-            mmap[offset..offset + vector_bytes]
-                .chunks_exact(BYTES_PER_F32)
-                .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-                .collect()
-        })
-        .collect()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PartialIndex {
-    metadata: IndexMetadata,
-    chunks: Vec<CodeChunk>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepositoryIndex {
-    pub metadata: IndexMetadata,
-    pub chunks: Vec<CodeChunk>,
-    pub vectors: Vec<Vec<f32>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IndexMetadata {
-    pub version: String,
-    pub repo_path: PathBuf,
-    pub repo_hash: String,
-    pub vector_dim: usize,
-    pub indexed_at: DateTime<Utc>,
-    pub total_files: usize,
-    pub total_chunks: usize,
-}
-
-impl RepositoryIndex {
-    pub fn new(metadata: IndexMetadata, chunks: Vec<CodeChunk>, vectors: Vec<Vec<f32>>) -> Self {
-        debug_assert_eq!(chunks.len(), vectors.len());
-        Self {
-            metadata,
-            chunks,
-            vectors,
-        }
-    }
-}
-
-pub struct MmapIndex {
-    pub metadata: IndexMetadata,
-    pub chunks: Vec<CodeChunk>,
-    mmap: Mmap,
-    binary_mmap: Option<Mmap>,
-    vector_dim: usize,
-    binary_words: usize,
-}
-
-impl MmapIndex {
-    #[inline]
-    pub fn get_vector(&self, idx: usize) -> &[f32] {
-        let vector_bytes = self.vector_dim * BYTES_PER_F32;
-        let offset = VECTOR_HEADER_SIZE + idx * vector_bytes;
-        let slice = &self.mmap[offset..offset + vector_bytes];
-        unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const f32, self.vector_dim) }
-    }
-
-    #[inline]
-    pub fn get_binary_vector(&self, idx: usize) -> Option<&[u64]> {
-        let mmap = self.binary_mmap.as_ref()?;
-        let binary_bytes = self.binary_words * BYTES_PER_U64;
-        let offset = VECTOR_HEADER_SIZE + idx * binary_bytes;
-        let slice = &mmap[offset..offset + binary_bytes];
-        Some(unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u64, self.binary_words) })
-    }
-
-    #[inline]
-    pub fn has_binary_vectors(&self) -> bool {
-        self.binary_mmap.is_some()
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.chunks.len()
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.chunks.is_empty()
-    }
-
-    pub fn to_repository_index(&self) -> RepositoryIndex {
-        let vectors: Vec<Vec<f32>> = (0..self.len())
-            .map(|i| self.get_vector(i).to_vec())
-            .collect();
-        RepositoryIndex {
-            metadata: self.metadata.clone(),
-            chunks: self.chunks.clone(),
-            vectors,
-        }
-    }
-}
-
-fn data_dir() -> PathBuf {
-    if let Ok(home) = env::var("SGREP_HOME") {
-        return PathBuf::from(home);
-    }
-    ProjectDirs::from("dev", "RikaLabs", "sgrep")
-        .map(|d| d.data_local_dir().to_path_buf())
-        .unwrap_or_else(fallback_data_dir)
-}
-
-fn fallback_data_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".sgrep")
-}
-
-fn hash_path(path: &Path) -> String {
-    let mut hasher = Hasher::new();
-    hasher.update(path.to_string_lossy().as_bytes());
-    hasher.finalize().to_hex().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunker::CodeChunk;
+    use chrono::Utc;
     use serial_test::serial;
     use uuid::Uuid;
 
@@ -448,26 +377,6 @@ mod tests {
             total_files: 1,
             total_chunks: 1,
         }
-    }
-
-    #[test]
-    fn hash_is_deterministic() {
-        let path = Path::new("/test/path");
-        assert_eq!(hash_path(path), hash_path(path));
-    }
-
-    #[test]
-    fn hash_differs_for_different_paths() {
-        assert_ne!(hash_path(Path::new("/a")), hash_path(Path::new("/b")));
-    }
-
-    #[test]
-    fn repository_index_maintains_correspondence() {
-        let chunk = make_chunk();
-        let vector = vec![0.1, 0.2, 0.3];
-        let metadata = make_metadata(PathBuf::from("/test"), "test".to_string(), 3);
-        let index = RepositoryIndex::new(metadata, vec![chunk], vec![vector]);
-        assert_eq!(index.chunks.len(), index.vectors.len());
     }
 
     #[test]
@@ -577,23 +486,6 @@ mod tests {
         assert!(store.load_mmap().unwrap().is_none());
 
         std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    #[test]
-    fn data_dir_uses_sgrep_home_when_set() {
-        let prev = std::env::var("SGREP_HOME").ok();
-        std::env::set_var("SGREP_HOME", "/custom/path");
-        assert_eq!(data_dir(), PathBuf::from("/custom/path"));
-        match prev {
-            Some(v) => std::env::set_var("SGREP_HOME", v),
-            None => std::env::remove_var("SGREP_HOME"),
-        }
-    }
-
-    #[test]
-    fn fallback_uses_home_directory() {
-        let dir = fallback_data_dir();
-        assert!(dir.to_string_lossy().contains(".sgrep"));
     }
 
     #[test]

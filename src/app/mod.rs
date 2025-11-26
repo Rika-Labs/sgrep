@@ -22,7 +22,6 @@ pub fn run() -> Result<()> {
 }
 
 pub fn run_with_cli(cli: Cli) -> Result<()> {
-    // Handle config command early (doesn't need embedder)
     if let Commands::Config { init } = &cli.command {
         return handle_config(*init);
     }
@@ -104,7 +103,6 @@ fn handle_config(init: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Show current config
     println!(
         "{} Config path: {}",
         style("ℹ").cyan(),
@@ -163,8 +161,7 @@ fn handle_index(
     if report.graph_symbols > 0 {
         println!(
             "  {} symbols extracted, {} relationships",
-            report.graph_symbols,
-            report.graph_edges
+            report.graph_symbols, report.graph_edges
         );
     }
 
@@ -334,8 +331,7 @@ fn rebuild_index(
     if report.graph_symbols > 0 {
         eprintln!(
             "  {} symbols extracted, {} relationships",
-            report.graph_symbols,
-            report.graph_edges
+            report.graph_symbols, report.graph_edges
         );
     }
 

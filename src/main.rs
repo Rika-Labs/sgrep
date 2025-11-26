@@ -9,6 +9,7 @@ mod fts;
 mod graph;
 mod indexer;
 mod output;
+mod query_expander;
 mod reranker;
 mod search;
 mod store;

@@ -1,6 +1,6 @@
 [package]
 name = "sgrep"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Lightning-fast local-first semantic code search"
@@ -65,6 +65,10 @@ usearch = "2"
 memmap2 = "0.9"
 dashmap = "6"
 num_cpus = "1.16"
+
+# Query expansion with Qwen2.5 via llama.cpp
+llama-cpp-2 = "0.1"
+encoding_rs = "0.8"
 
 [dev-dependencies]
 serial_test = "3.2"
