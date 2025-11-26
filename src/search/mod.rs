@@ -121,8 +121,6 @@ impl SearchEngine {
         Ok(())
     }
 
-    /// Enable the query expander in silent mode (no logs) if the model is already cached.
-    /// Returns an error if the model is not cached (won't download).
     pub fn enable_query_expander_silent(&mut self) -> Result<()> {
         if self.query_expander.is_none() {
             self.query_expander = Some(QueryExpander::new_silent_if_cached()?);

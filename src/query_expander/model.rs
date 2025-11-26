@@ -147,8 +147,6 @@ impl QueryExpander {
         Self::with_options(true, false)
     }
 
-    /// Create a new QueryExpander with silent mode (suppresses llama.cpp logs).
-    /// Only loads if the model is already cached - does not download.
     pub fn new_silent_if_cached() -> Result<Self> {
         if !is_model_cached() {
             return Err(anyhow!(
@@ -158,20 +156,16 @@ impl QueryExpander {
         Self::with_options(false, true)
     }
 
-    /// Create a new QueryExpander with progress and silent options.
     pub fn with_options(show_progress: bool, silent: bool) -> Result<Self> {
         let model_path = download_model(show_progress)?;
 
-        // Initialize llama.cpp backend
         let mut backend = LlamaBackend::init()
             .map_err(|e| anyhow!("Failed to initialize llama backend: {}", e))?;
 
-        // Suppress logs if silent mode is enabled
         if silent {
             backend.void_logs();
         }
 
-        // Load model with optimized parameters
         let model_params = LlamaModelParams::default();
         let model = LlamaModel::load_from_file(&backend, &model_path, &model_params)
             .map_err(|e| anyhow!("Failed to load model: {}", e))?;
@@ -348,12 +342,10 @@ fn get_model_cache_dir() -> PathBuf {
     base.join("sgrep").join("models")
 }
 
-/// Get the expected path to the model file.
 pub fn get_model_path() -> PathBuf {
     get_model_cache_dir().join(format!("{}.gguf", MODEL_NAME))
 }
 
-/// Check if the model is already cached locally.
 pub fn is_model_cached() -> bool {
     get_model_path().exists()
 }
