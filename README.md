@@ -185,6 +185,8 @@ provider = "local"
 - `SGREP_DEVICE`: Accelerator selection (`cpu`, `cuda`, `coreml`).
 - `SGREP_BATCH_SIZE`: Inference batch size.
 - `SGREP_EMBEDDER_POOL_SIZE`: Model instance count.
+- `SGREP_INIT_TIMEOUT_SECS`: Model initialization timeout (default: 120).
+- `HTTP_PROXY` / `HTTPS_PROXY`: Proxy for model downloads.
 - `RUST_LOG`: Tracing level (e.g., `sgrep=debug`).
 - `RAYON_NUM_THREADS`: Thread pool limit.
 
@@ -201,7 +203,54 @@ cargo clippy
 
 - **Stale Index:** Execute `sgrep index` to synchronize.
 - **Cache Reset:** Remove `~/.sgrep/indexes/<repo>` to force a clean state.
-- **Offline Operation:** Use `sgrep --offline index` for air-gapped environments. Ensure model artifacts are cached at `~/.sgrep/cache/fastembed`.
+- **Model Download Failed:** See [Offline Installation](#offline-installation) below.
+- **Initialization Timeout:** Increase with `SGREP_INIT_TIMEOUT_SECS=600`.
+
+## Offline Installation
+
+If HuggingFace is blocked in your region (e.g., China), use one of these methods:
+
+### Using HTTP Proxy
+
+```bash
+export HTTPS_PROXY=http://127.0.0.1:7890
+sgrep search "your query"
+```
+
+### Manual Model Download
+
+1. **Find model directory:**
+   ```bash
+   sgrep config --show-model-dir
+   ```
+
+2. **Download files** from https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1:
+   - `onnx/model_quantized.onnx`
+   - `tokenizer.json`
+   - `config.json`
+   - `special_tokens_map.json`
+   - `tokenizer_config.json`
+
+3. **Place files** in the model directory and verify:
+   ```bash
+   sgrep config --verify-model
+   ```
+
+### China Mirror Script
+
+```bash
+MODEL_DIR=$(sgrep config --show-model-dir)
+mkdir -p "$MODEL_DIR"
+BASE="https://hf-mirror.com/mixedbread-ai/mxbai-embed-xsmall-v1/resolve/main"
+
+curl -L "$BASE/onnx/model_quantized.onnx" -o "$MODEL_DIR/model_quantized.onnx"
+curl -L "$BASE/tokenizer.json" -o "$MODEL_DIR/tokenizer.json"
+curl -L "$BASE/config.json" -o "$MODEL_DIR/config.json"
+curl -L "$BASE/special_tokens_map.json" -o "$MODEL_DIR/special_tokens_map.json"
+curl -L "$BASE/tokenizer_config.json" -o "$MODEL_DIR/tokenizer_config.json"
+
+sgrep config --verify-model
+```
 
 ## Attribution
 

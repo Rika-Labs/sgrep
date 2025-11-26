@@ -97,6 +97,13 @@ provider = "local"
 - `SGREP_CONFIG`: Override config file path
 - `SGREP_DEVICE`: Set device (cpu|cuda|coreml)
 - `SGREP_BATCH_SIZE`: Override embedding batch size
+- `HTTP_PROXY` / `HTTPS_PROXY`: Proxy for model downloads
+
+**Model management:**
+```bash
+sgrep config --show-model-dir   # Show model cache directory
+sgrep config --verify-model     # Check if model files are present
+```
 
 ## Troubleshooting
 
@@ -136,6 +143,14 @@ If searches return no results:
 2. **Index is fresh?**: Run `sgrep index` manually to rebuild
 3. **Query too specific?**: Try broader natural language queries
 4. **Wrong directory?**: Ensure you're searching the correct project path
+
+### Model Download Issues
+
+If model download fails (e.g., HuggingFace blocked in your region):
+
+1. **Use proxy**: Set `HTTPS_PROXY` environment variable
+2. **Verify model**: Run `sgrep config --verify-model` to check status
+3. **Manual download**: See [sgrep README](https://github.com/rika-labs/sgrep#offline-installation) for manual installation
 
 ## How It Works
 

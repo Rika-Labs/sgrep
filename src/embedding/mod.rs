@@ -2,7 +2,7 @@ mod cache;
 mod local;
 mod providers;
 
-pub use cache::configure_offline_env;
+pub use cache::{configure_offline_env, get_fastembed_cache_dir};
 pub use local::{Embedder, PooledEmbedder};
 pub(crate) use providers::select_execution_providers;
 

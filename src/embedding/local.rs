@@ -19,6 +19,8 @@ use moka::sync::Cache;
 use once_cell::sync::Lazy;
 #[cfg(not(test))]
 use ort::execution_providers::ExecutionProviderDispatch;
+#[cfg(not(test))]
+use ureq::{Agent, AgentBuilder, Proxy};
 
 use super::cache::{get_fastembed_cache_dir, setup_fastembed_cache_dir};
 use super::providers::select_execution_providers;
@@ -36,6 +38,25 @@ const DEFAULT_MAX_CACHE: u64 = 100_000;
 
 #[cfg(not(test))]
 static INIT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+#[cfg(not(test))]
+fn create_http_agent() -> Agent {
+    let proxy_url = env::var("https_proxy")
+        .or_else(|_| env::var("HTTPS_PROXY"))
+        .or_else(|_| env::var("http_proxy"))
+        .or_else(|_| env::var("HTTP_PROXY"))
+        .ok();
+
+    let mut builder = AgentBuilder::new();
+
+    if let Some(url) = proxy_url {
+        if let Ok(proxy) = Proxy::new(&url) {
+            builder = builder.proxy(proxy);
+        }
+    }
+
+    builder.build()
+}
 
 #[cfg_attr(not(test), derive(Clone))]
 #[cfg_attr(test, derive(Clone, Default))]
@@ -305,9 +326,23 @@ fn download_file(url: &str, path: &std::path::Path, show_progress: bool) -> Resu
         );
     }
 
-    let response = ureq::get(url)
+    let agent = create_http_agent();
+    let response = agent.get(url)
         .call()
-        .map_err(|e| anyhow!("Failed to download {}: {}", url, e))?;
+        .map_err(|e| {
+            let cache_dir = get_mxbai_cache_dir();
+            anyhow!(
+                "Failed to download {}: {}\n\n\
+                If HuggingFace is blocked in your region:\n\
+                1. Use proxy: export HTTPS_PROXY=http://proxy:port\n\
+                2. Manual download: Place files in {}\n\
+                   Required: model_quantized.onnx, tokenizer.json, config.json,\n\
+                             special_tokens_map.json, tokenizer_config.json\n\n\
+                Run 'sgrep config --show-model-dir' to see the exact path.\n\
+                Download from: https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/tree/main",
+                url, e, cache_dir.display()
+            )
+        })?;
 
     let mut bytes = Vec::new();
     response.into_reader().read_to_end(&mut bytes)?;
@@ -405,8 +440,14 @@ fn init_model_with_timeout(
         Ok(Err(e)) => Err(anyhow!("Model initialization failed: {}", e)),
         Err(mpsc::RecvTimeoutError::Timeout) => {
             Err(anyhow!(
-                "Model initialization timed out after {:?}. This may happen on first run while downloading the model. \
-                Try again or increase timeout with SGREP_INIT_TIMEOUT_SECS=300",
+                "Model initialization timed out after {:?}.\n\n\
+                Possible causes:\n\
+                - First-time model download is slow or blocked\n\
+                - HuggingFace may be unreachable in your region\n\n\
+                Solutions:\n\
+                - Increase timeout: SGREP_INIT_TIMEOUT_SECS=600\n\
+                - Use proxy: HTTPS_PROXY=http://your-proxy:port\n\
+                - Manual download: sgrep config --show-model-dir",
                 timeout
             ))
         }

@@ -21,8 +21,16 @@ pub fn configure_offline_env(offline: bool) -> Result<()> {
 
     if offline && !cache_has_model(&cache_dir) {
         return Err(anyhow!(
-            "Offline mode enabled but no cached model was found under {}. \
-             Download the model once with network enabled or place the BGE-small-en-v1.5-q files in that directory.",
+            "Offline mode enabled but no cached model found.\n\n\
+            Model cache directory: {}\n\n\
+            Required files in mxbai-embed-xsmall-v1/:\n\
+              - model_quantized.onnx\n\
+              - tokenizer.json\n\
+              - config.json\n\
+              - special_tokens_map.json\n\
+              - tokenizer_config.json\n\n\
+            Run 'sgrep config --show-model-dir' for the exact path.\n\
+            Download from: https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/tree/main",
             cache_dir.display()
         ));
     }

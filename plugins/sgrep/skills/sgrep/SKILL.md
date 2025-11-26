@@ -79,9 +79,18 @@ sgrep watch           # Watch current directory
 sgrep watch --debounce-ms 200
 ```
 
-## Embedding Provider
+## Configuration
 
-sgrep uses local embeddings. Check with `sgrep config`.
+sgrep uses local embeddings by default:
+
+```bash
+sgrep config                    # Show current configuration
+sgrep config --init             # Create default config file
+sgrep config --show-model-dir   # Show model cache directory
+sgrep config --verify-model     # Check if model files are present
+```
+
+If HuggingFace is blocked, set `HTTPS_PROXY` environment variable or see the [offline installation guide](https://github.com/rika-labs/sgrep#offline-installation).
 
 ## Examples
 

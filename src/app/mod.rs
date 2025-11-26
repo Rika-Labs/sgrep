@@ -22,8 +22,8 @@ pub fn run() -> Result<()> {
 }
 
 pub fn run_with_cli(cli: Cli) -> Result<()> {
-    if let Commands::Config { init } = &cli.command {
-        return handle_config(*init);
+    if let Commands::Config { init, show_model_dir, verify_model } = &cli.command {
+        return handle_config(*init, *show_model_dir, *verify_model);
     }
 
     let embedder = build_embedder(cli.offline, cli.device.clone())?;
@@ -82,7 +82,18 @@ fn build_embedder(
     })
 }
 
-fn handle_config(init: bool) -> Result<()> {
+fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result<()> {
+    if show_model_dir {
+        let model_dir = embedding::get_fastembed_cache_dir()
+            .join("mxbai-embed-xsmall-v1");
+        println!("{}", model_dir.display());
+        return Ok(());
+    }
+
+    if verify_model {
+        return verify_model_files();
+    }
+
     let config_path = Config::config_path();
 
     if init {
@@ -128,6 +139,44 @@ fn handle_config(init: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn verify_model_files() -> Result<()> {
+    let model_dir = embedding::get_fastembed_cache_dir()
+        .join("mxbai-embed-xsmall-v1");
+
+    let required = [
+        "model_quantized.onnx",
+        "tokenizer.json",
+        "config.json",
+        "special_tokens_map.json",
+        "tokenizer_config.json",
+    ];
+
+    println!("{} Model directory: {}\n", style("ℹ").cyan(), model_dir.display());
+
+    let mut all_ok = true;
+    for file in &required {
+        let exists = model_dir.join(file).exists();
+        let status = if exists {
+            style("OK").green()
+        } else {
+            all_ok = false;
+            style("MISSING").red()
+        };
+        println!("  [{}] {}", status, file);
+    }
+
+    println!();
+    if all_ok {
+        println!("{} All model files present.", style("✔").green());
+        Ok(())
+    } else {
+        println!("{} Some model files are missing.\n", style("✖").red());
+        println!("Download from: https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/tree/main");
+        println!("Place files in: {}", model_dir.display());
+        Err(anyhow!("Model files incomplete"))
+    }
 }
 
 fn handle_index(
@@ -786,5 +835,69 @@ mod tests {
         run().unwrap();
         env::remove_var("SGREP_TEST_ARGS");
         std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn config_show_model_dir_returns_path() {
+        let cli = Cli {
+            device: None,
+            offline: false,
+            command: Commands::Config {
+                init: false,
+                show_model_dir: true,
+                verify_model: false,
+            },
+        };
+        run_with_cli(cli).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn config_verify_model_checks_files() {
+        let cli = Cli {
+            device: None,
+            offline: false,
+            command: Commands::Config {
+                init: false,
+                show_model_dir: false,
+                verify_model: true,
+            },
+        };
+        let _ = run_with_cli(cli);
+    }
+
+    #[test]
+    #[serial]
+    fn verify_model_files_returns_error_when_missing() {
+        let temp_cache = std::env::temp_dir().join(format!("sgrep_verify_test_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_cache).unwrap();
+        env::set_var("FASTEMBED_CACHE_DIR", &temp_cache);
+
+        let result = super::verify_model_files();
+        assert!(result.is_err());
+
+        env::remove_var("FASTEMBED_CACHE_DIR");
+        std::fs::remove_dir_all(&temp_cache).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn verify_model_files_returns_ok_when_present() {
+        let temp_cache = std::env::temp_dir().join(format!("sgrep_verify_ok_test_{}", Uuid::new_v4()));
+        let model_dir = temp_cache.join("mxbai-embed-xsmall-v1");
+        std::fs::create_dir_all(&model_dir).unwrap();
+
+        for file in &["model_quantized.onnx", "tokenizer.json", "config.json",
+                      "special_tokens_map.json", "tokenizer_config.json"] {
+            std::fs::write(model_dir.join(file), b"mock").unwrap();
+        }
+
+        env::set_var("FASTEMBED_CACHE_DIR", &temp_cache);
+
+        let result = super::verify_model_files();
+        assert!(result.is_ok());
+
+        env::remove_var("FASTEMBED_CACHE_DIR");
+        std::fs::remove_dir_all(&temp_cache).ok();
     }
 }
