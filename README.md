@@ -54,19 +54,15 @@ sgrep integrates with Claude Code via the official plugin interface:
 
 The plugin manages the `sgrep watch` process lifecycle and exposes search capabilities to the agent environment. See [plugins/sgrep/README.md](plugins/sgrep/README.md) for technical specifications.
 
-### Factory Droids Integration
+### Factory Skills Integration
 
-Native support is provided for Factory Droids:
+Native support is provided for Factory Skills:
 
-1. **Enable Custom Droids**: via `/settings` in Factory.
-2. **Deploy Droid**:
-   ```bash
-   # Project-scope
-   cp -r .factory/droids/ your-project/.factory/droids/
+```bash
+curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-skill.sh | sh
+```
 
-   # User-scope
-   cp .factory/droids/sgrep.md ~/.factory/droids/
-   ```
+This installs the sgrep skill to `~/.factory/skills/sgrep/`. Restart Factory to use the skill.
 
 ### Generic Agent Integration
 

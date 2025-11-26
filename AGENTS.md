@@ -3,6 +3,7 @@
 ## Project Structure & Module Organization
 - `src/main.rs` wires the CLI; `search.rs` orchestrates hybrid semantic + keyword search; `indexer.rs` builds and refreshes indexes; `chunker.rs` handles tree-sitter chunking; `embedding.rs` manages the embedding pool and local mxbai provider; `config.rs` handles config file parsing; `store.rs` persists metadata; `fts.rs` covers keyword scoring; `watch.rs` handles incremental re-indexing.
 - `plugins/sgrep/` contains the Claude Code plugin (hooks, skills). Update `plugins/sgrep/README.md` when changing agent behavior.
+- `.factory/skills/sgrep/` contains the Factory skill. Update the `SKILL.md` when changing skill behavior.
 - `scripts/install.sh` is the installer; `default-ignore.txt` lists default exclusions; `target/` holds build artifacts (use `cargo clean` to reset).
 
 ## Build, Test, and Development Commands
