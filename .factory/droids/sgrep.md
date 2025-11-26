@@ -62,6 +62,8 @@ sgrep search "retry logic" --context
 - `--glob <pattern>`: File pattern filter (repeatable)
 - `--filters key=value`: Metadata filters like `lang=rust` (repeatable)
 - `--json`: Emit structured JSON output (agent-friendly)
+- `--threads <n>`: Maximum threads for parallel operations
+- `--cpu-preset <preset>`: CPU usage preset (auto|low|medium|high|background)
 
 ## Indexing
 
@@ -86,11 +88,15 @@ sgrep watch --debounce-ms 200
 Check or create embedding provider configuration:
 
 ```bash
-sgrep config          # Show current configuration
-sgrep config --init   # Create default config file
+sgrep config                    # Show current configuration
+sgrep config --init             # Create default config file
+sgrep config --show-model-dir   # Show model cache directory
+sgrep config --verify-model     # Check if model files are present
 ```
 
-sgrep supports local (default) and OpenAI embeddings. Config lives at `~/.sgrep/config.toml`.
+sgrep uses local embeddings by default. Config lives at `~/.sgrep/config.toml`.
+
+If HuggingFace is blocked (e.g., in China), set `HTTPS_PROXY` environment variable or see the [offline installation guide](https://github.com/rika-labs/sgrep#offline-installation).
 
 ## Examples
 

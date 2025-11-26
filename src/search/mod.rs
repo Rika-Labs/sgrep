@@ -14,7 +14,7 @@ use anyhow::Result;
 
 use crate::chunker::CodeChunk;
 use crate::embedding::BatchEmbedder;
-use crate::fts;
+use crate::fts::{self, Bm25FDocument, Bm25FIndex};
 use crate::graph::{CodeGraph, QueryType, Symbol};
 use crate::query_expander::{QueryAnalysis, QueryExpander};
 use crate::reranker::Reranker;
@@ -33,6 +33,33 @@ const BINARY_SHORTLIST_FACTOR: usize = 10;
 const RERANK_OVERSAMPLE_FACTOR: usize = 3;
 const PRF_TOP_K: usize = 10;
 const PRF_EXPANSION_TERMS: usize = 5;
+
+/// Build a BM25F index from chunks with optional symbol information.
+/// This implements the BM25F algorithm which boosts term frequencies for
+/// important fields (filename, path, symbols) BEFORE the saturation function.
+fn build_bm25f_from_chunks(chunks: &[CodeChunk], graph: Option<&CodeGraph>) -> Bm25FIndex {
+    let documents: Vec<Bm25FDocument> = chunks
+        .iter()
+        .map(|chunk| {
+            let mut doc = Bm25FDocument::new(&chunk.text, &chunk.path);
+
+            // Extract symbol names from the graph if available
+            if let Some(g) = graph {
+                let symbols: Vec<String> = g
+                    .symbols_in_file(&chunk.path)
+                    .iter()
+                    .filter(|s| s.start_line >= chunk.start_line && s.end_line <= chunk.end_line)
+                    .map(|s| s.name.clone())
+                    .collect();
+                doc = doc.with_symbols(symbols);
+            }
+
+            doc
+        })
+        .collect();
+
+    Bm25FIndex::build(&documents)
+}
 
 #[derive(Clone)]
 pub struct SearchOptions {
@@ -173,8 +200,8 @@ impl SearchEngine {
         };
         let globset = fts::build_globset(&options.glob);
 
-        let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
-        let bm25_index = fts::Bm25Index::build(&doc_texts);
+        // Use BM25F for field-aware scoring (filename, path, symbols boost)
+        let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let mut matches: Vec<SearchResult> = index
             .chunks
@@ -184,7 +211,7 @@ impl SearchEngine {
             .filter(|(_, (chunk, _))| fts::glob_matches(globset.as_ref(), &chunk.path))
             .filter(|(_, (chunk, _))| fts::matches_filters(&options.filters, chunk))
             .map(|(idx, (chunk, vector))| {
-                let bm25_score = bm25_index.score(query, idx);
+                let bm25_score = bm25f_index.score(query, idx);
                 self.score_chunk(
                     chunk,
                     vector,
@@ -211,7 +238,7 @@ impl SearchEngine {
                 if !fts::matches_filters(&options.filters, chunk) {
                     continue;
                 }
-                let bm25_score = bm25_index.score(&expanded_query, idx);
+                let bm25_score = bm25f_index.score(&expanded_query, idx);
                 let result = self.score_chunk(
                     chunk,
                     vector,
@@ -252,8 +279,8 @@ impl SearchEngine {
             limit
         };
 
-        let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
-        let bm25_index = fts::Bm25Index::build(&doc_texts);
+        // Use BM25F for field-aware scoring (filename, path, symbols boost)
+        let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let query_binary = quantize_to_binary(&query_vec);
         let index_binary: Vec<Vec<u64>> = index
@@ -268,7 +295,7 @@ impl SearchEngine {
         let mut matches: Vec<SearchResult> = candidates
             .iter()
             .map(|&idx| {
-                let bm25_score = bm25_index.score(query, idx);
+                let bm25_score = bm25f_index.score(query, idx);
                 self.score_chunk(
                     &index.chunks[idx],
                     &index.vectors[idx],
@@ -292,7 +319,7 @@ impl SearchEngine {
                 binary_shortlist(&expanded_binary, &index_binary, shortlist_size);
 
             for idx in expanded_candidates {
-                let bm25_score = bm25_index.score(&expanded_query, idx);
+                let bm25_score = bm25f_index.score(&expanded_query, idx);
                 let result = self.score_chunk(
                     &index.chunks[idx],
                     &index.vectors[idx],
@@ -333,8 +360,8 @@ impl SearchEngine {
             limit
         };
 
-        let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
-        let bm25_index = fts::Bm25Index::build(&doc_texts);
+        // Use BM25F for field-aware scoring (filename, path, symbols boost)
+        let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let hnsw = build_hnsw_index(index.metadata.vector_dim, index.vectors.len())?;
         for (i, vector) in index.vectors.iter().enumerate() {
@@ -355,7 +382,7 @@ impl SearchEngine {
                 if idx >= index.chunks.len() {
                     return None;
                 }
-                let bm25_score = bm25_index.score(query, idx);
+                let bm25_score = bm25f_index.score(query, idx);
                 Some(self.score_chunk(
                     &index.chunks[idx],
                     &index.vectors[idx],
@@ -385,7 +412,7 @@ impl SearchEngine {
                 if idx >= index.chunks.len() {
                     continue;
                 }
-                let bm25_score = bm25_index.score(&expanded_query, idx);
+                let bm25_score = bm25f_index.score(&expanded_query, idx);
                 let result = self.score_chunk(
                     &index.chunks[idx],
                     &index.vectors[idx],
@@ -427,8 +454,8 @@ impl SearchEngine {
         };
         let globset = fts::build_globset(&options.glob);
 
-        let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
-        let bm25_index = fts::Bm25Index::build(&doc_texts);
+        // Use BM25F for field-aware scoring (filename, path, symbols boost)
+        let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let mut matches: Vec<SearchResult> = (0..index.len())
             .filter_map(|i| {
@@ -440,7 +467,7 @@ impl SearchEngine {
                     return None;
                 }
                 let vector = index.get_vector(i);
-                let bm25_score = bm25_index.score(query, i);
+                let bm25_score = bm25f_index.score(query, i);
                 Some(self.score_chunk(
                     chunk,
                     vector,
@@ -469,7 +496,7 @@ impl SearchEngine {
                     continue;
                 }
                 let vector = index.get_vector(i);
-                let bm25_score = bm25_index.score(&expanded_query, i);
+                let bm25_score = bm25f_index.score(&expanded_query, i);
                 let result = self.score_chunk(
                     chunk,
                     vector,
@@ -510,8 +537,8 @@ impl SearchEngine {
             limit
         };
 
-        let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
-        let bm25_index = fts::Bm25Index::build(&doc_texts);
+        // Use BM25F for field-aware scoring (filename, path, symbols boost)
+        let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let hnsw = build_hnsw_index(index.metadata.vector_dim, index.len())?;
         for i in 0..index.len() {
@@ -532,7 +559,7 @@ impl SearchEngine {
                 if idx >= index.len() {
                     return None;
                 }
-                let bm25_score = bm25_index.score(query, idx);
+                let bm25_score = bm25f_index.score(query, idx);
                 Some(self.score_chunk(
                     &index.chunks[idx],
                     index.get_vector(idx),
@@ -562,7 +589,7 @@ impl SearchEngine {
                 if idx >= index.len() {
                     continue;
                 }
-                let bm25_score = bm25_index.score(&expanded_query, idx);
+                let bm25_score = bm25f_index.score(&expanded_query, idx);
                 let result = self.score_chunk(
                     &index.chunks[idx],
                     index.get_vector(idx),
@@ -605,8 +632,8 @@ impl SearchEngine {
         let shortlist_size =
             (PRF_TOP_K.max(fetch_limit) * BINARY_SHORTLIST_FACTOR).min(index.len());
 
-        let doc_texts: Vec<&str> = index.chunks.iter().map(|c| c.text.as_str()).collect();
-        let bm25_index = fts::Bm25Index::build(&doc_texts);
+        // Use BM25F for field-aware scoring (filename, path, symbols boost)
+        let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let query_binary = quantize_to_binary(&query_vec);
 
@@ -626,7 +653,7 @@ impl SearchEngine {
         let mut matches: Vec<SearchResult> = candidates
             .iter()
             .map(|&idx| {
-                let bm25_score = bm25_index.score(query, idx);
+                let bm25_score = bm25f_index.score(query, idx);
                 self.score_chunk(
                     &index.chunks[idx],
                     index.get_vector(idx),
@@ -656,7 +683,7 @@ impl SearchEngine {
             };
 
             for idx in expanded_candidates {
-                let bm25_score = bm25_index.score(&expanded_query, idx);
+                let bm25_score = bm25f_index.score(&expanded_query, idx);
                 let result = self.score_chunk(
                     &index.chunks[idx],
                     index.get_vector(idx),

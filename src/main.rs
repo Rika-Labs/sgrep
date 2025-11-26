@@ -13,6 +13,7 @@ mod query_expander;
 mod reranker;
 mod search;
 mod store;
+mod threading;
 mod watch;
 
 fn main() -> Result<()> {
