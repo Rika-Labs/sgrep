@@ -42,14 +42,10 @@ fn auto_detect_providers() -> Vec<ExecutionProviderDispatch> {
 }
 
 fn configure_onnx_threading() {
-    let parallelism = std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(4);
-
-    let optimal_threads = (parallelism / 2).clamp(2, 8);
+    let config = crate::threading::ThreadConfig::get();
 
     if env::var_os("ORT_NUM_THREADS").is_none() {
-        env::set_var("ORT_NUM_THREADS", optimal_threads.to_string());
+        env::set_var("ORT_NUM_THREADS", config.onnx_threads.to_string());
     }
 
     if env::var_os("ORT_INTER_OP_NUM_THREADS").is_none() {

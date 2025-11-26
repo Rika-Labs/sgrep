@@ -13,6 +13,7 @@ use crate::cli::{resolve_repo_path, Cli, Commands};
 use crate::config::Config;
 use crate::embedding::{self, Embedder, PooledEmbedder};
 use crate::output::JsonResponse;
+use crate::threading::{CpuPreset, ThreadConfig};
 use crate::{indexer, search, store, watch};
 
 pub fn run() -> Result<()> {
@@ -22,6 +23,10 @@ pub fn run() -> Result<()> {
 }
 
 pub fn run_with_cli(cli: Cli) -> Result<()> {
+    let preset = cli.cpu_preset.as_ref().and_then(|s| CpuPreset::from_str(s));
+    ThreadConfig::init(cli.max_threads, preset);
+    ThreadConfig::get().apply();
+
     if let Commands::Config { init, show_model_dir, verify_model } = &cli.command {
         return handle_config(*init, *show_model_dir, *verify_model);
     }
@@ -762,6 +767,8 @@ mod tests {
         let cli = Cli {
             device: None,
             offline: false,
+            max_threads: None,
+            cpu_preset: None,
             command: Commands::Index {
                 path: Some(repo.clone()),
                 force: true,
@@ -781,6 +788,8 @@ mod tests {
         let cli = Cli {
             device: None,
             offline: false,
+            max_threads: None,
+            cpu_preset: None,
             command: Commands::Watch {
                 path: Some(repo.clone()),
                 debounce_ms: 50,
@@ -812,6 +821,8 @@ mod tests {
         let cli = Cli {
             device: None,
             offline: false,
+            max_threads: None,
+            cpu_preset: None,
             command: Commands::Search {
                 query: "hi".into(),
                 path: repo.clone(),
@@ -842,6 +853,8 @@ mod tests {
         let cli = Cli {
             device: None,
             offline: false,
+            max_threads: None,
+            cpu_preset: None,
             command: Commands::Config {
                 init: false,
                 show_model_dir: true,
@@ -857,6 +870,8 @@ mod tests {
         let cli = Cli {
             device: None,
             offline: false,
+            max_threads: None,
+            cpu_preset: None,
             command: Commands::Config {
                 init: false,
                 show_model_dir: false,

@@ -186,9 +186,31 @@ provider = "local"
 - `SGREP_BATCH_SIZE`: Inference batch size.
 - `SGREP_EMBEDDER_POOL_SIZE`: Model instance count.
 - `SGREP_INIT_TIMEOUT_SECS`: Model initialization timeout (default: 120).
+- `SGREP_MAX_THREADS`: Maximum threads for parallel operations.
+- `SGREP_CPU_PRESET`: CPU usage preset (`auto`, `low`, `medium`, `high`, `background`).
 - `HTTP_PROXY` / `HTTPS_PROXY`: Proxy for model downloads.
 - `RUST_LOG`: Tracing level (e.g., `sgrep=debug`).
-- `RAYON_NUM_THREADS`: Thread pool limit.
+- `RAYON_NUM_THREADS`: Thread pool limit (overrides `SGREP_MAX_THREADS`).
+
+### Thread Control
+
+sgrep provides fine-grained control over CPU usage to prevent system slowdown during indexing:
+
+```bash
+sgrep --threads 4 index              # Limit to 4 threads
+sgrep --cpu-preset low index         # Use 25% of CPU cores
+sgrep --cpu-preset background watch  # Low-impact background mode
+```
+
+**Available presets:**
+
+| Preset | CPU Usage | Use Case |
+| --- | --- | --- |
+| `auto` | 75% | Default, balanced performance |
+| `low` | 25% | Laptop-friendly, battery saving |
+| `medium` | 50% | Multi-tasking |
+| `high` | 100% | Maximum performance |
+| `background` | 25% | Watch/daemon mode |
 
 ## Development
 
