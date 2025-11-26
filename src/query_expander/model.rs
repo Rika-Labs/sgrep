@@ -1,10 +1,12 @@
 //! Qwen2.5 model implementation for query understanding and expansion.
 
+use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
+use ureq::{Agent, AgentBuilder, Proxy};
 use encoding_rs::UTF_8;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -303,6 +305,24 @@ fn get_model_cache_dir() -> PathBuf {
     base.join("sgrep").join("models")
 }
 
+fn create_http_agent() -> Agent {
+    let proxy_url = env::var("https_proxy")
+        .or_else(|_| env::var("HTTPS_PROXY"))
+        .or_else(|_| env::var("http_proxy"))
+        .or_else(|_| env::var("HTTP_PROXY"))
+        .ok();
+
+    let mut builder = AgentBuilder::new();
+
+    if let Some(url) = proxy_url {
+        if let Ok(proxy) = Proxy::new(&url) {
+            builder = builder.proxy(proxy);
+        }
+    }
+
+    builder.build()
+}
+
 /// Download the model if not already cached.
 fn download_model(show_progress: bool) -> Result<PathBuf> {
     let cache_dir = get_model_cache_dir();
@@ -318,9 +338,15 @@ fn download_model(show_progress: bool) -> Result<PathBuf> {
         eprintln!("Downloading {}...", MODEL_NAME);
     }
 
-    let response = ureq::get(MODEL_URL)
+    let agent = create_http_agent();
+    let response = agent.get(MODEL_URL)
         .call()
-        .map_err(|e| anyhow!("Failed to download model: {}", e))?;
+        .map_err(|e| anyhow!(
+            "Failed to download model: {}\n\n\
+            If HuggingFace is blocked, set HTTPS_PROXY environment variable.\n\
+            Example: export HTTPS_PROXY=http://proxy:port",
+            e
+        ))?;
 
     let mut bytes = Vec::new();
     response.into_reader().read_to_end(&mut bytes)?;

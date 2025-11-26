@@ -85,6 +85,12 @@ pub enum Commands {
         /// Create a default config file if none exists
         #[arg(long)]
         init: bool,
+        /// Show the model cache directory path
+        #[arg(long)]
+        show_model_dir: bool,
+        /// Verify model files are present
+        #[arg(long)]
+        verify_model: bool,
     },
 }
 
@@ -111,5 +117,44 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let resolved = resolve_repo_path(None).unwrap();
         assert_eq!(resolved, cwd);
+    }
+
+    #[test]
+    fn cli_parses_config_show_model_dir() {
+        let cli = Cli::parse_from(["sgrep", "config", "--show-model-dir"]);
+        match cli.command {
+            Commands::Config { show_model_dir, verify_model, init } => {
+                assert!(show_model_dir);
+                assert!(!verify_model);
+                assert!(!init);
+            }
+            _ => panic!("Expected Config command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_config_verify_model() {
+        let cli = Cli::parse_from(["sgrep", "config", "--verify-model"]);
+        match cli.command {
+            Commands::Config { show_model_dir, verify_model, init } => {
+                assert!(!show_model_dir);
+                assert!(verify_model);
+                assert!(!init);
+            }
+            _ => panic!("Expected Config command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_config_init() {
+        let cli = Cli::parse_from(["sgrep", "config", "--init"]);
+        match cli.command {
+            Commands::Config { show_model_dir, verify_model, init } => {
+                assert!(!show_model_dir);
+                assert!(!verify_model);
+                assert!(init);
+            }
+            _ => panic!("Expected Config command"),
+        }
     }
 }
