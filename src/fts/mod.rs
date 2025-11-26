@@ -125,8 +125,8 @@ pub struct Bm25Index {
     pub num_docs: usize,
 }
 
+#[allow(dead_code)]
 impl Bm25Index {
-    /// Build BM25 index from document texts
     pub fn build(documents: &[&str]) -> Self {
         use std::collections::HashMap;
 
@@ -404,8 +404,7 @@ impl Bm25FIndex {
     }
 }
 
-/// Build a BM25F index from chunks, extracting field information from each chunk.
-/// This is a convenience function that creates Bm25FDocuments from CodeChunks.
+#[allow(dead_code)]
 pub fn build_bm25f_index(
     chunks: &[&CodeChunk],
     symbols_by_chunk: Option<&[Vec<String>]>,

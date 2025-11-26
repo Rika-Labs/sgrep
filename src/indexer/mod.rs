@@ -4,16 +4,15 @@ mod hierarchy;
 
 pub use batch::{
     adjust_batch_size_for_progress, determine_batch_size, determine_embed_timeout,
-    determine_token_budget, embed_batch_with_timeout, estimate_tokens, is_operator_or_punctuation,
+    determine_token_budget, embed_batch_with_timeout, estimate_tokens,
 };
 pub use files::{
     build_default_excludes, canonical, collect_files, detect_language_for_graph,
     is_probably_binary, normalize_to_relative, MAX_FILE_BYTES,
 };
-pub use hierarchy::{
-    build_hierarchical_index, compute_directory_embeddings, compute_file_embeddings, l2_normalize,
-    mean_pool_vectors,
-};
+pub use hierarchy::build_hierarchical_index;
+#[cfg(test)]
+pub(crate) use hierarchy::compute_directory_embeddings;
 
 use std::collections::{HashMap, HashSet};
 use std::env;

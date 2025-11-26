@@ -12,17 +12,20 @@ pub enum EmbeddingProviderType {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
 pub struct EmbeddingConfig {
     #[serde(default)]
     pub provider: EmbeddingProviderType,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
 pub struct Config {
     #[serde(default)]
     pub embedding: EmbeddingConfig,
 }
 
+#[allow(dead_code)]
 impl Config {
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path();

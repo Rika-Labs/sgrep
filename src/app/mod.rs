@@ -201,6 +201,20 @@ fn handle_index(
     profile: bool,
 ) -> Result<()> {
     let path = resolve_repo_path(path)?;
+
+    // Pre-download the query expander model during indexing (with progress)
+    // This ensures it's cached for search (which runs silently)
+    if !crate::query_expander::is_model_cached() {
+        use crate::query_expander::QueryExpander;
+        if let Err(e) = QueryExpander::new() {
+            eprintln!(
+                "{} Query expander download failed: {} (search will use heuristics)",
+                style("⚠").yellow(),
+                e
+            );
+        }
+    }
+
     let indexer = indexer::Indexer::new(embedder.clone());
     let report = indexer
         .build_index(indexer::IndexRequest {
@@ -269,7 +283,9 @@ fn handle_search(
     let start = Instant::now();
     let mut engine = search::SearchEngine::new(embedder.clone());
 
-    if let Err(e) = engine.enable_query_expander() {
+    // Use silent mode for query expander during search (no llama.cpp logs)
+    // Only enable if model is already cached - don't download during search
+    if let Err(e) = engine.enable_query_expander_silent() {
         if !json {
             eprintln!(
                 "{} Query expander unavailable: {}",

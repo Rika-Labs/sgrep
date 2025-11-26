@@ -7,15 +7,15 @@ mod model;
 
 use anyhow::Result;
 
-pub use model::{QueryAnalysis, QueryExpander};
+pub use model::{is_model_cached, QueryAnalysis, QueryExpander};
 
-/// Trait for query expansion implementations.
+#[cfg(test)]
+pub use model::get_model_path;
+
+#[allow(dead_code)]
 pub trait Expander: Send + Sync {
-    /// Expand a single query into multiple related queries.
-    /// Returns the original query plus generated expansions.
     fn expand(&self, query: &str) -> Result<Vec<String>>;
 
-    /// Expand a query and return at most `max_expansions` results.
     fn expand_n(&self, query: &str, max_expansions: usize) -> Result<Vec<String>> {
         let mut results = self.expand(query)?;
         results.truncate(max_expansions);

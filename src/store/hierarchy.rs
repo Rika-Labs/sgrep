@@ -23,6 +23,7 @@ pub struct DirectoryEntry {
     pub vector_offset: usize,
 }
 
+#[allow(dead_code)]
 impl DirectoryEntry {
     pub fn file_count(&self) -> usize {
         self.file_indices.len()
@@ -34,6 +35,7 @@ impl DirectoryEntry {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HierarchicalStats {
     pub file_count: usize,
     pub directory_count: usize,
@@ -50,6 +52,7 @@ pub struct HierarchicalIndex {
     pub dir_vectors: Vec<Vec<f32>>,
 }
 
+#[allow(dead_code)]
 impl HierarchicalIndex {
     pub fn new() -> Self {
         Self::default()

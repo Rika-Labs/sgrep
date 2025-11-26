@@ -22,6 +22,7 @@ pub enum SymbolKind {
     Property,
 }
 
+#[allow(dead_code)]
 impl SymbolKind {
     pub fn label(&self) -> &'static str {
         match self {

@@ -3,7 +3,7 @@ mod index;
 mod mmap;
 mod utils;
 
-pub use hierarchy::{DirectoryEntry, FileEntry, HierarchicalIndex, HierarchicalStats};
+pub use hierarchy::HierarchicalIndex;
 pub use index::{IndexMetadata, PartialIndex, RepositoryIndex};
 pub use mmap::MmapIndex;
 
@@ -36,6 +36,7 @@ pub struct IndexStore {
     repo_hash: String,
 }
 
+#[allow(dead_code)]
 impl IndexStore {
     pub fn new(repo_path: &Path) -> Result<Self> {
         let absolute = fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());

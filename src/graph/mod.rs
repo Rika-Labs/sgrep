@@ -3,7 +3,7 @@ mod query;
 mod symbols;
 
 pub use extractor::SymbolExtractor;
-pub use query::{QueryType, SearchGranularity};
+pub use query::QueryType;
 pub use symbols::{Edge, EdgeKind, ImportRelation, Symbol, SymbolKind};
 
 use std::collections::{HashMap, HashSet};
@@ -23,6 +23,7 @@ pub struct CodeGraph {
     incoming: HashMap<Uuid, Vec<usize>>,
 }
 
+#[allow(dead_code)]
 impl CodeGraph {
     pub fn new() -> Self {
         Self::default()

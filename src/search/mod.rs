@@ -5,7 +5,7 @@ mod results;
 mod scoring;
 
 pub use results::{DirectorySearchResult, FileSearchResult, SearchResult};
-pub use scoring::{cosine_similarity, AdaptiveWeights};
+pub use scoring::cosine_similarity;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -91,6 +91,7 @@ pub struct SearchEngine {
     query_expander: Option<QueryExpander>,
 }
 
+#[allow(dead_code)]
 impl SearchEngine {
     pub fn new(embedder: Arc<dyn BatchEmbedder>) -> Self {
         Self {
@@ -116,6 +117,15 @@ impl SearchEngine {
     pub fn enable_query_expander(&mut self) -> Result<()> {
         if self.query_expander.is_none() {
             self.query_expander = Some(QueryExpander::new()?);
+        }
+        Ok(())
+    }
+
+    /// Enable the query expander in silent mode (no logs) if the model is already cached.
+    /// Returns an error if the model is not cached (won't download).
+    pub fn enable_query_expander_silent(&mut self) -> Result<()> {
+        if self.query_expander.is_none() {
+            self.query_expander = Some(QueryExpander::new_silent_if_cached()?);
         }
         Ok(())
     }

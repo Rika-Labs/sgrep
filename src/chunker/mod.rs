@@ -1,8 +1,7 @@
 mod language;
 mod treesitter;
 
-pub use language::{detect_language, LanguageKind};
-pub use treesitter::{is_container_node, is_context_provider, is_semantic_node, kind_to_label};
+pub use language::detect_language;
 
 use std::fs;
 use std::path::{Path, PathBuf};
