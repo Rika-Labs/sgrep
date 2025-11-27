@@ -94,7 +94,7 @@ fn build_embedder(
 
 fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result<()> {
     if show_model_dir {
-        let model_dir = embedding::get_fastembed_cache_dir().join("mxbai-embed-xsmall-v1");
+        let model_dir = embedding::get_fastembed_cache_dir().join(embedding::MODEL_NAME);
         println!("{}", model_dir.display());
         return Ok(());
     }
@@ -132,13 +132,13 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
     if config_path.exists() {
         println!(
             "  Provider: {}",
-            style("local (mxbai-embed-xsmall-v1)").bold()
+            style(format!("local ({})", embedding::MODEL_NAME)).bold()
         );
     } else {
         println!("  No config file found (using defaults)");
         println!(
             "  Provider: {}",
-            style("local (mxbai-embed-xsmall-v1)").bold()
+            style(format!("local ({})", embedding::MODEL_NAME)).bold()
         );
         println!();
         println!(
@@ -151,15 +151,7 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
 }
 
 fn verify_model_files() -> Result<()> {
-    let model_dir = embedding::get_fastembed_cache_dir().join("mxbai-embed-xsmall-v1");
-
-    let required = [
-        "model_quantized.onnx",
-        "tokenizer.json",
-        "config.json",
-        "special_tokens_map.json",
-        "tokenizer_config.json",
-    ];
+    let model_dir = embedding::get_fastembed_cache_dir().join(embedding::MODEL_NAME);
 
     println!(
         "{} Model directory: {}\n",
@@ -168,7 +160,7 @@ fn verify_model_files() -> Result<()> {
     );
 
     let mut all_ok = true;
-    for file in &required {
+    for file in embedding::MODEL_FILES {
         let exists = model_dir.join(file).exists();
         let status = if exists {
             style("OK").green()
@@ -185,9 +177,7 @@ fn verify_model_files() -> Result<()> {
         Ok(())
     } else {
         println!("{} Some model files are missing.\n", style("✖").red());
-        println!(
-            "Download from: https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/tree/main"
-        );
+        println!("Download from: {}", embedding::MODEL_DOWNLOAD_URL);
         println!("Place files in: {}", model_dir.display());
         Err(anyhow!("Model files incomplete"))
     }
@@ -929,16 +919,10 @@ mod tests {
     fn verify_model_files_returns_ok_when_present() {
         let temp_cache =
             std::env::temp_dir().join(format!("sgrep_verify_ok_test_{}", Uuid::new_v4()));
-        let model_dir = temp_cache.join("mxbai-embed-xsmall-v1");
+        let model_dir = temp_cache.join(embedding::MODEL_NAME);
         std::fs::create_dir_all(&model_dir).unwrap();
 
-        for file in &[
-            "model_quantized.onnx",
-            "tokenizer.json",
-            "config.json",
-            "special_tokens_map.json",
-            "tokenizer_config.json",
-        ] {
+        for file in embedding::MODEL_FILES {
             std::fs::write(model_dir.join(file), b"mock").unwrap();
         }
 

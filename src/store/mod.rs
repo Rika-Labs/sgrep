@@ -28,7 +28,7 @@ const DIR_VECTORS_FILE: &str = "dir_vectors.bin";
 const VECTORS_FILE: &str = "vectors.bin";
 const BINARY_VECTORS_FILE: &str = "binary_vectors.bin";
 const GRAPH_FILE: &str = "graph.bin.zst";
-const INDEX_FORMAT_VERSION: u32 = 5;
+const INDEX_FORMAT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone)]
 pub struct IndexStore {
