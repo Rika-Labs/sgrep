@@ -28,10 +28,11 @@ use super::BatchEmbedder;
 use super::DEFAULT_VECTOR_DIM;
 
 #[cfg(not(test))]
-const MXBAI_MODEL_NAME: &str = "mxbai-embed-xsmall-v1";
+const JINA_CODE_BASE_URL: &str =
+    "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/main";
+
 #[cfg(not(test))]
-const MXBAI_BASE_URL: &str =
-    "https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/resolve/main";
+const NATIVE_VECTOR_DIM: usize = 768;
 
 #[cfg(not(test))]
 const DEFAULT_MAX_CACHE: u64 = 100_000;
@@ -90,7 +91,7 @@ impl Embedder {
             env::var("SGREP_INIT_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(120),
+                .unwrap_or(super::DEFAULT_INIT_TIMEOUT_SECS),
         );
 
         let model =
@@ -112,10 +113,11 @@ impl Embedder {
         }
         let mut model = self.model.lock().unwrap();
         let embeddings = model.embed(vec![text], None)?;
-        let vector = embeddings
+        let mut vector = embeddings
             .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("No embedding generated"))?;
+        vector.truncate(DEFAULT_VECTOR_DIM);
         self.cache
             .insert(text.to_string(), Arc::new(vector.clone()));
         Ok(vector)
@@ -140,9 +142,11 @@ impl Embedder {
             let embeddings = model.embed(uncached.clone(), None)?;
 
             for (embedding, &idx) in embeddings.iter().zip(&uncached_indices) {
-                results[idx] = embedding.clone();
+                let mut truncated = embedding.clone();
+                truncated.truncate(DEFAULT_VECTOR_DIM);
+                results[idx] = truncated.clone();
                 self.cache
-                    .insert(texts[idx].clone(), Arc::new(embedding.clone()));
+                    .insert(texts[idx].clone(), Arc::new(truncated));
             }
         }
 
@@ -207,7 +211,7 @@ impl PooledEmbedder {
             env::var("SGREP_INIT_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(120),
+                .unwrap_or(super::DEFAULT_INIT_TIMEOUT_SECS),
         );
 
         let mut pool = Vec::with_capacity(pool_size);
@@ -303,8 +307,8 @@ impl Default for PooledEmbedder {
 }
 
 #[cfg(not(test))]
-fn get_mxbai_cache_dir() -> PathBuf {
-    get_fastembed_cache_dir().join(MXBAI_MODEL_NAME)
+fn get_jina_code_cache_dir() -> PathBuf {
+    get_fastembed_cache_dir().join(super::MODEL_NAME)
 }
 
 #[cfg(not(test))]
@@ -330,17 +334,17 @@ fn download_file(url: &str, path: &std::path::Path, show_progress: bool) -> Resu
     let response = agent.get(url)
         .call()
         .map_err(|e| {
-            let cache_dir = get_mxbai_cache_dir();
+            let cache_dir = get_jina_code_cache_dir();
+            let files_list = super::MODEL_FILES.join(", ");
             anyhow!(
                 "Failed to download {}: {}\n\n\
                 If HuggingFace is blocked in your region:\n\
                 1. Use proxy: export HTTPS_PROXY=http://proxy:port\n\
                 2. Manual download: Place files in {}\n\
-                   Required: model_quantized.onnx, tokenizer.json, config.json,\n\
-                             special_tokens_map.json, tokenizer_config.json\n\n\
+                   Required: {}\n\n\
                 Run 'sgrep config --show-model-dir' to see the exact path.\n\
-                Download from: https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/tree/main",
-                url, e, cache_dir.display()
+                Download from: {}",
+                url, e, cache_dir.display(), files_list, super::MODEL_DOWNLOAD_URL
             )
         })?;
 
@@ -354,37 +358,37 @@ fn download_file(url: &str, path: &std::path::Path, show_progress: bool) -> Resu
 }
 
 #[cfg(not(test))]
-fn load_mxbai_model(show_download_progress: bool) -> Result<UserDefinedEmbeddingModel> {
-    let cache_dir = get_mxbai_cache_dir();
+fn load_jina_code_model(show_download_progress: bool) -> Result<UserDefinedEmbeddingModel> {
+    let cache_dir = get_jina_code_cache_dir();
 
-    let onnx_path = cache_dir.join("model_quantized.onnx");
+    let onnx_path = cache_dir.join("model.onnx");
     let tokenizer_path = cache_dir.join("tokenizer.json");
     let config_path = cache_dir.join("config.json");
     let special_tokens_path = cache_dir.join("special_tokens_map.json");
     let tokenizer_config_path = cache_dir.join("tokenizer_config.json");
 
     download_file(
-        &format!("{}/onnx/model_quantized.onnx", MXBAI_BASE_URL),
+        &format!("{}/onnx/model.onnx", JINA_CODE_BASE_URL),
         &onnx_path,
         show_download_progress,
     )?;
     download_file(
-        &format!("{}/tokenizer.json", MXBAI_BASE_URL),
+        &format!("{}/tokenizer.json", JINA_CODE_BASE_URL),
         &tokenizer_path,
         show_download_progress,
     )?;
     download_file(
-        &format!("{}/config.json", MXBAI_BASE_URL),
+        &format!("{}/config.json", JINA_CODE_BASE_URL),
         &config_path,
         show_download_progress,
     )?;
     download_file(
-        &format!("{}/special_tokens_map.json", MXBAI_BASE_URL),
+        &format!("{}/special_tokens_map.json", JINA_CODE_BASE_URL),
         &special_tokens_path,
         show_download_progress,
     )?;
     download_file(
-        &format!("{}/tokenizer_config.json", MXBAI_BASE_URL),
+        &format!("{}/tokenizer_config.json", JINA_CODE_BASE_URL),
         &tokenizer_config_path,
         show_download_progress,
     )?;
@@ -424,7 +428,7 @@ fn init_model_with_timeout(
 
     thread::spawn(move || {
         let result = (|| {
-            let model_data = load_mxbai_model(show_download_progress)?;
+            let model_data = load_jina_code_model(show_download_progress)?;
             let _ = show_download_progress;
             TextEmbedding::try_new_from_user_defined(
                 model_data,
@@ -453,6 +457,18 @@ fn init_model_with_timeout(
             Err(anyhow!("Model initialization thread crashed unexpectedly"))
         }
     }
+}
+
+#[cfg(not(test))]
+#[allow(dead_code)]
+fn truncate_to_matryoshka(embeddings: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+    embeddings
+        .into_iter()
+        .map(|mut v| {
+            v.truncate(DEFAULT_VECTOR_DIM);
+            v
+        })
+        .collect()
 }
 
 #[cfg(test)]
