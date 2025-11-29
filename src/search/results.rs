@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::Serialize;
+use std::path::PathBuf;
 
 use crate::chunker::CodeChunk;
 
@@ -9,7 +9,6 @@ pub struct SearchResult {
     pub score: f32,
     pub semantic_score: f32,
     pub bm25_score: f32,
-    pub keyword_score: f32,
     pub show_full_context: bool,
 }
 
@@ -77,7 +76,6 @@ mod tests {
             score: 0.5,
             semantic_score: 0.5,
             bm25_score: 0.0,
-            keyword_score: 0.0,
             show_full_context: false,
         };
         assert_eq!(result.render_snippet().lines().count(), 12);
@@ -98,7 +96,6 @@ mod tests {
             score: 0.5,
             semantic_score: 0.5,
             bm25_score: 0.0,
-            keyword_score: 0.0,
             show_full_context: true,
         };
         assert_eq!(result.render_snippet().lines().count(), 14);

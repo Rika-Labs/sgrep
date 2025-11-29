@@ -30,33 +30,6 @@ pub fn extract_keywords(query: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn keyword_score(keywords: &[String], text: &str, path: &Path) -> f32 {
-    if keywords.is_empty() {
-        return 0.0;
-    }
-
-    let haystack = text.to_lowercase();
-    let path_str = path.to_string_lossy().to_lowercase();
-    let filename = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let mut score = 0.0;
-    for kw in keywords {
-        let kw_lower = kw.as_str();
-        if filename.contains(kw_lower) {
-            score += 3.0;
-        } else if path_str.contains(kw_lower) {
-            score += 2.0;
-        } else if haystack.contains(kw_lower) {
-            score += 1.0;
-        }
-    }
-    score / keywords.len() as f32
-}
-
 pub fn matches_filters(filters: &[String], chunk: &CodeChunk) -> bool {
     filters.iter().all(|filter| match filter.split_once('=') {
         Some((key, value)) => match key {
@@ -113,6 +86,30 @@ pub fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+pub fn stem_word(word: &str) -> String {
+    let word = word.to_lowercase();
+
+    let suffixes = [
+        "ization", "isation", "ation", "sion", "ion",
+        "ment", "ness", "able", "ible",
+        "ing", "ings",
+        "ier", "ors", "ers", "or", "er",
+        "ed", "es", "s",
+    ];
+
+    for suffix in suffixes {
+        if word.len() > suffix.len() + 2 && word.ends_with(suffix) {
+            return word[..word.len() - suffix.len()].to_string();
+        }
+    }
+    word
+}
+
+/// Tokenize text with stemming applied
+pub fn tokenize_stemmed(text: &str) -> Vec<String> {
+    tokenize(text).into_iter().map(|t| stem_word(&t)).collect()
+}
+
 /// BM25 index for a collection of documents
 #[derive(Default, Clone)]
 pub struct Bm25Index {
@@ -128,8 +125,8 @@ pub struct Bm25Index {
     pub num_docs: usize,
 }
 
+#[allow(dead_code)]
 impl Bm25Index {
-    /// Build BM25 index from document texts
     pub fn build(documents: &[&str]) -> Self {
         use std::collections::HashMap;
 
@@ -310,8 +307,9 @@ impl Bm25FIndex {
             let mut seen: HashSet<String> = HashSet::new();
 
             // Helper to add tokens with a boost factor
+            // Use stemmed tokens so "extraction" and "extractor" map to same root
             let mut add_tokens = |text: &str, boost: usize| {
-                for token in tokenize(text) {
+                for token in tokenize_stemmed(text) {
                     *tf.entry(token.clone()).or_insert(0) += boost;
                     if seen.insert(token.clone()) {
                         *doc_freq.entry(token).or_insert(0) += 1;
@@ -364,7 +362,8 @@ impl Bm25FIndex {
             return 0.0;
         }
 
-        let query_tokens = tokenize(query);
+        // Stem query tokens to match stemmed index
+        let query_tokens = tokenize_stemmed(query);
         let doc_len = self.doc_lengths[doc_idx] as f32;
         let tf_map = &self.term_freqs[doc_idx];
 
@@ -405,9 +404,11 @@ impl Bm25FIndex {
     }
 }
 
-/// Build a BM25F index from chunks, extracting field information from each chunk.
-/// This is a convenience function that creates Bm25FDocuments from CodeChunks.
-pub fn build_bm25f_index(chunks: &[&CodeChunk], symbols_by_chunk: Option<&[Vec<String>]>) -> Bm25FIndex {
+#[allow(dead_code)]
+pub fn build_bm25f_index(
+    chunks: &[&CodeChunk],
+    symbols_by_chunk: Option<&[Vec<String>]>,
+) -> Bm25FIndex {
     let documents: Vec<Bm25FDocument> = chunks
         .iter()
         .enumerate()
@@ -535,11 +536,10 @@ mod tests {
     }
 
     #[test]
-    fn extracts_keywords_and_scores() {
+    fn extracts_keywords() {
         let keywords = extract_keywords("where is the auth logic?");
         assert!(keywords.contains(&"auth".into()));
-        let score = keyword_score(&keywords, "auth logic lives here", Path::new("test.rs"));
-        assert!(score > 0.0);
+        assert!(keywords.contains(&"logic".into()));
     }
 
     #[test]
@@ -558,12 +558,6 @@ mod tests {
     }
 
     #[test]
-    fn keyword_score_zero_with_no_keywords() {
-        let score = keyword_score(&[], "anything", Path::new("file.rs"));
-        assert_eq!(score, 0.0);
-    }
-
-    #[test]
     fn matches_filters_handles_invalid_format() {
         let chunk = sample_chunk("rust", "src/lib.rs");
         assert!(matches_filters(&["nonsense".into()], &chunk));
@@ -574,13 +568,6 @@ mod tests {
     fn matches_filters_allows_unknown_keys() {
         let chunk = sample_chunk("rust", "src/lib.rs");
         assert!(matches_filters(&["owner=alice".into()], &chunk));
-    }
-
-    #[test]
-    fn keyword_score_prefers_path_matches() {
-        let keywords = vec!["auth".into()];
-        let score = keyword_score(&keywords, "irrelevant body", Path::new("src/auth/mod.rs"));
-        assert!(score >= 2.0);
     }
 
     #[test]
@@ -703,17 +690,17 @@ mod tests {
         // Test that term frequency saturation still works in BM25F
         // A document with 100 occurrences shouldn't be 100x better than 1 occurrence
         let doc_few = Bm25FDocument::new("auth auth auth", Path::new("src/a.rs"));
-        let doc_many = Bm25FDocument::new(
-            &"auth ".repeat(100),
-            Path::new("src/b.rs"),
-        );
+        let doc_many = Bm25FDocument::new(&"auth ".repeat(100), Path::new("src/b.rs"));
         let index = Bm25FIndex::build(&[doc_few, doc_many]);
 
         let score_few = index.score("auth", 0);
         let score_many = index.score("auth", 1);
 
         // Score should increase but not proportionally to term count
-        assert!(score_many > score_few, "More occurrences should score higher");
+        assert!(
+            score_many > score_few,
+            "More occurrences should score higher"
+        );
         assert!(
             score_many < score_few * 10.0,
             "Saturation should prevent linear scaling: {} vs {}",
@@ -778,10 +765,7 @@ mod tests {
         };
 
         let chunks: Vec<&CodeChunk> = vec![&chunk1, &chunk2];
-        let symbols = vec![
-            vec!["authenticate".to_string()],
-            vec!["main".to_string()],
-        ];
+        let symbols = vec![vec!["authenticate".to_string()], vec!["main".to_string()]];
 
         let index = build_bm25f_index(&chunks, Some(&symbols));
 
@@ -796,5 +780,64 @@ mod tests {
             score1,
             score2
         );
+    }
+
+    // === Stemming Tests ===
+
+    #[test]
+    fn test_stem_word_removes_common_suffixes() {
+        assert_eq!(stem_word("extraction"), "extract");
+        assert_eq!(stem_word("extractor"), "extract");
+        assert_eq!(stem_word("extracting"), "extract");
+        assert_eq!(stem_word("ranking"), "rank");
+        assert_eq!(stem_word("implementation"), "implement");
+    }
+
+    #[test]
+    fn test_stem_word_preserves_short_words() {
+        assert_eq!(stem_word("go"), "go");
+        assert_eq!(stem_word("do"), "do");
+        assert_eq!(stem_word("the"), "the");
+    }
+
+    #[test]
+    fn test_stem_word_handles_no_suffix() {
+        assert_eq!(stem_word("code"), "code");
+        assert_eq!(stem_word("graph"), "graph");
+        assert_eq!(stem_word("search"), "search");
+    }
+
+    #[test]
+    fn test_tokenize_stemmed_applies_stemming() {
+        let tokens = tokenize_stemmed("extraction extractor extracting");
+        assert!(tokens.iter().all(|t| t == "extract"));
+        assert_eq!(tokens.len(), 3);
+    }
+
+    #[test]
+    fn test_bm25_score_invalid_doc_idx() {
+        let docs = vec!["fn foo() {}"];
+        let doc_refs: Vec<&str> = docs.iter().map(|s| &**s).collect();
+        let index = Bm25Index::build(&doc_refs);
+        assert_eq!(index.score("foo", 999), 0.0);
+    }
+
+    #[test]
+    fn test_bm25f_score_invalid_doc_idx() {
+        let docs = vec![Bm25FDocument::new("fn foo() {}", Path::new("src/foo.rs"))];
+        let index = Bm25FIndex::build(&docs);
+        assert_eq!(index.score("foo", 999), 0.0);
+    }
+
+    #[test]
+    fn test_bm25f_stemming_matches_variants() {
+        let docs = vec![
+            Bm25FDocument::new("fn extractor() {}", Path::new("src/extractor.rs")),
+            Bm25FDocument::new("fn other() {}", Path::new("src/other.rs")),
+        ];
+        let index = Bm25FIndex::build(&docs);
+        let score_extraction = index.score("extraction", 0);
+        let score_other = index.score("extraction", 1);
+        assert!(score_extraction > score_other);
     }
 }

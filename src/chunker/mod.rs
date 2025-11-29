@@ -1,8 +1,7 @@
 mod language;
 mod treesitter;
 
-pub use language::{detect_language, LanguageKind};
-pub use treesitter::{is_container_node, is_context_provider, is_semantic_node, kind_to_label};
+pub use language::detect_language;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -119,7 +118,9 @@ pub(crate) fn build_chunk(
     language: String,
     modified_at: DateTime<Utc>,
 ) -> CodeChunk {
-    let mut text = snippet.trim().to_string();
+    let path_prefix = format!("// File: {}\n", path.display());
+    let mut text = format!("{}{}", path_prefix, snippet.trim());
+
     if text.len() > MAX_SNIPPET_CHARS {
         // Find a valid UTF-8 char boundary at or before MAX_SNIPPET_CHARS
         let mut new_len = MAX_SNIPPET_CHARS;
@@ -205,7 +206,8 @@ mod tests {
             "plain".to_string(),
             Utc::now(),
         );
-        assert_eq!(chunk.text, content);
+        assert!(chunk.text.contains(content));
+        assert!(chunk.text.starts_with("// File: test.txt\n"));
     }
 
     #[test]
@@ -276,7 +278,7 @@ mod tests {
     fn chunk_fallback_handles_empty_source() {
         let chunks = chunk_fallback("", Path::new("empty.txt"), "plain", Utc::now());
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].text, "");
+        assert!(chunks[0].text.starts_with("// File: empty.txt\n"));
         assert_eq!(chunks[0].start_line, 1);
     }
 

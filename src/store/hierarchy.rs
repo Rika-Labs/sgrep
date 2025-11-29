@@ -23,6 +23,7 @@ pub struct DirectoryEntry {
     pub vector_offset: usize,
 }
 
+#[allow(dead_code)]
 impl DirectoryEntry {
     pub fn file_count(&self) -> usize {
         self.file_indices.len()
@@ -34,6 +35,7 @@ impl DirectoryEntry {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HierarchicalStats {
     pub file_count: usize,
     pub directory_count: usize,
@@ -50,6 +52,7 @@ pub struct HierarchicalIndex {
     pub dir_vectors: Vec<Vec<f32>>,
 }
 
+#[allow(dead_code)]
 impl HierarchicalIndex {
     pub fn new() -> Self {
         Self::default()
@@ -57,13 +60,28 @@ impl HierarchicalIndex {
 
     pub fn add_file(&mut self, path: PathBuf, chunk_indices: Vec<usize>, vector: Vec<f32>) {
         let vector_offset = self.file_vectors.len();
-        self.files.push(FileEntry { path, chunk_indices, vector_offset });
+        self.files.push(FileEntry {
+            path,
+            chunk_indices,
+            vector_offset,
+        });
         self.file_vectors.push(vector);
     }
 
-    pub fn add_directory(&mut self, path: PathBuf, file_indices: Vec<usize>, child_dir_indices: Vec<usize>, vector: Vec<f32>) {
+    pub fn add_directory(
+        &mut self,
+        path: PathBuf,
+        file_indices: Vec<usize>,
+        child_dir_indices: Vec<usize>,
+        vector: Vec<f32>,
+    ) {
         let vector_offset = self.dir_vectors.len();
-        self.directories.push(DirectoryEntry { path, file_indices, child_dir_indices, vector_offset });
+        self.directories.push(DirectoryEntry {
+            path,
+            file_indices,
+            child_dir_indices,
+            vector_offset,
+        });
         self.dir_vectors.push(vector);
     }
 
@@ -80,7 +98,10 @@ impl HierarchicalIndex {
     }
 
     pub fn find_dir_by_path(&self, path: &Path) -> Option<(usize, &DirectoryEntry)> {
-        self.directories.iter().enumerate().find(|(_, d)| d.path == path)
+        self.directories
+            .iter()
+            .enumerate()
+            .find(|(_, d)| d.path == path)
     }
 
     pub fn stats(&self) -> HierarchicalStats {
@@ -215,7 +236,12 @@ mod tests {
         let mut hier = HierarchicalIndex::new();
         hier.add_file(PathBuf::from("a.rs"), vec![0, 1, 2], vec![1.0, 0.0, 0.0]);
         hier.add_file(PathBuf::from("b.rs"), vec![3, 4], vec![0.0, 1.0, 0.0]);
-        hier.add_directory(PathBuf::from("src"), vec![0, 1], vec![], vec![0.5, 0.5, 0.0]);
+        hier.add_directory(
+            PathBuf::from("src"),
+            vec![0, 1],
+            vec![],
+            vec![0.5, 0.5, 0.0],
+        );
 
         let stats = hier.stats();
         assert_eq!(stats.file_count, 2);

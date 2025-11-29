@@ -22,6 +22,7 @@ pub enum SymbolKind {
     Property,
 }
 
+#[allow(dead_code)]
 impl SymbolKind {
     pub fn label(&self) -> &'static str {
         match self {
@@ -108,7 +109,32 @@ mod tests {
     #[test]
     fn test_symbol_kind_labels() {
         assert_eq!(SymbolKind::Function.label(), "function");
+        assert_eq!(SymbolKind::Method.label(), "method");
         assert_eq!(SymbolKind::Class.label(), "class");
+        assert_eq!(SymbolKind::Struct.label(), "struct");
+        assert_eq!(SymbolKind::Interface.label(), "interface");
         assert_eq!(SymbolKind::Trait.label(), "trait");
+        assert_eq!(SymbolKind::Enum.label(), "enum");
+        assert_eq!(SymbolKind::Type.label(), "type");
+        assert_eq!(SymbolKind::Constant.label(), "constant");
+        assert_eq!(SymbolKind::Variable.label(), "variable");
+        assert_eq!(SymbolKind::Module.label(), "module");
+        assert_eq!(SymbolKind::Namespace.label(), "namespace");
+        assert_eq!(SymbolKind::Package.label(), "package");
+        assert_eq!(SymbolKind::Field.label(), "field");
+        assert_eq!(SymbolKind::Property.label(), "property");
+    }
+
+    #[test]
+    fn test_is_container_kind() {
+        assert!(is_container_kind(SymbolKind::Class));
+        assert!(is_container_kind(SymbolKind::Struct));
+        assert!(is_container_kind(SymbolKind::Interface));
+        assert!(is_container_kind(SymbolKind::Trait));
+        assert!(is_container_kind(SymbolKind::Module));
+        assert!(is_container_kind(SymbolKind::Namespace));
+        assert!(!is_container_kind(SymbolKind::Function));
+        assert!(!is_container_kind(SymbolKind::Method));
+        assert!(!is_container_kind(SymbolKind::Enum));
     }
 }

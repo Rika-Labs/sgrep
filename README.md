@@ -56,6 +56,7 @@ The plugin manages the `sgrep watch` process lifecycle and exposes search capabi
 
 ### OpenCode Plugin
 
+
 Native OpenCode plugin for semantic code search. Add to OpenCode configuration:
 
 ```json
@@ -66,20 +67,16 @@ Native OpenCode plugin for semantic code search. Add to OpenCode configuration:
 
 See [plugins/opencode/README.md](plugins/opencode/README.md) for setup and usage.
 
-### Factory Droids Integration
 
-Native support is provided for Factory Droids:
+### Factory Skills Integration
 
-1. **Enable Custom Droids**: via `/settings` in Factory.
-2. **Deploy Droid**:
+Native support is provided for Factory Skills:
 
-   ```bash
-   # Project-scope
-   cp -r .factory/droids/ your-project/.factory/droids/
+```bash
+curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-skill.sh | sh
+```
 
-   # User-scope
-   cp .factory/droids/sgrep.md ~/.factory/droids/
-   ```
+This installs the sgrep skill to `~/.factory/skills/sgrep/`. Restart Factory to use the skill.
 
 ### Generic Agent Integration
 

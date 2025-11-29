@@ -42,15 +42,9 @@ fn auto_detect_providers() -> Vec<ExecutionProviderDispatch> {
 }
 
 fn configure_onnx_threading() {
-    let config = crate::threading::ThreadConfig::get();
-
-    if env::var_os("ORT_NUM_THREADS").is_none() {
-        env::set_var("ORT_NUM_THREADS", config.onnx_threads.to_string());
-    }
-
-    if env::var_os("ORT_INTER_OP_NUM_THREADS").is_none() {
-        env::set_var("ORT_INTER_OP_NUM_THREADS", "1");
-    }
+    // Re-apply the global thread limits here to ensure ONNX honors the CPU budget
+    // even if the embedder is initialized separately.
+    crate::threading::ThreadConfig::get().apply();
 }
 
 #[allow(dead_code)]

@@ -21,7 +21,6 @@ pub struct JsonMatch {
     pub language: String,
     pub score: f32,
     pub semantic_score: f32,
-    pub keyword_score: f32,
     pub snippet: String,
 }
 
@@ -52,7 +51,6 @@ impl JsonResponse {
                 language: r.chunk.language.clone(),
                 score: r.score,
                 semantic_score: r.semantic_score,
-                keyword_score: r.keyword_score,
                 snippet: r.render_snippet(),
             })
             .collect();
@@ -125,7 +123,6 @@ mod tests {
             score: 0.5,
             semantic_score: 0.4,
             bm25_score: 0.0,
-            keyword_score: 0.1,
             show_full_context: false,
         };
         let json =

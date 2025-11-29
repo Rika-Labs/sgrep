@@ -438,9 +438,8 @@ fn init_model_with_timeout(
     match rx.recv_timeout(timeout) {
         Ok(Ok(model)) => Ok(model),
         Ok(Err(e)) => Err(anyhow!("Model initialization failed: {}", e)),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            Err(anyhow!(
-                "Model initialization timed out after {:?}.\n\n\
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
+            "Model initialization timed out after {:?}.\n\n\
                 Possible causes:\n\
                 - First-time model download is slow or blocked\n\
                 - HuggingFace may be unreachable in your region\n\n\
@@ -448,9 +447,8 @@ fn init_model_with_timeout(
                 - Increase timeout: SGREP_INIT_TIMEOUT_SECS=600\n\
                 - Use proxy: HTTPS_PROXY=http://your-proxy:port\n\
                 - Manual download: sgrep config --show-model-dir",
-                timeout
-            ))
-        }
+            timeout
+        )),
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             Err(anyhow!("Model initialization thread crashed unexpectedly"))
         }
