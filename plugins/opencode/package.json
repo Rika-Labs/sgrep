@@ -1,0 +1,16 @@
+{
+  "name": "sgrep-opencode",
+  "module": "index.ts",
+  "version": "1.0.0",
+  "type": "module",
+  "private": false,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.0.114"
+  }
+}
