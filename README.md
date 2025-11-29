@@ -4,7 +4,7 @@
 
   <p><em>High-performance local-first semantic code search engine.</em></p>
 
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a><br>
+<a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a><br>
 
 </div>
 
@@ -54,12 +54,25 @@ sgrep integrates with Claude Code via the official plugin interface:
 
 The plugin manages the `sgrep watch` process lifecycle and exposes search capabilities to the agent environment. See [plugins/sgrep/README.md](plugins/sgrep/README.md) for technical specifications.
 
+### OpenCode Plugin
+
+Native OpenCode plugin for semantic code search. Add to OpenCode configuration:
+
+```json
+{
+  "plugins": ["sgrep-opencode"]
+}
+```
+
+See [plugins/opencode/README.md](plugins/opencode/README.md) for setup and usage.
+
 ### Factory Droids Integration
 
 Native support is provided for Factory Droids:
 
 1. **Enable Custom Droids**: via `/settings` in Factory.
 2. **Deploy Droid**:
+
    ```bash
    # Project-scope
    cp -r .factory/droids/ your-project/.factory/droids/
@@ -88,14 +101,14 @@ sgrep search "database connection pooling strategy"
 
 **Options:**
 
-| Flag | Description | Default |
-| --- | --- | --- |
-| `-n, --limit <n>` | Maximum number of results to return. | `10` |
-| `-c, --context` | Return full chunk content. | `false` |
-| `-p, --path <dir>` | Target repository root. | `.` |
-| `--glob <pattern>` | Glob pattern for file inclusion. | — |
-| `--filters key=value` | Metadata filters (language, path). | — |
-| `--json` | Output results in JSON format. | `false` |
+| Flag                  | Description                          | Default |
+| --------------------- | ------------------------------------ | ------- |
+| `-n, --limit <n>`     | Maximum number of results to return. | `10`    |
+| `-c, --context`       | Return full chunk content.           | `false` |
+| `-p, --path <dir>`    | Target repository root.              | `.`     |
+| `--glob <pattern>`    | Glob pattern for file inclusion.     | —       |
+| `--filters key=value` | Metadata filters (language, path).   | —       |
+| `--json`              | Output results in JSON format.       | `false` |
 
 **JSON Schema Specification:**
 
@@ -110,7 +123,7 @@ sgrep search "database connection pooling strategy"
     "vector_dim": 384,
     "indexed_at": "2025-11-23T05:00:00Z",
     "total_files": 123,
-    "total_chunks": 456
+    "total_chunks": 456,
   },
   "results": [
     {
@@ -121,9 +134,9 @@ sgrep search "database connection pooling strategy"
       "score": 0.92,
       "semantic_score": 0.88,
       "keyword_score": 0.55,
-      "snippet": "fn retry(...) { … }"
-    }
-  ]
+      "snippet": "fn retry(...) { … }",
+    },
+  ],
 }
 ```
 
@@ -204,13 +217,13 @@ sgrep --cpu-preset background watch  # Low-impact background mode
 
 **Available presets:**
 
-| Preset | CPU Usage | Use Case |
-| --- | --- | --- |
-| `auto` | 75% | Default, balanced performance |
-| `low` | 25% | Laptop-friendly, battery saving |
-| `medium` | 50% | Multi-tasking |
-| `high` | 100% | Maximum performance |
-| `background` | 25% | Watch/daemon mode |
+| Preset       | CPU Usage | Use Case                        |
+| ------------ | --------- | ------------------------------- |
+| `auto`       | 75%       | Default, balanced performance   |
+| `low`        | 25%       | Laptop-friendly, battery saving |
+| `medium`     | 50%       | Multi-tasking                   |
+| `high`       | 100%      | Maximum performance             |
+| `background` | 25%       | Watch/daemon mode               |
 
 ## Development
 
@@ -242,6 +255,7 @@ sgrep search "your query"
 ### Manual Model Download
 
 1. **Find model directory:**
+
    ```bash
    sgrep config --show-model-dir
    ```
@@ -276,7 +290,7 @@ sgrep config --verify-model
 
 ## Attribution
 
-Architectural concepts derived from research into semantic code retrieval and local-first search engines like osgrep, mgrep, and ripgrep. 
+Architectural concepts derived from research into semantic code retrieval and local-first search engines like osgrep, mgrep, and ripgrep.
 
 ## License
 

@@ -1,0 +1,69 @@
+name: Publish OpenCode Plugin
+
+on:
+  push:
+    paths:
+      - 'plugins/opencode/package.json'
+    branches:
+      - main
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should-publish: ${{ steps.version-check.outputs.should-publish }}
+      version: ${{ steps.version-check.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check version change
+        id: version-check
+        run: |
+          # Get current version from package.json
+          CURRENT_VERSION=$(jq -r '.version // "0.0.0"' plugins/opencode/package.json)
+          
+          # Exit if no version field exists
+          if [ "$CURRENT_VERSION" = "0.0.0" ]; then
+            echo "No version field found in package.json"
+            echo "should-publish=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Get previous version from git
+          PREVIOUS_VERSION=$(git show HEAD~1:plugins/opencode/package.json 2>/dev/null | jq -r '.version // "0.0.0"' || echo "0.0.0")
+          
+          echo "Current version: $CURRENT_VERSION"
+          echo "Previous version: $PREVIOUS_VERSION"
+          
+          if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ] && [ -n "$CURRENT_VERSION" ]; then
+            echo "should-publish=true" >> $GITHUB_OUTPUT
+            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+            echo "Version changed, will publish $CURRENT_VERSION"
+          else
+            echo "should-publish=false" >> $GITHUB_OUTPUT
+            echo "Version unchanged or missing, skipping publish"
+          fi
+
+  publish:
+    needs: check-version
+    if: needs.check-version.outputs.should-publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+
+      - name: Install dependencies
+        working-directory: plugins/opencode
+        run: bun install
+
+      - name: Publish to NPM
+        working-directory: plugins/opencode
+        run: bun publish --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
