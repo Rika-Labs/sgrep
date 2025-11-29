@@ -56,7 +56,6 @@ The plugin manages the `sgrep watch` process lifecycle and exposes search capabi
 
 ### OpenCode Plugin
 
-
 Native OpenCode plugin for semantic code search. Add to OpenCode configuration:
 
 ```json
@@ -66,7 +65,6 @@ Native OpenCode plugin for semantic code search. Add to OpenCode configuration:
 ```
 
 See [plugins/opencode/README.md](plugins/opencode/README.md) for setup and usage.
-
 
 ### Factory Skills Integration
 
