@@ -53,7 +53,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             glob,
             filters,
             json,
-        } => handle_search(embedder, &query, &path, limit, context, glob, filters, json),
+            debug,
+        } => handle_search(embedder, &query, &path, limit, context, glob, filters, json, debug),
         Commands::Watch {
             path,
             debounce_ms,
@@ -267,6 +268,7 @@ fn handle_search(
     glob: Vec<String>,
     filters: Vec<String>,
     json: bool,
+    debug: bool,
 ) -> Result<()> {
     let start = Instant::now();
     let mut engine = search::SearchEngine::new(embedder.clone());
@@ -303,7 +305,7 @@ fn handle_search(
             )?;
             let elapsed = start.elapsed();
             let repo_index = mmap_index.to_repository_index();
-            return render_results(results, json, query, limit, &repo_index, elapsed);
+            return render_results(results, json, query, limit, &repo_index, elapsed, debug);
         }
     }
 
@@ -322,7 +324,7 @@ fn handle_search(
     )?;
     let elapsed = start.elapsed();
 
-    render_results(results, json, query, limit, &index, elapsed)
+    render_results(results, json, query, limit, &index, elapsed, debug)
 }
 
 fn handle_watch(
@@ -438,6 +440,7 @@ fn parse_cli() -> Cli {
     Cli::parse()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_results(
     results: Vec<search::SearchResult>,
     json: bool,
@@ -445,6 +448,7 @@ fn render_results(
     limit: usize,
     index: &store::RepositoryIndex,
     elapsed: Duration,
+    debug: bool,
 ) -> Result<()> {
     if json {
         let payload = JsonResponse::from_results(query, limit, results, index, elapsed);
@@ -454,20 +458,29 @@ fn render_results(
     } else {
         for (idx, result) in results.iter().enumerate() {
             let header = format!(
-                "{}. {}:{}-{} ({:.2})",
+                "{}. {}:{}-{}",
                 idx + 1,
                 result.chunk.path.display(),
                 result.chunk.start_line,
                 result.chunk.end_line,
-                result.score
             );
             println!("{} {}", style("→").cyan(), style(header).bold());
-            println!(
-                "    semantic: {:.2} | bm25: {:.2}",
-                result.semantic_score, result.bm25_score
-            );
+            if debug {
+                println!(
+                    "    score: {:.2} | semantic: {:.2} | bm25: {:.2}",
+                    result.score, result.semantic_score, result.bm25_score
+                );
+            }
             println!("{}", result.render_snippet());
             println!();
+        }
+        if debug {
+            println!(
+                "{} {} results in {:?}",
+                style("ℹ").cyan(),
+                results.len(),
+                elapsed
+            );
         }
     }
     Ok(())
@@ -653,6 +666,7 @@ mod tests {
             5,
             &index,
             Duration::from_millis(1),
+            false,
         )
         .unwrap();
 
@@ -680,6 +694,7 @@ mod tests {
             5,
             &index,
             Duration::from_millis(2),
+            false,
         )
         .unwrap();
     }
@@ -712,6 +727,7 @@ mod tests {
             3,
             &index,
             Duration::from_millis(3),
+            false,
         )
         .unwrap();
     }
@@ -850,6 +866,7 @@ mod tests {
                 glob: vec![],
                 filters: vec![],
                 json: true,
+                debug: false,
             },
         };
         run_with_cli(cli).unwrap();

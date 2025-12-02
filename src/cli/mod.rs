@@ -50,6 +50,9 @@ pub enum Commands {
         /// Emit structured JSON output for agents
         #[arg(long)]
         json: bool,
+        /// Show debug info (scores, timing)
+        #[arg(long)]
+        debug: bool,
     },
     /// Index a repository for semantic search
     Index {
