@@ -1,7 +1,10 @@
+#[cfg(not(test))]
 use std::env;
+#[cfg(not(test))]
 use std::fs;
 #[cfg(not(test))]
 use std::io::Write;
+#[cfg(not(test))]
 use std::path::PathBuf;
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,7 +13,9 @@ use std::sync::{Arc, Mutex};
 #[cfg(not(test))]
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+#[cfg(not(test))]
+use anyhow::{anyhow, Context};
+use anyhow::Result;
 #[cfg(not(test))]
 use fastembed::{InitOptionsUserDefined, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel};
 #[cfg(not(test))]
@@ -22,7 +27,9 @@ use ort::execution_providers::ExecutionProviderDispatch;
 #[cfg(not(test))]
 use ureq::{Agent, AgentBuilder, Proxy};
 
+#[cfg(not(test))]
 use super::cache::{get_fastembed_cache_dir, setup_fastembed_cache_dir};
+#[cfg(not(test))]
 use super::providers::select_execution_providers;
 use super::BatchEmbedder;
 use super::DEFAULT_VECTOR_DIM;
@@ -266,10 +273,14 @@ impl BatchEmbedder for PooledEmbedder {
 #[cfg(not(test))]
 impl Default for PooledEmbedder {
     fn default() -> Self {
+        let cpu_count = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(4);
+        let default_pool = cpu_count.min(8);
         let pool_size = env::var("SGREP_EMBEDDER_POOL_SIZE")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(1);
+            .unwrap_or(default_pool);
         Self::new(pool_size, DEFAULT_MAX_CACHE)
     }
 }

@@ -333,29 +333,28 @@ impl Indexer {
             pb.set_message("loading AI model...");
             let _ = self.embedder.embed(&pending_chunks[0].1);
 
-            for (idx, text) in pending_chunks.into_iter() {
-                if cancelled.load(Ordering::SeqCst) {
-                    return Err(anyhow!("Indexing cancelled"));
-                }
+            let embedder = &self.embedder;
+            let results: Vec<Result<(usize, Vec<f32>)>> = pending_chunks
+                .par_iter()
+                .map(|(idx, text)| {
+                    let vec = embedder.embed(text)?;
+                    Ok((*idx, vec))
+                })
+                .collect();
 
-                let vec = self.embedder.embed(&text)?;
+            for result in results {
+                let (idx, vec) = result?;
                 vectors[idx] = Some(vec);
                 embedded_chunks.insert(idx);
-
-                for (file_path, chunk_indices) in &file_to_chunks {
-                    if !completed_files.contains(file_path)
-                        && chunk_indices.iter().all(|&i| embedded_chunks.contains(&i))
-                    {
-                        completed_files.insert(file_path.clone());
-                        files_completed += 1;
-                        pb.set_position(files_completed as u64);
-                        let display_path =
-                            file_path.strip_prefix(root).unwrap_or(file_path).display();
-                        pb.set_message(format!("{}", display_path));
-                    }
-                }
-                pb.tick();
             }
+
+            for (file_path, chunk_indices) in &file_to_chunks {
+                if chunk_indices.iter().all(|&i| embedded_chunks.contains(&i)) {
+                    completed_files.insert(file_path.clone());
+                    files_completed += 1;
+                }
+            }
+            pb.set_position(total_files as u64);
         }
 
         let vectors: Vec<Vec<f32>> = vectors

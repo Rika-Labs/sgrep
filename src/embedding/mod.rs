@@ -16,6 +16,7 @@ pub const MODEL_FILES: &[&str] = &[
     "special_tokens_map.json",
     "tokenizer_config.json",
 ];
+#[cfg(not(test))]
 pub const DEFAULT_INIT_TIMEOUT_SECS: u64 = 120;
 pub const DEFAULT_VECTOR_DIM: usize = 384;
 
