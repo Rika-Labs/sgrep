@@ -217,6 +217,30 @@ cargo fmt
 cargo clippy
 ```
 
+## Windows Support
+
+Native Windows is not currently supported due to complex C++ dependencies (llama.cpp requiring libclang, CMake, MSVC toolchain).
+
+**Recommended alternatives:**
+
+1. **WSL (Windows Subsystem for Linux)** - Recommended
+   ```powershell
+   wsl --install
+   ```
+   Then run the installation script inside WSL:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install.sh | sh
+   ```
+
+2. **Docker**
+   ```bash
+   docker run -it --rm -v $(pwd):/workspace ubuntu
+   # Inside container:
+   curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install.sh | sh
+   ```
+
+3. **Wait for official Windows binaries** - We're exploring options for native Windows support in future releases.
+
 ## Troubleshooting
 
 - **Stale Index:** Execute `sgrep index` to synchronize.
