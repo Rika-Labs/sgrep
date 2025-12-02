@@ -32,9 +32,6 @@ const JINA_CODE_BASE_URL: &str =
     "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/main";
 
 #[cfg(not(test))]
-const NATIVE_VECTOR_DIM: usize = 768;
-
-#[cfg(not(test))]
 const DEFAULT_MAX_CACHE: u64 = 100_000;
 
 #[cfg(not(test))]
@@ -361,14 +358,14 @@ fn download_file(url: &str, path: &std::path::Path, show_progress: bool) -> Resu
 fn load_jina_code_model(show_download_progress: bool) -> Result<UserDefinedEmbeddingModel> {
     let cache_dir = get_jina_code_cache_dir();
 
-    let onnx_path = cache_dir.join("model.onnx");
+    let onnx_path = cache_dir.join("model_quantized.onnx");
     let tokenizer_path = cache_dir.join("tokenizer.json");
     let config_path = cache_dir.join("config.json");
     let special_tokens_path = cache_dir.join("special_tokens_map.json");
     let tokenizer_config_path = cache_dir.join("tokenizer_config.json");
 
     download_file(
-        &format!("{}/onnx/model.onnx", JINA_CODE_BASE_URL),
+        &format!("{}/onnx/model_quantized.onnx", JINA_CODE_BASE_URL),
         &onnx_path,
         show_download_progress,
     )?;
@@ -429,7 +426,6 @@ fn init_model_with_timeout(
     thread::spawn(move || {
         let result = (|| {
             let model_data = load_jina_code_model(show_download_progress)?;
-            let _ = show_download_progress;
             TextEmbedding::try_new_from_user_defined(
                 model_data,
                 InitOptionsUserDefined::default().with_execution_providers(execution_providers),
@@ -457,18 +453,6 @@ fn init_model_with_timeout(
             Err(anyhow!("Model initialization thread crashed unexpectedly"))
         }
     }
-}
-
-#[cfg(not(test))]
-#[allow(dead_code)]
-fn truncate_to_matryoshka(embeddings: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
-    embeddings
-        .into_iter()
-        .map(|mut v| {
-            v.truncate(DEFAULT_VECTOR_DIM);
-            v
-        })
-        .collect()
 }
 
 #[cfg(test)]
