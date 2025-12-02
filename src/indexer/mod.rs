@@ -333,11 +333,28 @@ impl Indexer {
             pb.set_message("loading AI model...");
             let _ = self.embedder.embed(&pending_chunks[0].1);
 
+            let total_pending = pending_chunks.len();
+            let chunks_done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.green} Embedding chunks ({pos}/{len}) • {msg}",
+                )
+                .unwrap_or_else(|_| ProgressStyle::default_bar()),
+            );
+            pb.set_length(total_pending as u64);
+            pb.set_position(0);
+            pb.set_message("embedding...");
+
             let embedder = &self.embedder;
+            let chunks_done_ref = &chunks_done;
+            let pb_ref = &pb;
             let results: Vec<Result<(usize, Vec<f32>)>> = pending_chunks
                 .par_iter()
                 .map(|(idx, text)| {
                     let vec = embedder.embed(text)?;
+                    let done = chunks_done_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                    pb_ref.set_position(done as u64);
                     Ok((*idx, vec))
                 })
                 .collect();
@@ -354,7 +371,7 @@ impl Indexer {
                     files_completed += 1;
                 }
             }
-            pb.set_position(total_files as u64);
+            pb.set_position(total_pending as u64);
         }
 
         let vectors: Vec<Vec<f32>> = vectors
