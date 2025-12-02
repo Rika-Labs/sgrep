@@ -5,7 +5,7 @@ use crate::chunker::CodeChunk;
 
 pub const RECENCY_HALF_LIFE_HOURS: f32 = 48.0;
 
-pub const MIN_SEMANTIC_WEIGHT: f32 = 0.60;
+pub const MIN_SEMANTIC_WEIGHT: f32 = 0.65;
 
 #[derive(Clone, Copy)]
 pub struct AdaptiveWeights {
@@ -29,8 +29,8 @@ impl AdaptiveWeights {
             || query_lower.starts_with("which ");
         let has_code_symbols = query.chars().any(|c| "(){}[]<>::->=>".contains(c));
 
-        let mut semantic = 0.60;
-        let mut bm25 = 0.20;
+        let mut semantic = 0.65;
+        let mut bm25 = 0.15;
         let recency = 0.05;
         let mut file_type = 0.15;
 
@@ -460,12 +460,9 @@ pub fn filename_match_boost(chunk: &CodeChunk, query: &str) -> f32 {
 
     let mut boost: f32 = 0.0;
     for term in &query_terms {
-        // Stemmed match: "ranking" -> "rank", "scoring" -> "scor"
-        // allows morphological variants to match
         if filename_stemmed.contains(term) || term.contains(&filename_stemmed) {
             boost += 0.25;
         } else if filename.contains(term) || term.contains(&filename) {
-            // Exact substring match (fallback)
             boost += 0.20;
         }
     }
@@ -485,7 +482,6 @@ pub fn implementation_boost(chunk: &CodeChunk, graph: Option<&CodeGraph>) -> f32
     let mut boost = 0.0f32;
 
     for symbol in &symbols {
-        // Check if symbol is DEFINED in this chunk (not just used)
         if symbol.start_line >= chunk.start_line && symbol.start_line <= chunk.end_line {
             boost += match symbol.kind {
                 SymbolKind::Function | SymbolKind::Method => 0.12,

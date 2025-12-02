@@ -14,16 +14,49 @@ pub struct SearchResult {
 
 impl SearchResult {
     pub fn render_snippet(&self) -> String {
+        let content_start = Self::find_content_start(&self.chunk.text);
+        let content = &self.chunk.text[content_start..];
+
         if self.show_full_context {
-            self.chunk.text.clone()
+            content.to_string()
         } else {
-            self.chunk
-                .text
-                .lines()
-                .take(12)
-                .collect::<Vec<_>>()
-                .join("\n")
+            content.lines().take(12).collect::<Vec<_>>().join("\n")
         }
+    }
+
+    fn find_content_start(text: &str) -> usize {
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.is_empty() {
+            return 0;
+        }
+
+        let start_idx = if lines[0].starts_with("// File:") { 1 } else { 0 };
+
+        let mut content_line = start_idx;
+        for (i, line) in lines.iter().enumerate().skip(start_idx) {
+            if line.trim().is_empty() {
+                content_line = i + 1;
+                break;
+            }
+        }
+
+        if lines
+            .get(content_line)
+            .map(|l| l.starts_with("// Context:"))
+            .unwrap_or(false)
+        {
+            content_line += 1;
+        }
+
+        if content_line >= lines.len() {
+            return 0;
+        }
+
+        lines[..content_line]
+            .iter()
+            .map(|l| l.len() + 1)
+            .sum::<usize>()
+            .min(text.len())
     }
 }
 

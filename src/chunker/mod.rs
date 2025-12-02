@@ -16,9 +16,9 @@ use uuid::Uuid;
 
 use treesitter::chunk_with_tree;
 
-const MAX_LINES_PER_CHUNK: usize = 200;
-const MAX_SNIPPET_CHARS: usize = 2048;
-pub(crate) const MAX_CONTEXT_LINES: usize = 3;
+const MAX_LINES_PER_CHUNK: usize = 400;
+const MAX_SNIPPET_CHARS: usize = 8192;
+pub(crate) const MAX_CONTEXT_LINES: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeChunk {
@@ -122,7 +122,6 @@ pub(crate) fn build_chunk(
     let mut text = format!("{}{}", path_prefix, snippet.trim());
 
     if text.len() > MAX_SNIPPET_CHARS {
-        // Find a valid UTF-8 char boundary at or before MAX_SNIPPET_CHARS
         let mut new_len = MAX_SNIPPET_CHARS;
         while new_len > 0 && !text.is_char_boundary(new_len) {
             new_len -= 1;
@@ -152,7 +151,7 @@ mod tests {
 
     #[test]
     fn fallback_chunking_respects_max_lines() {
-        let source: String = (0..210).map(|i| format!("fn test{}() {{}}\n", i)).collect();
+        let source: String = (0..450).map(|i| format!("fn test{}() {{}}\n", i)).collect();
         let chunks = chunk_fallback(&source, Path::new("src/lib.rs"), "rust", Utc::now());
         assert!(chunks.len() >= 2);
         assert_eq!(chunks[0].start_line, 1);
@@ -162,9 +161,7 @@ mod tests {
 
     #[test]
     fn build_chunk_handles_utf8_multibyte_characters() {
-        // Create a string with multibyte UTF-8 characters (emoji, unicode, etc.)
-        // Each emoji is typically 4 bytes
-        let emoji_str = "🚀".repeat(600); // 4 bytes * 600 = 2400 bytes
+        let emoji_str = "🚀".repeat(2500);
         let chunk = build_chunk(
             Path::new("test.txt"),
             &emoji_str,
@@ -173,16 +170,14 @@ mod tests {
             "plain".to_string(),
             Utc::now(),
         );
-        // Should truncate at a valid char boundary, not panic
         assert!(chunk.text.len() <= MAX_SNIPPET_CHARS);
         assert!(chunk.text.is_char_boundary(chunk.text.len()));
     }
 
     #[test]
     fn build_chunk_handles_mixed_utf8_characters() {
-        // Mix of ASCII and multibyte characters near the truncation boundary
         let mut content = "x".repeat(MAX_SNIPPET_CHARS - 10);
-        content.push_str("🎉🎊🎈🎁🎀"); // Add emojis that will push it over the limit
+        content.push_str("🎉🎊🎈🎁🎀");
         let chunk = build_chunk(
             Path::new("test.txt"),
             &content,
@@ -212,8 +207,7 @@ mod tests {
 
     #[test]
     fn build_chunk_handles_chinese_characters() {
-        // Chinese characters are typically 3 bytes in UTF-8
-        let chinese = "你好世界".repeat(700); // Should exceed MAX_SNIPPET_CHARS
+        let chinese = "你好世界".repeat(2800);
         let chunk = build_chunk(
             Path::new("test.txt"),
             &chinese,
@@ -265,7 +259,6 @@ mod tests {
         let dir = std::env::temp_dir().join("sgrep_chunk_file_parse_error");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("broken.rs");
-        // Tree-sitter will produce an ERROR node but no semantic matches; we should fallback.
         std::fs::write(&path, "??? ??\n!!!").unwrap();
 
         let chunks = chunk_file(&path, &dir).unwrap();
@@ -295,7 +288,6 @@ mod tests {
 
         let chunks = chunk_file(&path, &dir).unwrap();
         assert!(!chunks.is_empty());
-        // The chunk should contain the import as context
         assert!(
             chunks[0].text.contains("use std::collections::HashMap")
                 || chunks[0].text.contains("main"),
@@ -324,9 +316,7 @@ impl Foo {
         .unwrap();
 
         let chunks = chunk_file(&path, &dir).unwrap();
-        // Should have chunks for both struct and impl
         assert!(!chunks.is_empty());
-        // At least one chunk should exist
         let has_foo = chunks.iter().any(|c| c.text.contains("Foo"));
         assert!(
             has_foo,

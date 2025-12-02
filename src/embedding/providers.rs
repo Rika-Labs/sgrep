@@ -38,6 +38,13 @@ fn auto_detect_providers() -> Vec<ExecutionProviderDispatch> {
         ];
     }
 
+    if is_apple_silicon() {
+        return vec![
+            CoreMLExecutionProvider::default().into(),
+            optimized_cpu_provider(),
+        ];
+    }
+
     vec![optimized_cpu_provider()]
 }
 
@@ -130,7 +137,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn select_execution_providers_defaults_to_cpu() {
+    fn select_execution_providers_uses_coreml_on_apple_silicon() {
         env::remove_var("SGREP_DEVICE");
         env::set_var("SGREP_TEST_APPLE", "1");
         env::set_var("SGREP_TEST_NVIDIA", "0");
@@ -138,7 +145,7 @@ mod tests {
         env::remove_var("SGREP_TEST_APPLE");
         env::remove_var("SGREP_TEST_NVIDIA");
         let joined = format!("{:?}", eps);
+        assert!(joined.contains("CoreMLExecutionProvider"));
         assert!(joined.contains("CPUExecutionProvider"));
-        assert!(!joined.contains("CoreMLExecutionProvider"));
     }
 }

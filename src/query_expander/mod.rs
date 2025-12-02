@@ -9,8 +9,6 @@ use anyhow::Result;
 
 pub use model::{is_model_cached, QueryAnalysis, QueryExpander};
 
-#[cfg(test)]
-pub use model::get_model_path;
 
 #[allow(dead_code)]
 pub trait Expander: Send + Sync {

@@ -7,6 +7,17 @@ pub use local::{Embedder, PooledEmbedder};
 
 use anyhow::Result;
 
+pub const MODEL_NAME: &str = "jina-embeddings-v2-base-code";
+pub const MODEL_DOWNLOAD_URL: &str = "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/tree/main";
+pub const MODEL_FILES: &[&str] = &[
+    "model_quantized.onnx",
+    "tokenizer.json",
+    "config.json",
+    "special_tokens_map.json",
+    "tokenizer_config.json",
+];
+#[cfg(not(test))]
+pub const DEFAULT_INIT_TIMEOUT_SECS: u64 = 120;
 pub const DEFAULT_VECTOR_DIM: usize = 384;
 
 pub trait BatchEmbedder: Send + Sync {

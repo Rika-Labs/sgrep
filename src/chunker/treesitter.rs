@@ -14,11 +14,8 @@ pub fn chunk_with_tree(
 ) -> Vec<CodeChunk> {
     let root = tree.root_node();
     let mut chunks = Vec::new();
-
-    // Collect file-level imports/use statements for context
     let file_context = extract_file_context(source, &root, language);
 
-    // Recursively collect semantic nodes with their parent context
     collect_semantic_nodes(
         &root,
         source,
@@ -32,7 +29,6 @@ pub fn chunk_with_tree(
     chunks
 }
 
-/// Extract file-level context like imports, package declarations, module names
 fn extract_file_context(source: &str, root: &tree_sitter::Node, language: &str) -> String {
     let mut context_lines = Vec::new();
     let mut cursor = root.walk();
@@ -43,8 +39,6 @@ fn extract_file_context(source: &str, root: &tree_sitter::Node, language: &str) 
         }
 
         let kind = node.kind();
-
-        // Collect imports, use statements, package declarations
         let is_context_node = matches!(
             kind,
             "use_declaration"
@@ -76,7 +70,6 @@ fn extract_file_context(source: &str, root: &tree_sitter::Node, language: &str) 
     }
 }
 
-/// Recursively collect semantic nodes, including nested ones with parent context
 fn collect_semantic_nodes(
     node: &tree_sitter::Node,
     source: &str,
@@ -108,7 +101,6 @@ fn collect_semantic_nodes(
                 continue;
             }
 
-            // Build context-aware text
             let context = extract_parent_context(node, source, language);
             let full_text = if context.is_empty() && file_context.is_empty() {
                 snippet.to_string()
@@ -127,8 +119,6 @@ fn collect_semantic_nodes(
                 modified_at,
             ));
 
-            // Don't recurse into this node if we already captured it
-            // But do recurse for container types that might have nested items
             if is_container_node(kind) {
                 collect_semantic_nodes(
                     &child,
@@ -141,7 +131,6 @@ fn collect_semantic_nodes(
                 );
             }
         } else {
-            // Continue searching in non-semantic nodes
             collect_semantic_nodes(
                 &child,
                 source,
@@ -155,21 +144,15 @@ fn collect_semantic_nodes(
     }
 }
 
-/// Extract parent context (class name, struct name, impl block, etc.)
 fn extract_parent_context(parent: &tree_sitter::Node, source: &str, _language: &str) -> String {
     let kind = parent.kind();
-
-    // Check if parent is a container that provides context
     if !is_context_provider(kind) {
         return String::new();
     }
 
-    // Try to extract the name/signature from the parent
     let mut cursor = parent.walk();
     for child in parent.children(&mut cursor) {
         let child_kind = child.kind();
-
-        // Look for identifier nodes that give us the name
         if matches!(
             child_kind,
             "identifier"
@@ -188,7 +171,6 @@ fn extract_parent_context(parent: &tree_sitter::Node, source: &str, _language: &
     String::new()
 }
 
-/// Check if a node kind provides context for its children
 pub fn is_context_provider(kind: &str) -> bool {
     matches!(
         kind,
@@ -210,7 +192,6 @@ pub fn is_context_provider(kind: &str) -> bool {
         || kind.contains("namespace")
 }
 
-/// Check if a node is a container that can have nested semantic nodes
 pub fn is_container_node(kind: &str) -> bool {
     matches!(
         kind,
@@ -230,7 +211,6 @@ pub fn is_container_node(kind: &str) -> bool {
         || kind.contains("namespace")
 }
 
-/// Convert node kind to a human-readable label
 pub fn kind_to_label(kind: &str) -> &'static str {
     if kind.contains("class") {
         "class"

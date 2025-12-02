@@ -20,18 +20,20 @@ pub fn configure_offline_env(offline: bool) -> Result<()> {
     })?;
 
     if offline && !cache_has_model(&cache_dir) {
+        let files_list = super::MODEL_FILES.iter()
+            .map(|f| format!("  - {}", f))
+            .collect::<Vec<_>>()
+            .join("\n");
         return Err(anyhow!(
             "Offline mode enabled but no cached model found.\n\n\
             Model cache directory: {}\n\n\
-            Required files in mxbai-embed-xsmall-v1/:\n\
-              - model_quantized.onnx\n\
-              - tokenizer.json\n\
-              - config.json\n\
-              - special_tokens_map.json\n\
-              - tokenizer_config.json\n\n\
+            Required files in {}/:\n{}\n\n\
             Run 'sgrep config --show-model-dir' for the exact path.\n\
-            Download from: https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/tree/main",
-            cache_dir.display()
+            Download from: {}",
+            cache_dir.display(),
+            super::MODEL_NAME,
+            files_list,
+            super::MODEL_DOWNLOAD_URL
         ));
     }
 
