@@ -14,12 +14,8 @@ pub struct SearchResult {
 
 impl SearchResult {
     pub fn render_snippet(&self) -> String {
-        let text = &self.chunk.text;
-
-        // Skip file context (imports/use statements prepended for embedding)
-        // Context ends with a blank line before the actual code
-        let content_start = Self::find_content_start(text);
-        let content = &text[content_start..];
+        let content_start = Self::find_content_start(&self.chunk.text);
+        let content = &self.chunk.text[content_start..];
 
         if self.show_full_context {
             content.to_string()
@@ -29,41 +25,38 @@ impl SearchResult {
     }
 
     fn find_content_start(text: &str) -> usize {
-        // Look for the pattern: context lines followed by blank line
-        // Context lines are: "// File:", "use ", "import ", "package ", etc.
         let lines: Vec<&str> = text.lines().collect();
-        let mut last_context_line = 0;
-        let mut found_blank_after_context = false;
+        if lines.is_empty() {
+            return 0;
+        }
 
-        for (i, line) in lines.iter().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                if last_context_line > 0 && i == last_context_line + 1 {
-                    found_blank_after_context = true;
-                }
-                continue;
-            }
+        let start_idx = if lines[0].starts_with("// File:") { 1 } else { 0 };
 
-            let is_context = trimmed.starts_with("// File:")
-                || trimmed.starts_with("// Context:")
-                || trimmed.starts_with("use ")
-                || trimmed.starts_with("import ")
-                || trimmed.starts_with("from ")
-                || trimmed.starts_with("package ")
-                || trimmed.starts_with("require ")
-                || trimmed.starts_with("#include")
-                || trimmed.starts_with("using ");
-
-            if is_context {
-                last_context_line = i;
-            } else if found_blank_after_context || last_context_line == 0 {
-                // Found actual content - return byte offset to this line
-                let offset: usize = lines[..i].iter().map(|l| l.len() + 1).sum();
-                return offset.min(text.len());
+        let mut content_line = start_idx;
+        for (i, line) in lines.iter().enumerate().skip(start_idx) {
+            if line.trim().is_empty() {
+                content_line = i + 1;
+                break;
             }
         }
 
-        0
+        if lines
+            .get(content_line)
+            .map(|l| l.starts_with("// Context:"))
+            .unwrap_or(false)
+        {
+            content_line += 1;
+        }
+
+        if content_line >= lines.len() {
+            return 0;
+        }
+
+        lines[..content_line]
+            .iter()
+            .map(|l| l.len() + 1)
+            .sum::<usize>()
+            .min(text.len())
     }
 }
 
