@@ -18,6 +18,23 @@ detect_os_arch() {
   case "$os_name" in
     Linux) os="linux" ;;
     Darwin) os="macos" ;;
+    MINGW*|MSYS*|CYGWIN*)
+      echo "Error: Native Windows is not currently supported." >&2
+      echo "" >&2
+      echo "sgrep requires native Unix toolchains for its C++ dependencies (llama.cpp)." >&2
+      echo "" >&2
+      echo "Recommended alternatives:" >&2
+      echo "  1. Use WSL (Windows Subsystem for Linux):" >&2
+      echo "     wsl --install" >&2
+      echo "     # Then run this script inside WSL" >&2
+      echo "" >&2
+      echo "  2. Use Docker:" >&2
+      echo "     docker run -it --rm -v \$(pwd):/workspace ubuntu" >&2
+      echo "     # Then run this script inside the container" >&2
+      echo "" >&2
+      echo "For more information, see: https://github.com/rika-labs/sgrep#windows-support" >&2
+      exit 1
+      ;;
     *) echo "Unsupported OS $os_name" >&2; exit 1 ;;
   esac
 
