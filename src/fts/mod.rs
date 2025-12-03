@@ -215,12 +215,9 @@ impl Bm25Index {
     }
 }
 
-/// BM25F field boost constants (tuned for code search)
-/// These boosts are applied to term frequencies BEFORE the saturation function,
-/// following the BM25F algorithm from "Simple BM25 extension to multiple weighted fields"
-const BM25F_FILENAME_BOOST: usize = 5;
-const BM25F_SYMBOL_BOOST: usize = 5;
-const BM25F_PATH_BOOST: usize = 2;
+const BM25F_FILENAME_BOOST: usize = 2;
+const BM25F_SYMBOL_BOOST: usize = 2;
+const BM25F_PATH_BOOST: usize = 1;
 
 /// A document with multiple fields for BM25F scoring.
 /// Following Sourcegraph's approach, we treat all fields as one combined document

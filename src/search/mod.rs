@@ -1,6 +1,5 @@
 mod binary;
 pub mod config;
-mod graph_hybrid;
 mod hnsw;
 mod results;
 mod scoring;
@@ -16,7 +15,7 @@ use anyhow::Result;
 use crate::chunker::CodeChunk;
 use crate::embedding::BatchEmbedder;
 use crate::fts::{self, Bm25FDocument, Bm25FIndex};
-use crate::graph::{CodeGraph, QueryType, Symbol};
+use crate::graph::{CodeGraph, Symbol};
 use crate::query_expander::{QueryAnalysis, QueryExpander};
 use crate::reranker::Reranker;
 use crate::store::{HierarchicalIndex, MmapIndex, RepositoryIndex};
@@ -26,12 +25,8 @@ use config::{
     BINARY_QUANTIZATION_THRESHOLD, BINARY_SHORTLIST_FACTOR, HNSW_THRESHOLD, PRF_EXPANSION_TERMS,
     PRF_TOP_K, RERANK_OVERSAMPLE_FACTOR,
 };
-use graph_hybrid::{apply_graph_boost, search_graph_only};
 use hnsw::{build_hnsw_index, search_hnsw_candidates};
-use scoring::{
-    directory_match_boost, filename_match_boost, implementation_boost, normalize_bm25_scores,
-    recency_boost, reexport_file_penalty, select_top_k, AdaptiveWeights as Weights,
-};
+use scoring::{normalize_bm25_scores, select_top_k, AdaptiveWeights as Weights};
 
 /// Build a BM25F index from chunks with optional symbol information.
 /// This implements the BM25F algorithm which boosts term frequencies for
@@ -749,26 +744,14 @@ impl SearchEngine {
         chunk: &CodeChunk,
         vector: &[f32],
         query_vec: &[f32],
-        query: &str,
+        _query: &str,
         bm25_raw: f32,
         bm25_normalized: f32,
         include_context: bool,
         weights: &Weights,
     ) -> SearchResult {
         let semantic = cosine_similarity(query_vec, vector);
-        let recency = recency_boost(chunk);
-        let dir_match = directory_match_boost(chunk, query);
-        let reexport_penalty = reexport_file_penalty(chunk);
-        let impl_boost = implementation_boost(chunk, self.graph.as_ref());
-        let filename_boost = filename_match_boost(chunk, query);
-
-        let score = weights.semantic * semantic
-            + weights.bm25 * bm25_normalized
-            + weights.recency * recency
-            + dir_match
-            + reexport_penalty
-            + impl_boost
-            + filename_boost;
+        let score = weights.semantic * semantic + weights.bm25 * bm25_normalized;
 
         SearchResult {
             chunk: chunk.clone(),
@@ -871,41 +854,7 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let analysis = self.analyze_query(query);
-        let query_type = analysis.to_query_type();
-
-        match query_type {
-            QueryType::Structural => {
-                if let Some(ref graph) = self.graph {
-                    let graph_results = search_graph_only(graph, query);
-                    if !graph_results.is_empty() {
-                        return self.graph_results_to_search_results(
-                            &graph_results,
-                            index,
-                            query,
-                            &options,
-                        );
-                    }
-                }
-                self.search_with_fallback(index, query, options, &analysis)
-            }
-            QueryType::Semantic => self.search_with_fallback(index, query, options, &analysis),
-            QueryType::Hybrid => {
-                let mut vector_results =
-                    self.search_with_fallback(index, query, options.clone(), &analysis)?;
-
-                if let Some(ref graph) = self.graph {
-                    apply_graph_boost(&mut vector_results, graph, query);
-                }
-
-                vector_results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-
-                Ok(vector_results)
-            }
-        }
+        self.search_with_fallback(index, query, options, &analysis)
     }
 
     fn search_with_fallback(
@@ -955,41 +904,7 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let analysis = self.analyze_query(query);
-        let query_type = analysis.to_query_type();
-
-        match query_type {
-            QueryType::Structural => {
-                if let Some(ref graph) = self.graph {
-                    let graph_results = search_graph_only(graph, query);
-                    if !graph_results.is_empty() {
-                        return self.graph_results_to_search_results_mmap(
-                            &graph_results,
-                            index,
-                            query,
-                            &options,
-                        );
-                    }
-                }
-                self.search_mmap_with_fallback(index, query, options, &analysis)
-            }
-            QueryType::Semantic => self.search_mmap_with_fallback(index, query, options, &analysis),
-            QueryType::Hybrid => {
-                let mut vector_results =
-                    self.search_mmap_with_fallback(index, query, options.clone(), &analysis)?;
-
-                if let Some(ref graph) = self.graph {
-                    apply_graph_boost(&mut vector_results, graph, query);
-                }
-
-                vector_results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-
-                Ok(vector_results)
-            }
-        }
+        self.search_mmap_with_fallback(index, query, options, &analysis)
     }
 
     fn search_mmap_with_fallback(
