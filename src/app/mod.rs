@@ -124,11 +124,23 @@ fn build_embedder(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
 
-    Ok(if use_pooled {
+    eprintln!(
+        "{} Loading embedding model...",
+        style("ℹ").cyan()
+    );
+
+    let embedder: Arc<dyn embedding::BatchEmbedder> = if use_pooled {
         Arc::new(PooledEmbedder::default())
     } else {
         Arc::new(Embedder::default())
-    })
+    };
+
+    eprintln!(
+        "{} Embedding model ready",
+        style("✔").green()
+    );
+
+    Ok(embedder)
 }
 
 fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result<()> {
