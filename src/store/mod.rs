@@ -1,11 +1,12 @@
 mod hierarchy;
 mod index;
 mod mmap;
-mod utils;
+pub mod utils;
 
 pub use hierarchy::HierarchicalIndex;
 pub use index::{IndexMetadata, PartialIndex, RepositoryIndex};
 pub use mmap::MmapIndex;
+pub use utils::quantize_to_binary;
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -19,7 +20,7 @@ use mmap::{
     parse_binary_header, parse_vectors_header, read_vectors_from_mmap, validate_vectors_size,
     BYTES_PER_F32, VECTOR_HEADER_SIZE,
 };
-use utils::{data_dir, hash_path, quantize_to_binary};
+use utils::{data_dir, hash_path};
 
 const INDEX_FILE: &str = "index.bin.zst";
 const HIERARCHY_FILE: &str = "hierarchy.bin.zst";

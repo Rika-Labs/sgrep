@@ -1,4 +1,6 @@
 mod binary;
+pub mod config;
+pub mod file_patterns;
 mod graph_hybrid;
 mod hnsw;
 mod results;
@@ -21,6 +23,10 @@ use crate::reranker::Reranker;
 use crate::store::{HierarchicalIndex, MmapIndex, RepositoryIndex};
 
 use binary::{binary_shortlist, binary_shortlist_precomputed, quantize_to_binary};
+use config::{
+    BINARY_QUANTIZATION_THRESHOLD, BINARY_SHORTLIST_FACTOR, HNSW_THRESHOLD, PRF_EXPANSION_TERMS,
+    PRF_TOP_K, RERANK_OVERSAMPLE_FACTOR,
+};
 use graph_hybrid::{apply_graph_boost, search_graph_only};
 use hnsw::{build_hnsw_index, search_hnsw_candidates};
 use scoring::{
@@ -28,13 +34,6 @@ use scoring::{
     normalize_bm25_scores, recency_boost, reexport_file_penalty, select_top_k,
     AdaptiveWeights as Weights,
 };
-
-const HNSW_THRESHOLD: usize = 500;
-const BINARY_QUANTIZATION_THRESHOLD: usize = 1000;
-const BINARY_SHORTLIST_FACTOR: usize = 10;
-const RERANK_OVERSAMPLE_FACTOR: usize = 3;
-const PRF_TOP_K: usize = 10;
-const PRF_EXPANSION_TERMS: usize = 5;
 
 /// Build a BM25F index from chunks with optional symbol information.
 /// This implements the BM25F algorithm which boosts term frequencies for
@@ -202,13 +201,7 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
-        let query_vec = self.embedder.embed(query)?;
-        let limit = options.limit.max(1);
-        let fetch_limit = if options.rerank && self.reranker.is_some() {
-            limit * RERANK_OVERSAMPLE_FACTOR
-        } else {
-            limit
-        };
+        let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
         let globset = fts::build_globset(&options.glob);
         let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
@@ -279,13 +272,7 @@ impl SearchEngine {
                     options.include_context,
                     &weights,
                 );
-                if let Some(existing) = matches.iter_mut().find(|m| m.chunk.id == result.chunk.id) {
-                    if result.score > existing.score {
-                        *existing = result;
-                    }
-                } else {
-                    matches.push(result);
-                }
+                Self::merge_result(&mut matches, result);
             }
         }
 
@@ -301,14 +288,7 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
-        let query_vec = self.embedder.embed(query)?;
-        let limit = options.limit.max(1);
-        let fetch_limit = if options.rerank && self.reranker.is_some() {
-            limit * RERANK_OVERSAMPLE_FACTOR
-        } else {
-            limit
-        };
-
+        let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
         let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let query_binary = quantize_to_binary(&query_vec);
@@ -370,13 +350,7 @@ impl SearchEngine {
                     options.include_context,
                     &weights,
                 );
-                if let Some(existing) = matches.iter_mut().find(|m| m.chunk.id == result.chunk.id) {
-                    if result.score > existing.score {
-                        *existing = result;
-                    }
-                } else {
-                    matches.push(result);
-                }
+                Self::merge_result(&mut matches, result);
             }
         }
 
@@ -392,14 +366,7 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
-        let query_vec = self.embedder.embed(query)?;
-        let limit = options.limit.max(1);
-        let fetch_limit = if options.rerank && self.reranker.is_some() {
-            limit * RERANK_OVERSAMPLE_FACTOR
-        } else {
-            limit
-        };
-
+        let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
         let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let hnsw = build_hnsw_index(index.metadata.vector_dim, index.vectors.len())?;
@@ -477,13 +444,7 @@ impl SearchEngine {
                     options.include_context,
                     &weights,
                 );
-                if let Some(existing) = matches.iter_mut().find(|m| m.chunk.id == result.chunk.id) {
-                    if result.score > existing.score {
-                        *existing = result;
-                    }
-                } else {
-                    matches.push(result);
-                }
+                Self::merge_result(&mut matches, result);
             }
         }
 
@@ -499,13 +460,7 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
-        let query_vec = self.embedder.embed(query)?;
-        let limit = options.limit.max(1);
-        let fetch_limit = if options.rerank && self.reranker.is_some() {
-            limit * RERANK_OVERSAMPLE_FACTOR
-        } else {
-            limit
-        };
+        let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
         let globset = fts::build_globset(&options.glob);
         let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
@@ -577,13 +532,7 @@ impl SearchEngine {
                     options.include_context,
                     &weights,
                 );
-                if let Some(existing) = matches.iter_mut().find(|m| m.chunk.id == result.chunk.id) {
-                    if result.score > existing.score {
-                        *existing = result;
-                    }
-                } else {
-                    matches.push(result);
-                }
+                Self::merge_result(&mut matches, result);
             }
         }
 
@@ -599,14 +548,7 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
-        let query_vec = self.embedder.embed(query)?;
-        let limit = options.limit.max(1);
-        let fetch_limit = if options.rerank && self.reranker.is_some() {
-            limit * RERANK_OVERSAMPLE_FACTOR
-        } else {
-            limit
-        };
-
+        let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
         let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let hnsw = build_hnsw_index(index.metadata.vector_dim, index.len())?;
@@ -680,13 +622,7 @@ impl SearchEngine {
                     options.include_context,
                     &weights,
                 );
-                if let Some(existing) = matches.iter_mut().find(|m| m.chunk.id == result.chunk.id) {
-                    if result.score > existing.score {
-                        *existing = result;
-                    }
-                } else {
-                    matches.push(result);
-                }
+                Self::merge_result(&mut matches, result);
             }
         }
 
@@ -702,16 +638,9 @@ impl SearchEngine {
         options: SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
-        let query_vec = self.embedder.embed(query)?;
-        let limit = options.limit.max(1);
-        let fetch_limit = if options.rerank && self.reranker.is_some() {
-            limit * RERANK_OVERSAMPLE_FACTOR
-        } else {
-            limit
-        };
+        let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
         let shortlist_size =
             (PRF_TOP_K.max(fetch_limit) * BINARY_SHORTLIST_FACTOR).min(index.len());
-
         let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
 
         let query_binary = quantize_to_binary(&query_vec);
@@ -784,19 +713,37 @@ impl SearchEngine {
                     options.include_context,
                     &weights,
                 );
-                if let Some(existing) = matches.iter_mut().find(|m| m.chunk.id == result.chunk.id) {
-                    if result.score > existing.score {
-                        *existing = result;
-                    }
-                } else {
-                    matches.push(result);
-                }
+                Self::merge_result(&mut matches, result);
             }
         }
 
         select_top_k(&mut matches, fetch_limit);
         let matches = self.maybe_rerank(query, matches, &options);
         Ok(matches)
+    }
+
+    fn prepare_search(&self, query: &str, options: &SearchOptions) -> Result<(Vec<f32>, usize)> {
+        let query_vec = self.embedder.embed(query)?;
+        let limit = options.limit.max(1);
+        let fetch_limit = if options.rerank && self.reranker.is_some() {
+            limit * RERANK_OVERSAMPLE_FACTOR
+        } else {
+            limit
+        };
+        Ok((query_vec, fetch_limit))
+    }
+
+    fn merge_result(results: &mut Vec<SearchResult>, new_result: SearchResult) {
+        if let Some(existing) = results
+            .iter_mut()
+            .find(|r| r.chunk.id == new_result.chunk.id)
+        {
+            if new_result.score > existing.score {
+                *existing = new_result;
+            }
+        } else {
+            results.push(new_result);
+        }
     }
 
     fn score_chunk(
@@ -1097,6 +1044,7 @@ impl SearchEngine {
         options: &SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let mut results = Vec::new();
+        let query_vec = self.embedder.embed(query)?;
 
         for symbol in symbols.iter().take(options.limit) {
             for (i, chunk) in index.chunks.iter().enumerate() {
@@ -1104,7 +1052,6 @@ impl SearchEngine {
                     && chunk.start_line <= symbol.start_line
                     && chunk.end_line >= symbol.end_line
                 {
-                    let query_vec = self.embedder.embed(query)?;
                     let semantic = cosine_similarity(&query_vec, &index.vectors[i]);
 
                     results.push(SearchResult {
@@ -1136,6 +1083,7 @@ impl SearchEngine {
         options: &SearchOptions,
     ) -> Result<Vec<SearchResult>> {
         let mut results = Vec::new();
+        let query_vec = self.embedder.embed(query)?;
 
         for symbol in symbols.iter().take(options.limit) {
             for (i, chunk) in index.chunks.iter().enumerate() {
@@ -1143,7 +1091,6 @@ impl SearchEngine {
                     && chunk.start_line <= symbol.start_line
                     && chunk.end_line >= symbol.end_line
                 {
-                    let query_vec = self.embedder.embed(query)?;
                     let semantic = cosine_similarity(&query_vec, index.get_vector(i));
 
                     results.push(SearchResult {
@@ -2097,5 +2044,182 @@ mod tests {
         let mut matches: Vec<SearchResult> = vec![];
         select_top_k(&mut matches, 5);
         assert!(matches.is_empty());
+    }
+
+    // Test for search consolidation (Phase 5) - verify SearchContext reduces duplication
+    mod search_consolidation_tests {
+        use super::*;
+
+        #[test]
+        fn search_context_calculates_fetch_limit_with_rerank() {
+            use crate::reranker::MockReranker;
+
+            let embedder = Arc::new(MockEmbedder);
+            let reranker = Arc::new(MockReranker);
+            let engine = SearchEngine::with_reranker(embedder.clone(), reranker);
+            let options = SearchOptions {
+                limit: 5,
+                rerank: true,
+                ..Default::default()
+            };
+            let expected = 5 * RERANK_OVERSAMPLE_FACTOR;
+            let (_, fetch_limit) = engine.prepare_search("test", &options).unwrap();
+            assert_eq!(fetch_limit, expected);
+        }
+
+        #[test]
+        fn search_context_calculates_fetch_limit_without_rerank() {
+            let embedder = Arc::new(MockEmbedder);
+            let engine = SearchEngine::new(embedder.clone());
+            let options = SearchOptions {
+                limit: 5,
+                rerank: false,
+                ..Default::default()
+            };
+            let (_, fetch_limit) = engine.prepare_search("test", &options).unwrap();
+            assert_eq!(fetch_limit, 5);
+        }
+
+        #[test]
+        fn merge_results_keeps_higher_scores() {
+            let chunk = make_chunk("test", "rust", "test.rs");
+            let mut existing = vec![SearchResult {
+                chunk: chunk.clone(),
+                score: 0.5,
+                semantic_score: 0.5,
+                bm25_score: 0.0,
+                show_full_context: false,
+            }];
+
+            let new_result = SearchResult {
+                chunk: chunk.clone(),
+                score: 0.8,
+                semantic_score: 0.8,
+                bm25_score: 0.0,
+                show_full_context: false,
+            };
+
+            SearchEngine::merge_result(&mut existing, new_result);
+
+            assert_eq!(existing.len(), 1);
+            assert!((existing[0].score - 0.8).abs() < 1e-6);
+        }
+
+        #[test]
+        fn merge_results_adds_new_chunks() {
+            let chunk1 = make_chunk("test1", "rust", "test1.rs");
+            let chunk2 = make_chunk("test2", "rust", "test2.rs");
+            let mut existing = vec![SearchResult {
+                chunk: chunk1,
+                score: 0.5,
+                semantic_score: 0.5,
+                bm25_score: 0.0,
+                show_full_context: false,
+            }];
+
+            let new_result = SearchResult {
+                chunk: chunk2,
+                score: 0.6,
+                semantic_score: 0.6,
+                bm25_score: 0.0,
+                show_full_context: false,
+            };
+
+            SearchEngine::merge_result(&mut existing, new_result);
+
+            assert_eq!(existing.len(), 2);
+        }
+    }
+
+    // Test to verify embedding is hoisted outside loops (Phase 2.1 performance fix)
+    mod embedding_call_count_tests {
+        use super::*;
+        use crate::graph::{Symbol, SymbolKind};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingEmbedder {
+            call_count: AtomicUsize,
+        }
+
+        impl CountingEmbedder {
+            fn new() -> Self {
+                Self {
+                    call_count: AtomicUsize::new(0),
+                }
+            }
+
+            fn get_call_count(&self) -> usize {
+                self.call_count.load(Ordering::SeqCst)
+            }
+        }
+
+        impl BatchEmbedder for CountingEmbedder {
+            fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![1.0, 0.5, 0.0, -0.5])
+            }
+
+            fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                self.call_count.fetch_add(texts.len(), Ordering::SeqCst);
+                Ok(texts.iter().map(|_| vec![1.0, 0.5, 0.0, -0.5]).collect())
+            }
+
+            fn dimension(&self) -> usize {
+                4
+            }
+        }
+
+        fn make_symbol(name: &str, path: &str, start: usize, end: usize) -> Symbol {
+            Symbol {
+                id: Uuid::new_v4(),
+                name: name.to_string(),
+                qualified_name: name.to_string(),
+                kind: SymbolKind::Function,
+                file_path: PathBuf::from(path),
+                start_line: start,
+                end_line: end,
+                language: "rust".to_string(),
+                signature: format!("fn {}()", name),
+                parent_id: None,
+                chunk_id: None,
+            }
+        }
+
+        #[test]
+        fn graph_results_to_search_results_embeds_query_once() {
+            let embedder = Arc::new(CountingEmbedder::new());
+            let engine = SearchEngine::new(embedder.clone());
+
+            // Create multiple chunks and symbols
+            let chunks = vec![
+                make_chunk("fn foo() {}", "rust", "src/foo.rs"),
+                make_chunk("fn bar() {}", "rust", "src/bar.rs"),
+                make_chunk("fn baz() {}", "rust", "src/baz.rs"),
+            ];
+            let vectors: Vec<Vec<f32>> = chunks.iter().map(|_| vec![1.0, 0.5, 0.0, -0.5]).collect();
+            let index = make_index(chunks, vectors);
+
+            // Create symbols that match the chunks
+            let symbols = vec![
+                make_symbol("foo", "src/foo.rs", 1, 10),
+                make_symbol("bar", "src/bar.rs", 1, 10),
+                make_symbol("baz", "src/baz.rs", 1, 10),
+            ];
+
+            let options = SearchOptions {
+                limit: 10,
+                ..Default::default()
+            };
+
+            let initial_count = embedder.get_call_count();
+            let _ =
+                engine.graph_results_to_search_results(&symbols, &index, "test query", &options);
+            let calls_made = embedder.get_call_count() - initial_count;
+            assert_eq!(
+                calls_made, 1,
+                "Expected embed() to be called once, but was called {} times",
+                calls_made
+            );
+        }
     }
 }

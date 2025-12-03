@@ -228,7 +228,8 @@ mod tests {
 
     #[test]
     fn extract_symbol_name_with_extra_words() {
-        let name = extract_symbol_name_from_query("who calls process_data function", &["who calls"]);
+        let name =
+            extract_symbol_name_from_query("who calls process_data function", &["who calls"]);
         assert_eq!(name, Some("process_data".to_string()));
     }
 

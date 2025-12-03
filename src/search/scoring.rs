@@ -1,6 +1,10 @@
 use chrono::Utc;
 use simsimd::SpatialSimilarity;
 
+use super::file_patterns::{
+    count_test_terms, path_matches_any, PATH_EXAMPLE_INDICATORS, PATH_IMPL_INDICATORS,
+    PATH_TEST_INDICATORS,
+};
 use crate::chunker::CodeChunk;
 
 pub const RECENCY_HALF_LIFE_HOURS: f32 = 48.0;
@@ -106,267 +110,34 @@ pub fn normalize_bm25_scores(scores: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// Calculates a file-type based boost for search scoring.
+///
+/// This function uses patterns from the `file_patterns` module to classify
+/// files as test, example, implementation, or documentation, and assigns
+/// appropriate boost values.
+///
+/// # Returns
+/// A score between 0.05 and 1.0:
+/// - Implementation files: 0.7 - 1.0
+/// - Example files: 0.2
+/// - Test files: 0.1
+/// - Documentation files: 0.1 - 0.2
 pub fn content_based_file_boost(chunk: &CodeChunk) -> f32 {
     let content_lower = chunk.text.to_lowercase();
     let path_str = chunk.path.to_string_lossy().to_lowercase();
     let word_count = chunk.text.split_whitespace().count().max(1) as f32;
 
-    let test_content_patterns = [
-        "assert",
-        "expect(",
-        ".tobe(",
-        ".toequal(",
-        "should.",
-        "mock",
-        "stub",
-        "fake",
-        "fixture",
-        "beforeeach",
-        "aftereach",
-        "beforeall",
-        "afterall",
-        "describe(",
-        "it(\"",
-        "it('",
-        "test(\"",
-        "test('",
-        "@test",
-        "#[test]",
-        "def test_",
-        "func test",
-    ];
-
-    let test_term_count: usize = test_content_patterns
-        .iter()
-        .map(|p| content_lower.matches(p).count())
-        .sum();
-
+    // Use patterns from file_patterns module
+    let test_term_count = count_test_terms(&content_lower);
     let content_test_density = (test_term_count as f32 / word_count).min(0.3);
 
-    let path_test_indicators = [
-        "test/",
-        "/test/",
-        "tests/",
-        "/tests/",
-        "__tests__/",
-        "/__tests__/",
-        "spec/",
-        "/spec/",
-        "specs/",
-        "/specs/",
-        "fixture/",
-        "/fixture/",
-        "fixtures/",
-        "/fixtures/",
-        "__testfixtures__/",
-        "/__testfixtures__/",
-        "testfixtures/",
-        "/testfixtures/",
-        "testdata/",
-        "/testdata/",
-        "test_data/",
-        "/test_data/",
-        "mock/",
-        "/mock/",
-        "mocks/",
-        "/mocks/",
-        "e2e/",
-        "/e2e/",
-        "integration/",
-        "/integration/",
-        "unit/",
-        "/unit/",
-        "unit_test/",
-        "/unit_test/",
-        "test_utils/",
-        "/test_utils/",
-        "testutils/",
-        "/testutils/",
-        "test_helpers/",
-        "/test_helpers/",
-        "testhelpers/",
-        "/testhelpers/",
-        "test_support/",
-        "/test_support/",
-        "testsupport/",
-        "/testsupport/",
-        "test_common/",
-        "/test_common/",
-        "testcommon/",
-        "/testcommon/",
-        "testlib/",
-        "/testlib/",
-        "test_lib/",
-        "/test_lib/",
-        "conftest",
-        "pytest.ini",
-        "jest.config",
-        "vitest.config",
-        ".test.",
-        "_test.",
-        ".spec.",
-        "_spec.",
-        ".test.ts",
-        ".test.js",
-        ".test.tsx",
-        ".test.jsx",
-        ".spec.ts",
-        ".spec.js",
-        ".spec.tsx",
-        ".spec.jsx",
-        "_test.go",
-        "_test.py",
-        "_test.rs",
-        "_test.java",
-        "_test.kt",
-        "_test.swift",
-        "_test.dart",
-        "test_",
-        "testcase",
-        "test_case",
-        "testhelper",
-        "test_helper",
-        "testutil",
-        "test_util",
-    ];
+    // Classify path using imported patterns
+    let path_is_test = path_matches_any(&path_str, PATH_TEST_INDICATORS);
+    let path_is_example = path_matches_any(&path_str, PATH_EXAMPLE_INDICATORS);
+    let path_is_impl =
+        path_matches_any(&path_str, PATH_IMPL_INDICATORS) && !path_is_test && !path_is_example;
 
-    let path_example_indicators = [
-        "examples/",
-        "/examples/",
-        "example/",
-        "/example/",
-        "samples/",
-        "/samples/",
-        "sample/",
-        "/sample/",
-        "demo/",
-        "/demo/",
-        "demos/",
-        "/demos/",
-        "playground/",
-        "/playground/",
-        "playgrounds/",
-        "/playgrounds/",
-        "sandbox/",
-        "/sandbox/",
-        "sandboxes/",
-        "/sandboxes/",
-        "scratch/",
-        "/scratch/",
-        "scratchpad/",
-        "/scratchpad/",
-        "tutorial/",
-        "/tutorial/",
-        "tutorials/",
-        "/tutorials/",
-        "tut/",
-        "/tut/",
-        "tuts/",
-        "/tuts/",
-        "example_",
-        "sample_",
-        "demo_",
-    ];
-
-    let path_impl_indicators = [
-        "/src/",
-        "/lib/",
-        "/pkg/",
-        "/internal/",
-        "/core/",
-        "/server/",
-        "/client/",
-        "/api/",
-        "/services/",
-        "src/",
-        "lib/",
-        "pkg/",
-        "internal/",
-        "core/",
-        "server/",
-        "client/",
-        "api/",
-        "services/",
-        "/app/",
-        "/apps/",
-        "/application/",
-        "/applications/",
-        "app/",
-        "apps/",
-        "application/",
-        "applications/",
-        "/components/",
-        "/modules/",
-        "/utils/",
-        "/utilities/",
-        "components/",
-        "modules/",
-        "utils/",
-        "utilities/",
-        "/common/",
-        "/shared/",
-        "/public/",
-        "/private/",
-        "common/",
-        "shared/",
-        "public/",
-        "private/",
-        "/main/",
-        "/java/",
-        "/scala/",
-        "/python/",
-        "main/",
-        "java/",
-        "scala/",
-        "python/",
-        "/include/",
-        "/headers/",
-        "/bin/",
-        "/scripts/",
-        "include/",
-        "headers/",
-        "bin/",
-        "scripts/",
-        "/domain/",
-        "/business/",
-        "/logic/",
-        "/model/",
-        "domain/",
-        "business/",
-        "logic/",
-        "model/",
-        "/controllers/",
-        "/views/",
-        "/models/",
-        "/routes/",
-        "controllers/",
-        "views/",
-        "models/",
-        "routes/",
-        "/handlers/",
-        "/middleware/",
-        "/providers/",
-        "/repositories/",
-        "handlers/",
-        "middleware/",
-        "providers/",
-        "repositories/",
-        "/entities/",
-        "/interfaces/",
-        "/types/",
-        "/schemas/",
-        "entities/",
-        "interfaces/",
-        "types/",
-        "schemas/",
-    ];
-
-    let path_is_test = path_test_indicators.iter().any(|p| path_str.contains(p));
-    let path_is_example = path_example_indicators.iter().any(|p| path_str.contains(p));
-    let path_is_impl = path_impl_indicators.iter().any(|p| path_str.contains(p))
-        && !path_is_test
-        && !path_is_example;
-
+    // Check for documentation files
     let ext = chunk
         .path
         .extension()
@@ -376,6 +147,7 @@ pub fn content_based_file_boost(chunk: &CodeChunk) -> f32 {
     let is_doc = matches!(ext.as_str(), "md" | "mdx" | "rst" | "txt" | "adoc");
     let is_error_doc = path_str.contains("/errors/");
 
+    // Calculate score based on file type
     let score = if is_doc {
         if is_error_doc {
             0.2
@@ -397,10 +169,7 @@ pub fn content_based_file_boost(chunk: &CodeChunk) -> f32 {
 
 pub fn directory_match_boost(chunk: &CodeChunk, query: &str) -> f32 {
     let path_str = chunk.path.to_string_lossy().to_lowercase();
-    let query_terms: Vec<&str> = query
-        .split_whitespace()
-        .filter(|w| w.len() >= 3)
-        .collect();
+    let query_terms: Vec<&str> = query.split_whitespace().filter(|w| w.len() >= 3).collect();
 
     let dirs: Vec<&str> = path_str
         .split('/')
@@ -667,7 +436,11 @@ mod tests {
     fn content_based_file_boost_error_docs() {
         let error_doc = make_chunk("Error guide", "markdown", "docs/errors/E001.md");
         let score = content_based_file_boost(&error_doc);
-        assert!(score > 0.1, "Error docs should have slightly higher boost: {}", score);
+        assert!(
+            score > 0.1,
+            "Error docs should have slightly higher boost: {}",
+            score
+        );
     }
 
     #[test]
@@ -681,7 +454,11 @@ mod tests {
     fn content_based_file_boost_example_files() {
         let example_chunk = make_chunk("fn main() {}", "rust", "examples/demo.rs");
         let score = content_based_file_boost(&example_chunk);
-        assert!(score < 0.5, "Example files should have low boost: {}", score);
+        assert!(
+            score < 0.5,
+            "Example files should have low boost: {}",
+            score
+        );
     }
 
     #[test]
@@ -695,7 +472,11 @@ mod tests {
     fn directory_match_boost_matches_dir() {
         let chunk = make_chunk("code", "rust", "src/graph/extractor.rs");
         let boost = directory_match_boost(&chunk, "graph extraction");
-        assert!(boost > 0.0, "Should boost for matching directory: {}", boost);
+        assert!(
+            boost > 0.0,
+            "Should boost for matching directory: {}",
+            boost
+        );
     }
 
     #[test]

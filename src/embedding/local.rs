@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex};
 #[cfg(not(test))]
 use std::time::Duration;
 
+use anyhow::Result;
 #[cfg(not(test))]
 use anyhow::{anyhow, Context};
-use anyhow::Result;
 #[cfg(not(test))]
 use fastembed::{InitOptionsUserDefined, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel};
 #[cfg(not(test))]
@@ -149,8 +149,7 @@ impl Embedder {
                 let mut truncated = embedding.clone();
                 truncated.truncate(DEFAULT_VECTOR_DIM);
                 results[idx] = truncated.clone();
-                self.cache
-                    .insert(texts[idx].clone(), Arc::new(truncated));
+                self.cache.insert(texts[idx].clone(), Arc::new(truncated));
             }
         }
 
@@ -339,22 +338,24 @@ fn download_file(url: &str, path: &std::path::Path, show_progress: bool) -> Resu
     }
 
     let agent = create_http_agent();
-    let response = agent.get(url)
-        .call()
-        .map_err(|e| {
-            let cache_dir = get_jina_code_cache_dir();
-            let files_list = super::MODEL_FILES.join(", ");
-            anyhow!(
-                "Failed to download {}: {}\n\n\
+    let response = agent.get(url).call().map_err(|e| {
+        let cache_dir = get_jina_code_cache_dir();
+        let files_list = super::MODEL_FILES.join(", ");
+        anyhow!(
+            "Failed to download {}: {}\n\n\
                 If HuggingFace is blocked in your region:\n\
                 1. Use proxy: export HTTPS_PROXY=http://proxy:port\n\
                 2. Manual download: Place files in {}\n\
                    Required: {}\n\n\
                 Run 'sgrep config --show-model-dir' to see the exact path.\n\
                 Download from: {}",
-                url, e, cache_dir.display(), files_list, super::MODEL_DOWNLOAD_URL
-            )
-        })?;
+            url,
+            e,
+            cache_dir.display(),
+            files_list,
+            super::MODEL_DOWNLOAD_URL
+        )
+    })?;
 
     let mut bytes = Vec::new();
     response.into_reader().read_to_end(&mut bytes)?;

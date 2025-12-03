@@ -277,24 +277,39 @@ mod tests {
 
     #[test]
     fn detect_language_rust() {
-        assert_eq!(detect_language_for_graph(Path::new("src/main.rs")), Some("rust"));
+        assert_eq!(
+            detect_language_for_graph(Path::new("src/main.rs")),
+            Some("rust")
+        );
     }
 
     #[test]
     fn detect_language_python() {
-        assert_eq!(detect_language_for_graph(Path::new("script.py")), Some("python"));
+        assert_eq!(
+            detect_language_for_graph(Path::new("script.py")),
+            Some("python")
+        );
     }
 
     #[test]
     fn detect_language_typescript() {
-        assert_eq!(detect_language_for_graph(Path::new("app.ts")), Some("typescript"));
+        assert_eq!(
+            detect_language_for_graph(Path::new("app.ts")),
+            Some("typescript")
+        );
         assert_eq!(detect_language_for_graph(Path::new("App.tsx")), Some("tsx"));
     }
 
     #[test]
     fn detect_language_javascript() {
-        assert_eq!(detect_language_for_graph(Path::new("app.js")), Some("javascript"));
-        assert_eq!(detect_language_for_graph(Path::new("App.jsx")), Some("javascript"));
+        assert_eq!(
+            detect_language_for_graph(Path::new("app.js")),
+            Some("javascript")
+        );
+        assert_eq!(
+            detect_language_for_graph(Path::new("App.jsx")),
+            Some("javascript")
+        );
     }
 
     #[test]
@@ -304,27 +319,45 @@ mod tests {
 
     #[test]
     fn detect_language_java() {
-        assert_eq!(detect_language_for_graph(Path::new("Main.java")), Some("java"));
+        assert_eq!(
+            detect_language_for_graph(Path::new("Main.java")),
+            Some("java")
+        );
     }
 
     #[test]
     fn detect_language_c_cpp() {
         assert_eq!(detect_language_for_graph(Path::new("main.c")), Some("c"));
         assert_eq!(detect_language_for_graph(Path::new("main.h")), Some("c"));
-        assert_eq!(detect_language_for_graph(Path::new("main.cpp")), Some("cpp"));
+        assert_eq!(
+            detect_language_for_graph(Path::new("main.cpp")),
+            Some("cpp")
+        );
         assert_eq!(detect_language_for_graph(Path::new("main.cc")), Some("cpp"));
-        assert_eq!(detect_language_for_graph(Path::new("main.cxx")), Some("cpp"));
-        assert_eq!(detect_language_for_graph(Path::new("main.hpp")), Some("cpp"));
+        assert_eq!(
+            detect_language_for_graph(Path::new("main.cxx")),
+            Some("cpp")
+        );
+        assert_eq!(
+            detect_language_for_graph(Path::new("main.hpp")),
+            Some("cpp")
+        );
     }
 
     #[test]
     fn detect_language_csharp() {
-        assert_eq!(detect_language_for_graph(Path::new("Program.cs")), Some("csharp"));
+        assert_eq!(
+            detect_language_for_graph(Path::new("Program.cs")),
+            Some("csharp")
+        );
     }
 
     #[test]
     fn detect_language_ruby() {
-        assert_eq!(detect_language_for_graph(Path::new("script.rb")), Some("ruby"));
+        assert_eq!(
+            detect_language_for_graph(Path::new("script.rb")),
+            Some("ruby")
+        );
     }
 
     #[test]

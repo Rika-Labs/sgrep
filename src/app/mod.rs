@@ -16,6 +16,32 @@ use crate::output::JsonResponse;
 use crate::threading::{CpuPreset, ThreadConfig};
 use crate::{indexer, search, store, watch};
 
+/// Parameters for executing a search operation.
+/// Consolidates the 8 search-related parameters into a single struct
+/// to improve readability and reduce function parameter count (KISS principle).
+pub struct SearchParams<'a> {
+    pub query: &'a str,
+    pub path: &'a Path,
+    pub limit: usize,
+    pub context: bool,
+    pub glob: Vec<String>,
+    pub filters: Vec<String>,
+    pub json: bool,
+    pub debug: bool,
+}
+
+/// Context needed to render search results.
+/// Consolidates the 7 render-related parameters into a single struct.
+pub struct RenderContext<'a> {
+    pub results: Vec<search::SearchResult>,
+    pub query: &'a str,
+    pub limit: usize,
+    pub index: &'a store::RepositoryIndex,
+    pub elapsed: Duration,
+    pub json: bool,
+    pub debug: bool,
+}
+
 pub fn run() -> Result<()> {
     setup_tracing();
     let cli = parse_cli();
@@ -54,7 +80,19 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             filters,
             json,
             debug,
-        } => handle_search(embedder, &query, &path, limit, context, glob, filters, json, debug),
+        } => handle_search(
+            embedder,
+            SearchParams {
+                query: &query,
+                path: &path,
+                limit,
+                context,
+                glob,
+                filters,
+                json,
+                debug,
+            },
+        ),
         Commands::Watch {
             path,
             debounce_ms,
@@ -258,33 +296,21 @@ fn handle_index(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn handle_search(
     embedder: Arc<dyn embedding::BatchEmbedder>,
-    query: &str,
-    path: &Path,
-    limit: usize,
-    context: bool,
-    glob: Vec<String>,
-    filters: Vec<String>,
-    json: bool,
-    debug: bool,
+    params: SearchParams<'_>,
 ) -> Result<()> {
     let start = Instant::now();
     let mut engine = search::SearchEngine::new(embedder.clone());
 
     if let Err(e) = engine.enable_query_expander_silent() {
-        if !json {
-            eprintln!(
-                "{} Query expander unavailable: {}",
-                style("⚠").yellow(),
-                e
-            );
+        if !params.json {
+            eprintln!("{} Query expander unavailable: {}", style("⚠").yellow(), e);
         }
     }
 
     // Try to load the code graph for hybrid search
-    let store_result = store::IndexStore::new(path)?;
+    let store_result = store::IndexStore::new(params.path)?;
     if let Ok(Some(graph)) = store_result.load_graph() {
         engine.set_graph(graph);
     }
@@ -294,37 +320,53 @@ fn handle_search(
         if mmap_index.metadata.vector_dim == embedder.dimension() {
             let results = engine.search_hybrid_mmap(
                 &mmap_index,
-                query,
+                params.query,
                 search::SearchOptions {
-                    limit,
-                    include_context: context,
-                    glob,
-                    filters,
+                    limit: params.limit,
+                    include_context: params.context,
+                    glob: params.glob.clone(),
+                    filters: params.filters.clone(),
                     rerank: false,
                 },
             )?;
             let elapsed = start.elapsed();
             let repo_index = mmap_index.to_repository_index();
-            return render_results(results, json, query, limit, &repo_index, elapsed, debug);
+            return render_results(RenderContext {
+                results,
+                query: params.query,
+                limit: params.limit,
+                index: &repo_index,
+                elapsed,
+                json: params.json,
+                debug: params.debug,
+            });
         }
     }
 
     // Fall back to standard loading
-    let index = load_or_index(path, embedder.clone())?;
+    let index = load_or_index(params.path, embedder.clone())?;
     let results = engine.search_hybrid(
         &index,
-        query,
+        params.query,
         search::SearchOptions {
-            limit,
-            include_context: context,
-            glob,
-            filters,
+            limit: params.limit,
+            include_context: params.context,
+            glob: params.glob,
+            filters: params.filters,
             rerank: false,
         },
     )?;
     let elapsed = start.elapsed();
 
-    render_results(results, json, query, limit, &index, elapsed, debug)
+    render_results(RenderContext {
+        results,
+        query: params.query,
+        limit: params.limit,
+        index: &index,
+        elapsed,
+        json: params.json,
+        debug: params.debug,
+    })
 }
 
 fn handle_watch(
@@ -440,23 +482,15 @@ fn parse_cli() -> Cli {
     Cli::parse()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_results(
-    results: Vec<search::SearchResult>,
-    json: bool,
-    query: &str,
-    limit: usize,
-    index: &store::RepositoryIndex,
-    elapsed: Duration,
-    debug: bool,
-) -> Result<()> {
-    if json {
-        let payload = JsonResponse::from_results(query, limit, results, index, elapsed);
+fn render_results(ctx: RenderContext<'_>) -> Result<()> {
+    if ctx.json {
+        let payload =
+            JsonResponse::from_results(ctx.query, ctx.limit, ctx.results, ctx.index, ctx.elapsed);
         println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else if results.is_empty() {
+    } else if ctx.results.is_empty() {
         println!("{} No matches found", style("⚠").yellow());
     } else {
-        for (idx, result) in results.iter().enumerate() {
+        for (idx, result) in ctx.results.iter().enumerate() {
             let header = format!(
                 "{}. {}:{}-{}",
                 idx + 1,
@@ -465,7 +499,7 @@ fn render_results(
                 result.chunk.end_line,
             );
             println!("{} {}", style("→").cyan(), style(header).bold());
-            if debug {
+            if ctx.debug {
                 println!(
                     "    score: {:.2} | semantic: {:.2} | bm25: {:.2}",
                     result.score, result.semantic_score, result.bm25_score
@@ -474,12 +508,12 @@ fn render_results(
             println!("{}", result.render_snippet());
             println!();
         }
-        if debug {
+        if ctx.debug {
             println!(
                 "{} {} results in {:?}",
                 style("ℹ").cyan(),
-                results.len(),
-                elapsed
+                ctx.results.len(),
+                ctx.elapsed
             );
         }
     }
@@ -659,15 +693,15 @@ mod tests {
     fn render_results_handles_empty_and_json() {
         let repo_root = Path::new("/tmp/render");
         let index = sample_index(repo_root);
-        render_results(
-            Vec::new(),
-            false,
-            "hello",
-            5,
-            &index,
-            Duration::from_millis(1),
-            false,
-        )
+        render_results(RenderContext {
+            results: Vec::new(),
+            query: "hello",
+            limit: 5,
+            index: &index,
+            elapsed: Duration::from_millis(1),
+            json: false,
+            debug: false,
+        })
         .unwrap();
 
         let chunk = CodeChunk {
@@ -687,15 +721,15 @@ mod tests {
             bm25_score: 0.0,
             show_full_context: false,
         };
-        render_results(
-            vec![result],
-            true,
-            "hello",
-            5,
-            &index,
-            Duration::from_millis(2),
-            false,
-        )
+        render_results(RenderContext {
+            results: vec![result],
+            query: "hello",
+            limit: 5,
+            index: &index,
+            elapsed: Duration::from_millis(2),
+            json: true,
+            debug: false,
+        })
         .unwrap();
     }
 
@@ -720,15 +754,15 @@ mod tests {
             bm25_score: 0.0,
             show_full_context: false,
         };
-        render_results(
-            vec![result],
-            false,
-            "hello world",
-            3,
-            &index,
-            Duration::from_millis(3),
-            false,
-        )
+        render_results(RenderContext {
+            results: vec![result],
+            query: "hello world",
+            limit: 3,
+            index: &index,
+            elapsed: Duration::from_millis(3),
+            json: false,
+            debug: false,
+        })
         .unwrap();
     }
 
@@ -950,5 +984,54 @@ mod tests {
 
         env::remove_var("FASTEMBED_CACHE_DIR");
         std::fs::remove_dir_all(&temp_cache).ok();
+    }
+
+    #[test]
+    fn search_params_consolidates_parameters() {
+        use std::path::Path;
+
+        // Test that SearchParams correctly holds all the search parameters
+        let params = super::SearchParams {
+            query: "test query",
+            path: Path::new("/test/path"),
+            limit: 10,
+            context: true,
+            glob: vec!["*.rs".to_string()],
+            filters: vec!["lang=rust".to_string()],
+            json: false,
+            debug: true,
+        };
+
+        assert_eq!(params.query, "test query");
+        assert_eq!(params.path, Path::new("/test/path"));
+        assert_eq!(params.limit, 10);
+        assert!(params.context);
+        assert_eq!(params.glob.len(), 1);
+        assert_eq!(params.filters.len(), 1);
+        assert!(!params.json);
+        assert!(params.debug);
+    }
+
+    #[test]
+    fn render_context_consolidates_parameters() {
+        let repo_root = Path::new("/tmp/render_context_test");
+        let index = sample_index(repo_root);
+
+        let ctx = super::RenderContext {
+            results: vec![],
+            query: "test",
+            limit: 5,
+            index: &index,
+            elapsed: Duration::from_millis(100),
+            json: true,
+            debug: false,
+        };
+
+        assert_eq!(ctx.query, "test");
+        assert_eq!(ctx.limit, 5);
+        assert!(ctx.results.is_empty());
+        assert_eq!(ctx.elapsed, Duration::from_millis(100));
+        assert!(ctx.json);
+        assert!(!ctx.debug);
     }
 }

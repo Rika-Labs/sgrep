@@ -90,11 +90,8 @@ pub fn stem_word(word: &str) -> String {
     let word = word.to_lowercase();
 
     let suffixes = [
-        "ization", "isation", "ation", "sion", "ion",
-        "ment", "ness", "able", "ible",
-        "ing", "ings",
-        "ier", "ors", "ers", "or", "er",
-        "ed", "es", "s",
+        "ization", "isation", "ation", "sion", "ion", "ment", "ness", "able", "ible", "ing",
+        "ings", "ier", "ors", "ers", "or", "er", "ed", "es", "s",
     ];
 
     for suffix in suffixes {

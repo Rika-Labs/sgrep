@@ -1,15 +1,6 @@
 use crate::store::MmapIndex;
 
-pub fn quantize_to_binary(vector: &[f32]) -> Vec<u64> {
-    let num_words = vector.len().div_ceil(64);
-    let mut binary = vec![0u64; num_words];
-    for (i, &val) in vector.iter().enumerate() {
-        if val > 0.0 {
-            binary[i / 64] |= 1u64 << (i % 64);
-        }
-    }
-    binary
-}
+pub use crate::store::quantize_to_binary;
 
 pub fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
     a.iter()
@@ -61,6 +52,14 @@ pub fn binary_shortlist_precomputed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quantize_to_binary_reexport_matches_original() {
+        let vector = vec![1.0, -0.5, 0.3, -0.1, 0.0, 0.001];
+        let from_reexport = quantize_to_binary(&vector);
+        let from_original = crate::store::quantize_to_binary(&vector);
+        assert_eq!(from_reexport, from_original);
+    }
 
     #[test]
     fn quantize_to_binary_sets_bits_for_positive_values() {
