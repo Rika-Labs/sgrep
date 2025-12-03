@@ -25,6 +25,8 @@ use once_cell::sync::Lazy;
 #[cfg(not(test))]
 use ort::execution_providers::ExecutionProviderDispatch;
 #[cfg(not(test))]
+use tracing::info;
+#[cfg(not(test))]
 use ureq::{Agent, AgentBuilder, Proxy};
 
 #[cfg(not(test))]
@@ -98,12 +100,19 @@ impl Embedder {
                 .unwrap_or(super::DEFAULT_INIT_TIMEOUT_SECS),
         );
 
+        info!(
+            timeout_secs = init_timeout.as_secs(),
+            "Initializing embedding model"
+        );
+
         let model =
             init_model_with_timeout(execution_providers, show_download_progress, init_timeout)
                 .expect(
                     "Failed to initialize embedding model (try increasing SGREP_INIT_TIMEOUT_SECS)",
                 );
         drop(_cache_guard);
+
+        info!("Embedding model initialized");
 
         Self {
             cache: Cache::builder().max_capacity(max_cache).build(),
@@ -217,10 +226,18 @@ impl PooledEmbedder {
                 .unwrap_or(super::DEFAULT_INIT_TIMEOUT_SECS),
         );
 
+        info!(
+            pool_size = pool_size,
+            timeout_secs = init_timeout.as_secs(),
+            "Initializing embedder pool"
+        );
+
         let mut pool = Vec::with_capacity(pool_size);
         let cache = Cache::builder().max_capacity(max_cache).build();
 
         for i in 0..pool_size {
+            info!(instance = i + 1, total = pool_size, "Loading model instance");
+
             let _init_guard = INIT_LOCK.lock().unwrap();
             let _cache_guard = setup_fastembed_cache_dir();
 
@@ -240,6 +257,8 @@ impl PooledEmbedder {
             };
             pool.push(embedder);
         }
+
+        info!(pool_size = pool_size, "Embedder pool ready");
 
         Self {
             pool,
