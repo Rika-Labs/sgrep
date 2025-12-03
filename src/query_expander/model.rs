@@ -121,14 +121,6 @@ impl QueryAnalysis {
         }
     }
 
-    /// Convert query_type string to QueryType enum.
-    pub fn to_query_type(&self) -> crate::graph::QueryType {
-        match self.query_type.as_str() {
-            "structural" => crate::graph::QueryType::Structural,
-            "semantic" => crate::graph::QueryType::Semantic,
-            _ => crate::graph::QueryType::Hybrid,
-        }
-    }
 }
 
 /// Query expander using Qwen2.5 model via llama.cpp.

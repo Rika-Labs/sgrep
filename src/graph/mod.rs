@@ -3,7 +3,6 @@ mod query;
 mod symbols;
 
 pub use extractor::SymbolExtractor;
-pub use query::QueryType;
 pub use symbols::{Edge, EdgeKind, ImportRelation, Symbol, SymbolKind};
 
 use std::collections::{HashMap, HashSet};

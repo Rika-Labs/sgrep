@@ -1,58 +1,19 @@
-use chrono::Utc;
 use simsimd::SpatialSimilarity;
 
-use crate::chunker::CodeChunk;
-
-pub const RECENCY_HALF_LIFE_HOURS: f32 = 48.0;
-
-pub const MIN_SEMANTIC_WEIGHT: f32 = 0.65;
+use super::SearchResult;
 
 #[derive(Clone, Copy)]
 pub struct AdaptiveWeights {
     pub semantic: f32,
     pub bm25: f32,
-    pub recency: f32,
 }
 
 impl AdaptiveWeights {
+    #[allow(unused_variables)]
     pub fn from_query(query: &str) -> Self {
-        let word_count = query.split_whitespace().count();
-        let query_lower = query.to_lowercase();
-
-        let is_short = word_count <= 2;
-        let is_question = query_lower.starts_with("how ")
-            || query_lower.starts_with("where ")
-            || query_lower.starts_with("what ")
-            || query_lower.starts_with("why ")
-            || query_lower.starts_with("when ")
-            || query_lower.starts_with("which ");
-        let has_code_symbols = query.chars().any(|c| "(){}[]<>::->=>".contains(c));
-
-        let mut semantic = 0.70;
-        let mut bm25 = 0.25;
-        let recency = 0.05;
-
-        if is_question {
-            semantic += 0.05;
-            bm25 -= 0.05;
-        }
-
-        if is_short || has_code_symbols {
-            bm25 += 0.05;
-            semantic -= 0.05;
-        }
-
-        if semantic < MIN_SEMANTIC_WEIGHT {
-            let deficit = MIN_SEMANTIC_WEIGHT - semantic;
-            semantic = MIN_SEMANTIC_WEIGHT;
-            bm25 = (bm25 - deficit).max(0.05);
-        }
-
-        let total = semantic + bm25 + recency;
         Self {
-            semantic: semantic / total,
-            bm25: bm25 / total,
-            recency: recency / total,
+            semantic: 0.85,
+            bm25: 0.15,
         }
     }
 }
@@ -74,11 +35,6 @@ pub fn cosine_similarity_scalar(lhs: &[f32], rhs: &[f32]) -> f32 {
     (dot / (norm_l * norm_r)).clamp(-1.0, 1.0)
 }
 
-pub fn recency_boost(chunk: &CodeChunk) -> f32 {
-    let age_hours = (Utc::now() - chunk.modified_at).num_hours().max(0) as f32;
-    1.0 / (1.0 + age_hours / RECENCY_HALF_LIFE_HOURS)
-}
-
 pub fn normalize_bm25_scores(scores: &[f32]) -> Vec<f32> {
     if scores.is_empty() {
         return vec![];
@@ -97,105 +53,6 @@ pub fn normalize_bm25_scores(scores: &[f32]) -> Vec<f32> {
         .map(|&s| ((s - min_score) / range).clamp(0.0, 1.0))
         .collect()
 }
-
-pub fn directory_match_boost(chunk: &CodeChunk, query: &str) -> f32 {
-    let path_str = chunk.path.to_string_lossy().to_lowercase();
-    let query_terms: Vec<&str> = query.split_whitespace().filter(|w| w.len() >= 3).collect();
-
-    let dirs: Vec<&str> = path_str
-        .split('/')
-        .filter(|s| !s.is_empty() && !s.contains('.'))
-        .collect();
-
-    let mut boost: f32 = 0.0;
-    for term in &query_terms {
-        let term_lower = term.to_lowercase();
-        for dir in &dirs {
-            if dir.contains(&term_lower) || term_lower.contains(dir) {
-                boost += 0.15;
-            }
-        }
-    }
-
-    boost.min(0.3)
-}
-
-pub fn reexport_file_penalty(chunk: &CodeChunk) -> f32 {
-    let filename = chunk
-        .path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("");
-
-    let is_reexport_file = filename == "mod.rs"
-        || filename == "index.ts"
-        || filename == "index.js"
-        || filename == "index.tsx"
-        || filename == "index.jsx"
-        || filename == "__init__.py";
-
-    if is_reexport_file {
-        -0.25
-    } else {
-        0.0
-    }
-}
-
-use crate::fts::stem_word;
-
-pub fn filename_match_boost(chunk: &CodeChunk, query: &str) -> f32 {
-    let filename = chunk
-        .path
-        .file_stem()
-        .and_then(|f| f.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let filename_stemmed = stem_word(&filename);
-
-    let query_terms: Vec<String> = query
-        .split_whitespace()
-        .filter(|w| w.len() >= 3)
-        .map(|w| stem_word(&w.to_lowercase()))
-        .collect();
-
-    let mut boost: f32 = 0.0;
-    for term in &query_terms {
-        if filename_stemmed.contains(term) || term.contains(&filename_stemmed) {
-            boost += 0.25;
-        } else if filename.contains(term) || term.contains(&filename) {
-            boost += 0.20;
-        }
-    }
-
-    boost.min(0.35)
-}
-
-use crate::graph::{CodeGraph, SymbolKind};
-
-pub fn implementation_boost(chunk: &CodeChunk, graph: Option<&CodeGraph>) -> f32 {
-    let graph = match graph {
-        Some(g) => g,
-        None => return 0.0,
-    };
-
-    let symbols = graph.symbols_in_file(&chunk.path);
-    let mut boost = 0.0f32;
-
-    for symbol in &symbols {
-        if symbol.start_line >= chunk.start_line && symbol.start_line <= chunk.end_line {
-            boost += match symbol.kind {
-                SymbolKind::Function | SymbolKind::Method => 0.12,
-                SymbolKind::Struct | SymbolKind::Class => 0.15,
-                SymbolKind::Trait | SymbolKind::Interface => 0.12,
-                _ => 0.08,
-            };
-        }
-    }
-
-    boost.clamp(0.0, 0.25)
-}
-
-use super::SearchResult;
 
 pub fn select_top_k(matches: &mut Vec<SearchResult>, k: usize) {
     if matches.len() > k {
@@ -220,21 +77,6 @@ pub fn sort_by_score(matches: &mut [SearchResult]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use uuid::Uuid;
-
-    fn make_chunk(text: &str, language: &str, path: &str) -> CodeChunk {
-        CodeChunk {
-            id: Uuid::new_v4(),
-            path: PathBuf::from(path),
-            language: language.to_string(),
-            start_line: 1,
-            end_line: 10,
-            text: text.to_string(),
-            hash: "test_hash".to_string(),
-            modified_at: Utc::now(),
-        }
-    }
 
     #[test]
     fn identical_vectors_have_similarity_one() {
@@ -261,20 +103,6 @@ mod tests {
         let zero = vec![0.0, 0.0, 0.0];
         let nonzero = vec![1.0, 0.0, 0.0];
         assert_eq!(cosine_similarity(&zero, &nonzero), 0.0);
-    }
-
-    #[test]
-    fn recency_boost_decays_over_time() {
-        let recent = make_chunk("test", "rust", "test.rs");
-        let mut old = make_chunk("test", "rust", "test.rs");
-        old.modified_at = Utc::now() - chrono::Duration::days(30);
-
-        let recent_boost = recency_boost(&recent);
-        let old_boost = recency_boost(&old);
-
-        assert!(recent_boost > old_boost);
-        assert!(recent_boost <= 1.0);
-        assert!(old_boost > 0.0);
     }
 
     #[test]
@@ -315,111 +143,16 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_weights_semantic_always_dominant_default() {
-        let weights = AdaptiveWeights::from_query("find authentication logic");
-        assert!(weights.semantic >= MIN_SEMANTIC_WEIGHT);
-        assert!(weights.semantic > weights.bm25);
-    }
-
-    #[test]
-    fn adaptive_weights_semantic_always_dominant_short_query() {
-        let weights = AdaptiveWeights::from_query("HashMap");
-        assert!(weights.semantic >= MIN_SEMANTIC_WEIGHT);
-        assert!(weights.semantic > weights.bm25);
-    }
-
-    #[test]
-    fn adaptive_weights_semantic_always_dominant_code_symbols() {
-        let weights = AdaptiveWeights::from_query("fn()");
-        assert!(weights.semantic >= MIN_SEMANTIC_WEIGHT);
-        assert!(weights.semantic > weights.bm25);
-    }
-
-    #[test]
-    fn adaptive_weights_semantic_always_dominant_short_with_code() {
-        let weights = AdaptiveWeights::from_query("Vec<T>");
-        assert!(weights.semantic >= MIN_SEMANTIC_WEIGHT);
-        assert!(weights.semantic > weights.bm25);
-    }
-
-    #[test]
-    fn adaptive_weights_question_boosts_semantic() {
-        let question = AdaptiveWeights::from_query("how does authentication work");
-        let normal = AdaptiveWeights::from_query("authentication implementation");
-        assert!(question.semantic > normal.semantic);
+    fn adaptive_weights_are_fixed() {
+        let weights = AdaptiveWeights::from_query("any query");
+        assert!((weights.semantic - 0.85).abs() < 1e-6);
+        assert!((weights.bm25 - 0.15).abs() < 1e-6);
     }
 
     #[test]
     fn adaptive_weights_sum_to_one() {
         let weights = AdaptiveWeights::from_query("test query");
-        let sum = weights.semantic + weights.bm25 + weights.recency;
+        let sum = weights.semantic + weights.bm25;
         assert!((sum - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn directory_match_boost_matches_dir() {
-        let chunk = make_chunk("code", "rust", "src/graph/extractor.rs");
-        let boost = directory_match_boost(&chunk, "graph extraction");
-        assert!(
-            boost > 0.0,
-            "Should boost for matching directory: {}",
-            boost
-        );
-    }
-
-    #[test]
-    fn directory_match_boost_no_match() {
-        let chunk = make_chunk("code", "rust", "src/auth/login.rs");
-        let boost = directory_match_boost(&chunk, "graph extraction");
-        assert_eq!(boost, 0.0, "Should not boost for non-matching directory");
-    }
-
-    #[test]
-    fn reexport_file_penalty_mod_rs() {
-        let mod_chunk = make_chunk("pub mod auth;", "rust", "src/mod.rs");
-        let penalty = reexport_file_penalty(&mod_chunk);
-        assert!(penalty < 0.0, "mod.rs should have penalty: {}", penalty);
-    }
-
-    #[test]
-    fn reexport_file_penalty_index_ts() {
-        let index_chunk = make_chunk("export * from './auth'", "typescript", "src/index.ts");
-        let penalty = reexport_file_penalty(&index_chunk);
-        assert!(penalty < 0.0, "index.ts should have penalty: {}", penalty);
-    }
-
-    #[test]
-    fn reexport_file_penalty_normal_file() {
-        let normal_chunk = make_chunk("fn auth() {}", "rust", "src/auth.rs");
-        let penalty = reexport_file_penalty(&normal_chunk);
-        assert_eq!(penalty, 0.0, "Normal files should have no penalty");
-    }
-
-    #[test]
-    fn filename_match_boost_exact_match() {
-        let chunk = make_chunk("code", "rust", "src/scoring.rs");
-        let boost = filename_match_boost(&chunk, "scoring function");
-        assert!(boost > 0.0, "Should boost for filename match: {}", boost);
-    }
-
-    #[test]
-    fn filename_match_boost_stemmed_match() {
-        let chunk = make_chunk("code", "rust", "src/extractor.rs");
-        let boost = filename_match_boost(&chunk, "extraction logic");
-        assert!(boost > 0.0, "Should boost for stemmed match: {}", boost);
-    }
-
-    #[test]
-    fn filename_match_boost_no_match() {
-        let chunk = make_chunk("code", "rust", "src/auth.rs");
-        let boost = filename_match_boost(&chunk, "scoring function");
-        assert_eq!(boost, 0.0, "Should not boost for non-matching filename");
-    }
-
-    #[test]
-    fn implementation_boost_without_graph() {
-        let chunk = make_chunk("fn test() {}", "rust", "src/test.rs");
-        let boost = implementation_boost(&chunk, None);
-        assert_eq!(boost, 0.0, "Should return 0 without graph");
     }
 }
