@@ -1,10 +1,6 @@
 use chrono::Utc;
 use simsimd::SpatialSimilarity;
 
-use super::file_patterns::{
-    count_test_terms, path_matches_any, PATH_EXAMPLE_INDICATORS, PATH_IMPL_INDICATORS,
-    PATH_TEST_INDICATORS,
-};
 use crate::chunker::CodeChunk;
 
 pub const RECENCY_HALF_LIFE_HOURS: f32 = 48.0;
@@ -110,61 +106,34 @@ pub fn normalize_bm25_scores(scores: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-/// Calculates a file-type based boost for search scoring.
-///
-/// This function uses patterns from the `file_patterns` module to classify
-/// files as test, example, implementation, or documentation, and assigns
-/// appropriate boost values.
-///
-/// # Returns
-/// A score between 0.05 and 1.0:
-/// - Implementation files: 0.7 - 1.0
-/// - Example files: 0.2
-/// - Test files: 0.1
-/// - Documentation files: 0.1 - 0.2
+/// Returns a file-type boost based on simple heuristics.
+/// Test/doc files get lower scores; source files get higher scores.
 pub fn content_based_file_boost(chunk: &CodeChunk) -> f32 {
-    let content_lower = chunk.text.to_lowercase();
     let path_str = chunk.path.to_string_lossy().to_lowercase();
-    let word_count = chunk.text.split_whitespace().count().max(1) as f32;
-
-    // Use patterns from file_patterns module
-    let test_term_count = count_test_terms(&content_lower);
-    let content_test_density = (test_term_count as f32 / word_count).min(0.3);
-
-    // Classify path using imported patterns
-    let path_is_test = path_matches_any(&path_str, PATH_TEST_INDICATORS);
-    let path_is_example = path_matches_any(&path_str, PATH_EXAMPLE_INDICATORS);
-    let path_is_impl =
-        path_matches_any(&path_str, PATH_IMPL_INDICATORS) && !path_is_test && !path_is_example;
-
-    // Check for documentation files
     let ext = chunk
         .path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let is_doc = matches!(ext.as_str(), "md" | "mdx" | "rst" | "txt" | "adoc");
-    let is_error_doc = path_str.contains("/errors/");
 
-    // Calculate score based on file type
-    let score = if is_doc {
-        if is_error_doc {
-            0.2
-        } else {
-            0.1
-        }
-    } else if path_is_test {
-        0.1
-    } else if path_is_example {
-        0.2
-    } else if path_is_impl {
-        1.0 - (content_test_density * 0.3)
-    } else {
-        0.6 - (content_test_density * 0.3)
-    };
+    // Documentation files
+    if matches!(ext.as_str(), "md" | "mdx" | "rst" | "txt" | "adoc") {
+        return 0.15;
+    }
 
-    score.clamp(0.05, 1.0)
+    // Test files (simple heuristics)
+    if path_str.contains("test") || path_str.contains("spec") {
+        return 0.2;
+    }
+
+    // Example/demo files
+    if path_str.contains("example") || path_str.contains("demo") {
+        return 0.3;
+    }
+
+    // Default: treat as implementation
+    0.7
 }
 
 pub fn directory_match_boost(chunk: &CodeChunk, query: &str) -> f32 {

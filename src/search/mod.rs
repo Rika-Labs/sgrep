@@ -1,6 +1,5 @@
 mod binary;
 pub mod config;
-pub mod file_patterns;
 mod graph_hybrid;
 mod hnsw;
 mod results;
