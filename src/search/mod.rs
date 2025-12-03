@@ -29,9 +29,8 @@ use config::{
 use graph_hybrid::{apply_graph_boost, search_graph_only};
 use hnsw::{build_hnsw_index, search_hnsw_candidates};
 use scoring::{
-    content_based_file_boost, directory_match_boost, filename_match_boost, implementation_boost,
-    normalize_bm25_scores, recency_boost, reexport_file_penalty, select_top_k,
-    AdaptiveWeights as Weights,
+    directory_match_boost, filename_match_boost, implementation_boost, normalize_bm25_scores,
+    recency_boost, reexport_file_penalty, select_top_k, AdaptiveWeights as Weights,
 };
 
 /// Build a BM25F index from chunks with optional symbol information.
@@ -758,7 +757,6 @@ impl SearchEngine {
     ) -> SearchResult {
         let semantic = cosine_similarity(query_vec, vector);
         let recency = recency_boost(chunk);
-        let file_type = content_based_file_boost(chunk);
         let dir_match = directory_match_boost(chunk, query);
         let reexport_penalty = reexport_file_penalty(chunk);
         let impl_boost = implementation_boost(chunk, self.graph.as_ref());
@@ -767,7 +765,6 @@ impl SearchEngine {
         let score = weights.semantic * semantic
             + weights.bm25 * bm25_normalized
             + weights.recency * recency
-            + weights.file_type * file_type
             + dir_match
             + reexport_penalty
             + impl_boost

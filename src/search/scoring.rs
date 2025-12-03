@@ -12,7 +12,6 @@ pub struct AdaptiveWeights {
     pub semantic: f32,
     pub bm25: f32,
     pub recency: f32,
-    pub file_type: f32,
 }
 
 impl AdaptiveWeights {
@@ -29,24 +28,18 @@ impl AdaptiveWeights {
             || query_lower.starts_with("which ");
         let has_code_symbols = query.chars().any(|c| "(){}[]<>::->=>".contains(c));
 
-        let mut semantic = 0.65;
-        let mut bm25 = 0.15;
+        let mut semantic = 0.70;
+        let mut bm25 = 0.25;
         let recency = 0.05;
-        let mut file_type = 0.15;
 
         if is_question {
             semantic += 0.05;
             bm25 -= 0.05;
         }
 
-        if is_short {
+        if is_short || has_code_symbols {
             bm25 += 0.05;
-            file_type -= 0.05;
-        }
-
-        if has_code_symbols {
-            bm25 += 0.05;
-            file_type -= 0.05;
+            semantic -= 0.05;
         }
 
         if semantic < MIN_SEMANTIC_WEIGHT {
@@ -55,12 +48,11 @@ impl AdaptiveWeights {
             bm25 = (bm25 - deficit).max(0.05);
         }
 
-        let total = semantic + bm25 + recency + file_type;
+        let total = semantic + bm25 + recency;
         Self {
             semantic: semantic / total,
             bm25: bm25 / total,
             recency: recency / total,
-            file_type: file_type / total,
         }
     }
 }
@@ -104,36 +96,6 @@ pub fn normalize_bm25_scores(scores: &[f32]) -> Vec<f32> {
         .iter()
         .map(|&s| ((s - min_score) / range).clamp(0.0, 1.0))
         .collect()
-}
-
-/// Returns a file-type boost based on simple heuristics.
-/// Test/doc files get lower scores; source files get higher scores.
-pub fn content_based_file_boost(chunk: &CodeChunk) -> f32 {
-    let path_str = chunk.path.to_string_lossy().to_lowercase();
-    let ext = chunk
-        .path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    // Documentation files
-    if matches!(ext.as_str(), "md" | "mdx" | "rst" | "txt" | "adoc") {
-        return 0.15;
-    }
-
-    // Test files (simple heuristics)
-    if path_str.contains("test") || path_str.contains("spec") {
-        return 0.2;
-    }
-
-    // Example/demo files
-    if path_str.contains("example") || path_str.contains("demo") {
-        return 0.3;
-    }
-
-    // Default: treat as implementation
-    0.7
 }
 
 pub fn directory_match_boost(chunk: &CodeChunk, query: &str) -> f32 {
@@ -390,51 +352,8 @@ mod tests {
     #[test]
     fn adaptive_weights_sum_to_one() {
         let weights = AdaptiveWeights::from_query("test query");
-        let sum = weights.semantic + weights.bm25 + weights.recency + weights.file_type;
+        let sum = weights.semantic + weights.bm25 + weights.recency;
         assert!((sum - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn content_based_file_boost_doc_files() {
-        let doc_chunk = make_chunk("# README", "markdown", "docs/README.md");
-        let score = content_based_file_boost(&doc_chunk);
-        assert!(score < 0.5, "Doc files should have low boost: {}", score);
-    }
-
-    #[test]
-    fn content_based_file_boost_error_docs() {
-        let error_doc = make_chunk("Error guide", "markdown", "docs/errors/E001.md");
-        let score = content_based_file_boost(&error_doc);
-        assert!(
-            score > 0.1,
-            "Error docs should have slightly higher boost: {}",
-            score
-        );
-    }
-
-    #[test]
-    fn content_based_file_boost_test_files() {
-        let test_chunk = make_chunk("assert!(true)", "rust", "tests/test_auth.rs");
-        let score = content_based_file_boost(&test_chunk);
-        assert!(score < 0.5, "Test files should have low boost: {}", score);
-    }
-
-    #[test]
-    fn content_based_file_boost_example_files() {
-        let example_chunk = make_chunk("fn main() {}", "rust", "examples/demo.rs");
-        let score = content_based_file_boost(&example_chunk);
-        assert!(
-            score < 0.5,
-            "Example files should have low boost: {}",
-            score
-        );
-    }
-
-    #[test]
-    fn content_based_file_boost_impl_files() {
-        let impl_chunk = make_chunk("fn authenticate() {}", "rust", "src/auth.rs");
-        let score = content_based_file_boost(&impl_chunk);
-        assert!(score > 0.5, "Impl files should have high boost: {}", score);
     }
 
     #[test]
