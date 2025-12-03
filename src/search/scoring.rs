@@ -12,7 +12,6 @@ pub struct AdaptiveWeights {
     pub semantic: f32,
     pub bm25: f32,
     pub recency: f32,
-    pub file_type: f32,
 }
 
 impl AdaptiveWeights {
@@ -29,24 +28,18 @@ impl AdaptiveWeights {
             || query_lower.starts_with("which ");
         let has_code_symbols = query.chars().any(|c| "(){}[]<>::->=>".contains(c));
 
-        let mut semantic = 0.65;
-        let mut bm25 = 0.15;
+        let mut semantic = 0.70;
+        let mut bm25 = 0.25;
         let recency = 0.05;
-        let mut file_type = 0.15;
 
         if is_question {
             semantic += 0.05;
             bm25 -= 0.05;
         }
 
-        if is_short {
+        if is_short || has_code_symbols {
             bm25 += 0.05;
-            file_type -= 0.05;
-        }
-
-        if has_code_symbols {
-            bm25 += 0.05;
-            file_type -= 0.05;
+            semantic -= 0.05;
         }
 
         if semantic < MIN_SEMANTIC_WEIGHT {
@@ -55,12 +48,11 @@ impl AdaptiveWeights {
             bm25 = (bm25 - deficit).max(0.05);
         }
 
-        let total = semantic + bm25 + recency + file_type;
+        let total = semantic + bm25 + recency;
         Self {
             semantic: semantic / total,
             bm25: bm25 / total,
             recency: recency / total,
-            file_type: file_type / total,
         }
     }
 }
@@ -106,301 +98,9 @@ pub fn normalize_bm25_scores(scores: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-pub fn content_based_file_boost(chunk: &CodeChunk) -> f32 {
-    let content_lower = chunk.text.to_lowercase();
-    let path_str = chunk.path.to_string_lossy().to_lowercase();
-    let word_count = chunk.text.split_whitespace().count().max(1) as f32;
-
-    let test_content_patterns = [
-        "assert",
-        "expect(",
-        ".tobe(",
-        ".toequal(",
-        "should.",
-        "mock",
-        "stub",
-        "fake",
-        "fixture",
-        "beforeeach",
-        "aftereach",
-        "beforeall",
-        "afterall",
-        "describe(",
-        "it(\"",
-        "it('",
-        "test(\"",
-        "test('",
-        "@test",
-        "#[test]",
-        "def test_",
-        "func test",
-    ];
-
-    let test_term_count: usize = test_content_patterns
-        .iter()
-        .map(|p| content_lower.matches(p).count())
-        .sum();
-
-    let content_test_density = (test_term_count as f32 / word_count).min(0.3);
-
-    let path_test_indicators = [
-        "test/",
-        "/test/",
-        "tests/",
-        "/tests/",
-        "__tests__/",
-        "/__tests__/",
-        "spec/",
-        "/spec/",
-        "specs/",
-        "/specs/",
-        "fixture/",
-        "/fixture/",
-        "fixtures/",
-        "/fixtures/",
-        "__testfixtures__/",
-        "/__testfixtures__/",
-        "testfixtures/",
-        "/testfixtures/",
-        "testdata/",
-        "/testdata/",
-        "test_data/",
-        "/test_data/",
-        "mock/",
-        "/mock/",
-        "mocks/",
-        "/mocks/",
-        "e2e/",
-        "/e2e/",
-        "integration/",
-        "/integration/",
-        "unit/",
-        "/unit/",
-        "unit_test/",
-        "/unit_test/",
-        "test_utils/",
-        "/test_utils/",
-        "testutils/",
-        "/testutils/",
-        "test_helpers/",
-        "/test_helpers/",
-        "testhelpers/",
-        "/testhelpers/",
-        "test_support/",
-        "/test_support/",
-        "testsupport/",
-        "/testsupport/",
-        "test_common/",
-        "/test_common/",
-        "testcommon/",
-        "/testcommon/",
-        "testlib/",
-        "/testlib/",
-        "test_lib/",
-        "/test_lib/",
-        "conftest",
-        "pytest.ini",
-        "jest.config",
-        "vitest.config",
-        ".test.",
-        "_test.",
-        ".spec.",
-        "_spec.",
-        ".test.ts",
-        ".test.js",
-        ".test.tsx",
-        ".test.jsx",
-        ".spec.ts",
-        ".spec.js",
-        ".spec.tsx",
-        ".spec.jsx",
-        "_test.go",
-        "_test.py",
-        "_test.rs",
-        "_test.java",
-        "_test.kt",
-        "_test.swift",
-        "_test.dart",
-        "test_",
-        "testcase",
-        "test_case",
-        "testhelper",
-        "test_helper",
-        "testutil",
-        "test_util",
-    ];
-
-    let path_example_indicators = [
-        "examples/",
-        "/examples/",
-        "example/",
-        "/example/",
-        "samples/",
-        "/samples/",
-        "sample/",
-        "/sample/",
-        "demo/",
-        "/demo/",
-        "demos/",
-        "/demos/",
-        "playground/",
-        "/playground/",
-        "playgrounds/",
-        "/playgrounds/",
-        "sandbox/",
-        "/sandbox/",
-        "sandboxes/",
-        "/sandboxes/",
-        "scratch/",
-        "/scratch/",
-        "scratchpad/",
-        "/scratchpad/",
-        "tutorial/",
-        "/tutorial/",
-        "tutorials/",
-        "/tutorials/",
-        "tut/",
-        "/tut/",
-        "tuts/",
-        "/tuts/",
-        "example_",
-        "sample_",
-        "demo_",
-    ];
-
-    let path_impl_indicators = [
-        "/src/",
-        "/lib/",
-        "/pkg/",
-        "/internal/",
-        "/core/",
-        "/server/",
-        "/client/",
-        "/api/",
-        "/services/",
-        "src/",
-        "lib/",
-        "pkg/",
-        "internal/",
-        "core/",
-        "server/",
-        "client/",
-        "api/",
-        "services/",
-        "/app/",
-        "/apps/",
-        "/application/",
-        "/applications/",
-        "app/",
-        "apps/",
-        "application/",
-        "applications/",
-        "/components/",
-        "/modules/",
-        "/utils/",
-        "/utilities/",
-        "components/",
-        "modules/",
-        "utils/",
-        "utilities/",
-        "/common/",
-        "/shared/",
-        "/public/",
-        "/private/",
-        "common/",
-        "shared/",
-        "public/",
-        "private/",
-        "/main/",
-        "/java/",
-        "/scala/",
-        "/python/",
-        "main/",
-        "java/",
-        "scala/",
-        "python/",
-        "/include/",
-        "/headers/",
-        "/bin/",
-        "/scripts/",
-        "include/",
-        "headers/",
-        "bin/",
-        "scripts/",
-        "/domain/",
-        "/business/",
-        "/logic/",
-        "/model/",
-        "domain/",
-        "business/",
-        "logic/",
-        "model/",
-        "/controllers/",
-        "/views/",
-        "/models/",
-        "/routes/",
-        "controllers/",
-        "views/",
-        "models/",
-        "routes/",
-        "/handlers/",
-        "/middleware/",
-        "/providers/",
-        "/repositories/",
-        "handlers/",
-        "middleware/",
-        "providers/",
-        "repositories/",
-        "/entities/",
-        "/interfaces/",
-        "/types/",
-        "/schemas/",
-        "entities/",
-        "interfaces/",
-        "types/",
-        "schemas/",
-    ];
-
-    let path_is_test = path_test_indicators.iter().any(|p| path_str.contains(p));
-    let path_is_example = path_example_indicators.iter().any(|p| path_str.contains(p));
-    let path_is_impl = path_impl_indicators.iter().any(|p| path_str.contains(p))
-        && !path_is_test
-        && !path_is_example;
-
-    let ext = chunk
-        .path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let is_doc = matches!(ext.as_str(), "md" | "mdx" | "rst" | "txt" | "adoc");
-    let is_error_doc = path_str.contains("/errors/");
-
-    let score = if is_doc {
-        if is_error_doc {
-            0.2
-        } else {
-            0.1
-        }
-    } else if path_is_test {
-        0.1
-    } else if path_is_example {
-        0.2
-    } else if path_is_impl {
-        1.0 - (content_test_density * 0.3)
-    } else {
-        0.6 - (content_test_density * 0.3)
-    };
-
-    score.clamp(0.05, 1.0)
-}
-
 pub fn directory_match_boost(chunk: &CodeChunk, query: &str) -> f32 {
     let path_str = chunk.path.to_string_lossy().to_lowercase();
-    let query_terms: Vec<&str> = query
-        .split_whitespace()
-        .filter(|w| w.len() >= 3)
-        .collect();
+    let query_terms: Vec<&str> = query.split_whitespace().filter(|w| w.len() >= 3).collect();
 
     let dirs: Vec<&str> = path_str
         .split('/')
@@ -652,50 +352,19 @@ mod tests {
     #[test]
     fn adaptive_weights_sum_to_one() {
         let weights = AdaptiveWeights::from_query("test query");
-        let sum = weights.semantic + weights.bm25 + weights.recency + weights.file_type;
+        let sum = weights.semantic + weights.bm25 + weights.recency;
         assert!((sum - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn content_based_file_boost_doc_files() {
-        let doc_chunk = make_chunk("# README", "markdown", "docs/README.md");
-        let score = content_based_file_boost(&doc_chunk);
-        assert!(score < 0.5, "Doc files should have low boost: {}", score);
-    }
-
-    #[test]
-    fn content_based_file_boost_error_docs() {
-        let error_doc = make_chunk("Error guide", "markdown", "docs/errors/E001.md");
-        let score = content_based_file_boost(&error_doc);
-        assert!(score > 0.1, "Error docs should have slightly higher boost: {}", score);
-    }
-
-    #[test]
-    fn content_based_file_boost_test_files() {
-        let test_chunk = make_chunk("assert!(true)", "rust", "tests/test_auth.rs");
-        let score = content_based_file_boost(&test_chunk);
-        assert!(score < 0.5, "Test files should have low boost: {}", score);
-    }
-
-    #[test]
-    fn content_based_file_boost_example_files() {
-        let example_chunk = make_chunk("fn main() {}", "rust", "examples/demo.rs");
-        let score = content_based_file_boost(&example_chunk);
-        assert!(score < 0.5, "Example files should have low boost: {}", score);
-    }
-
-    #[test]
-    fn content_based_file_boost_impl_files() {
-        let impl_chunk = make_chunk("fn authenticate() {}", "rust", "src/auth.rs");
-        let score = content_based_file_boost(&impl_chunk);
-        assert!(score > 0.5, "Impl files should have high boost: {}", score);
     }
 
     #[test]
     fn directory_match_boost_matches_dir() {
         let chunk = make_chunk("code", "rust", "src/graph/extractor.rs");
         let boost = directory_match_boost(&chunk, "graph extraction");
-        assert!(boost > 0.0, "Should boost for matching directory: {}", boost);
+        assert!(
+            boost > 0.0,
+            "Should boost for matching directory: {}",
+            boost
+        );
     }
 
     #[test]

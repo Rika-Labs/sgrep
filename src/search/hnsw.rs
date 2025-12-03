@@ -1,10 +1,9 @@
 use anyhow::Result;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
-pub const HNSW_CONNECTIVITY: usize = 16;
-pub const HNSW_EXPANSION_ADD: usize = 128;
-pub const HNSW_EXPANSION_SEARCH: usize = 64;
-pub const HNSW_OVERSAMPLE_FACTOR: usize = 4;
+use super::config::{
+    HNSW_CONNECTIVITY, HNSW_EXPANSION_ADD, HNSW_EXPANSION_SEARCH, HNSW_OVERSAMPLE_FACTOR,
+};
 
 pub fn build_hnsw_index(dimensions: usize, capacity: usize) -> Result<Index> {
     let options = IndexOptions {

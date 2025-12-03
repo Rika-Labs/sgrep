@@ -20,7 +20,8 @@ pub fn configure_offline_env(offline: bool) -> Result<()> {
     })?;
 
     if offline && !cache_has_model(&cache_dir) {
-        let files_list = super::MODEL_FILES.iter()
+        let files_list = super::MODEL_FILES
+            .iter()
             .map(|f| format!("  - {}", f))
             .collect::<Vec<_>>()
             .join("\n");

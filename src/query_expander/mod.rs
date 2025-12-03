@@ -9,7 +9,6 @@ use anyhow::Result;
 
 pub use model::{is_model_cached, QueryAnalysis, QueryExpander};
 
-
 #[allow(dead_code)]
 pub trait Expander: Send + Sync {
     fn expand(&self, query: &str) -> Result<Vec<String>>;

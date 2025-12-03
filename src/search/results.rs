@@ -30,7 +30,11 @@ impl SearchResult {
             return 0;
         }
 
-        let start_idx = if lines[0].starts_with("// File:") { 1 } else { 0 };
+        let start_idx = if lines[0].starts_with("// File:") {
+            1
+        } else {
+            0
+        };
 
         let mut content_line = start_idx;
         for (i, line) in lines.iter().enumerate().skip(start_idx) {

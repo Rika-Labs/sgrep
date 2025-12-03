@@ -8,7 +8,8 @@ pub use local::{Embedder, PooledEmbedder};
 use anyhow::Result;
 
 pub const MODEL_NAME: &str = "jina-embeddings-v2-base-code";
-pub const MODEL_DOWNLOAD_URL: &str = "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/tree/main";
+pub const MODEL_DOWNLOAD_URL: &str =
+    "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/tree/main";
 pub const MODEL_FILES: &[&str] = &[
     "model_quantized.onnx",
     "tokenizer.json",

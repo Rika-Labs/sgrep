@@ -133,7 +133,10 @@ provider = "local"
         env::remove_var("SGREP_CONFIG");
         let home_path = "/custom/sgrep/home";
         env::set_var("SGREP_HOME", home_path);
-        assert_eq!(Config::config_path(), PathBuf::from(home_path).join("config.toml"));
+        assert_eq!(
+            Config::config_path(),
+            PathBuf::from(home_path).join("config.toml")
+        );
         env::remove_var("SGREP_HOME");
     }
 
