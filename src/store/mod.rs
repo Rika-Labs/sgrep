@@ -20,7 +20,7 @@ use mmap::{
     parse_binary_header, parse_vectors_header, read_vectors_from_mmap, validate_vectors_size,
     BYTES_PER_F32, VECTOR_HEADER_SIZE,
 };
-use utils::{data_dir, hash_path};
+use utils::{data_dir, get_main_repo_path, hash_path, is_worktree};
 
 const INDEX_FILE: &str = "index.bin.zst";
 const HIERARCHY_FILE: &str = "hierarchy.bin.zst";
@@ -45,6 +45,24 @@ impl IndexStore {
         let mut root = data_dir();
         root.push("indexes");
         root.push(&repo_hash);
+
+        let index_exists = root.join(INDEX_FILE).exists();
+
+        if !index_exists && is_worktree(&absolute) {
+            if let Some(main_repo) = get_main_repo_path(&absolute) {
+                let main_hash = hash_path(&main_repo);
+                let mut main_root = data_dir();
+                main_root.push("indexes");
+                main_root.push(&main_hash);
+
+                if main_root.join(INDEX_FILE).exists() {
+                    fs::create_dir_all(&root)
+                        .with_context(|| format!("Failed to create {}", root.display()))?;
+                    copy_index_files(&main_root, &root)?;
+                }
+            }
+        }
+
         fs::create_dir_all(&root)
             .with_context(|| format!("Failed to create {}", root.display()))?;
         Ok(Self { root, repo_hash })
@@ -337,6 +355,29 @@ impl IndexStore {
         fs::write(path, compressed)?;
         Ok(())
     }
+}
+
+fn copy_index_files(src: &Path, dst: &Path) -> Result<()> {
+    let files = [
+        INDEX_FILE,
+        VECTORS_FILE,
+        BINARY_VECTORS_FILE,
+        HIERARCHY_FILE,
+        FILE_VECTORS_FILE,
+        DIR_VECTORS_FILE,
+        GRAPH_FILE,
+    ];
+
+    for file in &files {
+        let src_path = src.join(file);
+        let dst_path = dst.join(file);
+        if src_path.exists() {
+            fs::copy(&src_path, &dst_path)
+                .with_context(|| format!("Failed to copy {} to {}", src_path.display(), dst_path.display()))?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
