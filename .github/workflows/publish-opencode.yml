@@ -62,8 +62,9 @@ jobs:
         working-directory: plugins/opencode
         run: bun install
 
+      - name: Configure NPM authentication
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
+
       - name: Publish to NPM
         working-directory: plugins/opencode
         run: bun publish --access public
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
