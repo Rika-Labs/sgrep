@@ -291,15 +291,7 @@ impl BatchEmbedder for PooledEmbedder {
 #[cfg(not(test))]
 impl Default for PooledEmbedder {
     fn default() -> Self {
-        let cpu_count = std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(4);
-        let default_pool = cpu_count.min(8);
-        let pool_size = env::var("SGREP_EMBEDDER_POOL_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(default_pool);
-        Self::new(pool_size, DEFAULT_MAX_CACHE)
+        Self::new(1, DEFAULT_MAX_CACHE)
     }
 }
 
