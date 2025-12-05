@@ -5,6 +5,145 @@ use tree_sitter::Tree;
 
 use super::{build_chunk, CodeChunk, MAX_CONTEXT_LINES};
 
+const TARGET_CHUNK_LINES: usize = 50;
+const MAX_CHUNK_LINES: usize = 200;
+
+#[derive(Debug, Clone)]
+struct SemanticSpan {
+    start_line: usize,
+    end_line: usize,
+    is_container: bool,
+    text: String,
+}
+
+impl SemanticSpan {
+    fn line_count(&self) -> usize {
+        self.end_line.saturating_sub(self.start_line) + 1
+    }
+}
+
+fn collect_semantic_spans(
+    node: &tree_sitter::Node,
+    source: &str,
+    language: &str,
+    file_context: &str,
+    spans: &mut Vec<SemanticSpan>,
+) {
+    let mut cursor = node.walk();
+
+    for child in node.children(&mut cursor) {
+        if !child.is_named() {
+            continue;
+        }
+
+        let kind = child.kind();
+
+        if is_semantic_node(kind) {
+            let start = child.start_position();
+            let end = child.end_position();
+
+            if end.row < start.row {
+                continue;
+            }
+
+            let snippet = child.utf8_text(source.as_bytes()).unwrap_or_default();
+            if snippet.trim().is_empty() {
+                continue;
+            }
+
+            let context = extract_parent_context(node, source, language);
+            let full_text = if context.is_empty() && file_context.is_empty() {
+                snippet.to_string()
+            } else if context.is_empty() {
+                format!("{}{}", file_context, snippet)
+            } else {
+                format!("{}// Context: {}\n{}", file_context, context, snippet)
+            };
+
+            let is_container = is_container_node(kind);
+
+            spans.push(SemanticSpan {
+                start_line: start.row + 1,
+                end_line: end.row + 1,
+                is_container,
+                text: full_text,
+            });
+
+            if is_container {
+                collect_semantic_spans(&child, source, language, file_context, spans);
+            }
+        } else {
+            collect_semantic_spans(&child, source, language, file_context, spans);
+        }
+    }
+}
+
+fn merge_small_spans(mut spans: Vec<SemanticSpan>, file_context: &str) -> Vec<SemanticSpan> {
+    if spans.is_empty() {
+        return spans;
+    }
+
+    spans.sort_by_key(|s| s.start_line);
+
+    let mut filtered_spans: Vec<SemanticSpan> = Vec::new();
+    for span in &spans {
+        if span.is_container {
+            let has_children = spans.iter().any(|other| {
+                other.start_line > span.start_line
+                    && other.end_line <= span.end_line
+                    && !std::ptr::eq(span, other)
+            });
+            if !has_children {
+                filtered_spans.push(span.clone());
+            }
+        } else {
+            filtered_spans.push(span.clone());
+        }
+    }
+
+    if filtered_spans.is_empty() {
+        return filtered_spans;
+    }
+
+    let mut merged: Vec<SemanticSpan> = Vec::new();
+    let mut current: Option<SemanticSpan> = None;
+
+    for span in filtered_spans {
+        match current.take() {
+            None => current = Some(span),
+            Some(mut c) => {
+                let combined_lines = span.end_line.saturating_sub(c.start_line) + 1;
+                let should_merge = combined_lines <= MAX_CHUNK_LINES
+                    && c.line_count() < TARGET_CHUNK_LINES
+                    && !span.is_container
+                    && !c.is_container;
+
+                if should_merge {
+                    c.end_line = span.end_line;
+                    let span_text_no_context = if !file_context.is_empty()
+                        && span.text.starts_with(file_context)
+                    {
+                        &span.text[file_context.len()..]
+                    } else {
+                        &span.text
+                    };
+                    c.text = format!("{}\n\n{}", c.text, span_text_no_context);
+                    current = Some(c);
+                } else {
+                    merged.push(c);
+                    current = Some(span);
+                }
+            }
+        }
+    }
+
+    if let Some(c) = current {
+        merged.push(c);
+    }
+
+    merged
+}
+
 pub fn chunk_with_tree(
     source: &str,
     path: &Path,
@@ -13,20 +152,26 @@ pub fn chunk_with_tree(
     modified_at: DateTime<Utc>,
 ) -> Vec<CodeChunk> {
     let root = tree.root_node();
-    let mut chunks = Vec::new();
     let file_context = extract_file_context(source, &root, language);
 
-    collect_semantic_nodes(
-        &root,
-        source,
-        path,
-        language,
-        modified_at,
-        &file_context,
-        &mut chunks,
-    );
+    let mut spans = Vec::new();
+    collect_semantic_spans(&root, source, language, &file_context, &mut spans);
 
-    chunks
+    let merged_spans = merge_small_spans(spans, &file_context);
+
+    merged_spans
+        .into_iter()
+        .map(|span| {
+            build_chunk(
+                path,
+                &span.text,
+                span.start_line,
+                span.end_line,
+                language.to_string(),
+                modified_at,
+            )
+        })
+        .collect()
 }
 
 fn extract_file_context(source: &str, root: &tree_sitter::Node, language: &str) -> String {
@@ -67,80 +212,6 @@ fn extract_file_context(source: &str, root: &tree_sitter::Node, language: &str) 
         String::new()
     } else {
         context_lines.join("\n") + "\n\n"
-    }
-}
-
-fn collect_semantic_nodes(
-    node: &tree_sitter::Node,
-    source: &str,
-    path: &Path,
-    language: &str,
-    modified_at: DateTime<Utc>,
-    file_context: &str,
-    chunks: &mut Vec<CodeChunk>,
-) {
-    let mut cursor = node.walk();
-
-    for child in node.children(&mut cursor) {
-        if !child.is_named() {
-            continue;
-        }
-
-        let kind = child.kind();
-
-        if is_semantic_node(kind) {
-            let start = child.start_position();
-            let end = child.end_position();
-
-            if end.row <= start.row {
-                continue;
-            }
-
-            let snippet = child.utf8_text(source.as_bytes()).unwrap_or_default();
-            if snippet.trim().is_empty() {
-                continue;
-            }
-
-            let context = extract_parent_context(node, source, language);
-            let full_text = if context.is_empty() && file_context.is_empty() {
-                snippet.to_string()
-            } else if context.is_empty() {
-                format!("{}{}", file_context, snippet)
-            } else {
-                format!("{}// Context: {}\n{}", file_context, context, snippet)
-            };
-
-            chunks.push(build_chunk(
-                path,
-                &full_text,
-                start.row + 1,
-                end.row + 1,
-                language.to_string(),
-                modified_at,
-            ));
-
-            if is_container_node(kind) {
-                collect_semantic_nodes(
-                    &child,
-                    source,
-                    path,
-                    language,
-                    modified_at,
-                    file_context,
-                    chunks,
-                );
-            }
-        } else {
-            collect_semantic_nodes(
-                &child,
-                source,
-                path,
-                language,
-                modified_at,
-                file_context,
-                chunks,
-            );
-        }
     }
 }
 
