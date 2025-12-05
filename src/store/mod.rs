@@ -35,7 +35,9 @@ use memmap2::Mmap;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 use crate::graph::CodeGraph;
-use crate::search::config::{HNSW_CONNECTIVITY, HNSW_EXPANSION_ADD, HNSW_EXPANSION_SEARCH, HNSW_THRESHOLD};
+use crate::search::config::{
+    HNSW_CONNECTIVITY, HNSW_EXPANSION_ADD, HNSW_EXPANSION_SEARCH, HNSW_THRESHOLD,
+};
 use mmap::{
     parse_binary_header, parse_vectors_header, read_vectors_from_mmap, validate_vectors_size,
     BYTES_PER_F32, VECTOR_HEADER_SIZE,
@@ -790,7 +792,10 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
-    fn make_chunks_with_vectors(count: usize, vector_dim: usize) -> (Vec<CodeChunk>, Vec<Vec<f32>>) {
+    fn make_chunks_with_vectors(
+        count: usize,
+        vector_dim: usize,
+    ) -> (Vec<CodeChunk>, Vec<Vec<f32>>) {
         let chunks: Vec<CodeChunk> = (0..count)
             .map(|i| CodeChunk {
                 id: Uuid::new_v4(),
@@ -869,8 +874,14 @@ mod tests {
         // HNSW files should NOT exist for small indexes
         let hnsw_path = store.root.join("hnsw.usearch");
         let header_path = store.root.join("hnsw_header.bin");
-        assert!(!hnsw_path.exists(), "HNSW file should not be created for small indexes");
-        assert!(!header_path.exists(), "HNSW header should not be created for small indexes");
+        assert!(
+            !hnsw_path.exists(),
+            "HNSW file should not be created for small indexes"
+        );
+        assert!(
+            !header_path.exists(),
+            "HNSW header should not be created for small indexes"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -903,7 +914,10 @@ mod tests {
 
         // Load should succeed but HNSW should be None (fallback)
         let loaded = store.load_mmap().unwrap().unwrap();
-        assert!(!loaded.has_hnsw(), "HNSW should not load with version mismatch");
+        assert!(
+            !loaded.has_hnsw(),
+            "HNSW should not load with version mismatch"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -936,7 +950,10 @@ mod tests {
 
         // Load should succeed but HNSW should be None (fallback)
         let loaded = store.load_mmap().unwrap().unwrap();
-        assert!(!loaded.has_hnsw(), "HNSW should not load with dimension mismatch");
+        assert!(
+            !loaded.has_hnsw(),
+            "HNSW should not load with dimension mismatch"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -969,7 +986,10 @@ mod tests {
 
         // Load should succeed but HNSW should be None (fallback)
         let loaded = store.load_mmap().unwrap().unwrap();
-        assert!(!loaded.has_hnsw(), "HNSW should not load with count mismatch");
+        assert!(
+            !loaded.has_hnsw(),
+            "HNSW should not load with count mismatch"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -1001,8 +1021,15 @@ mod tests {
 
         // Load should succeed but without HNSW
         let loaded = store.load_mmap().unwrap().unwrap();
-        assert!(!loaded.has_hnsw(), "MmapIndex should not have HNSW when files are missing");
-        assert_eq!(loaded.chunks.len(), num_vectors, "Chunks should still be loaded");
+        assert!(
+            !loaded.has_hnsw(),
+            "MmapIndex should not have HNSW when files are missing"
+        );
+        assert_eq!(
+            loaded.chunks.len(),
+            num_vectors,
+            "Chunks should still be loaded"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

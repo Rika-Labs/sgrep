@@ -30,17 +30,14 @@ if [ -f "$PID_FILE" ]; then
   rm -f "$PID_FILE"
 fi
 
-if ! sgrep search "test" --path "$PROJECT_DIR" --limit 1 > /dev/null 2>&1; then
-  echo "{\"message\": \"Index not found, creating initial index for $PROJECT_DIR\"}"
-  if sgrep index "$PROJECT_DIR" > /dev/null 2>&1; then
-    echo "{\"message\": \"Initial indexing completed\"}"
-  else
-    echo "{\"message\": \"Initial indexing completed (may have warnings)\"}"
-  fi
-fi
+sgrep index -d "$PROJECT_DIR" > /dev/null 2>&1 || true
+WATCH_OUTPUT=$(sgrep watch -d "$PROJECT_DIR")
+WATCH_PID=$(echo "$WATCH_OUTPUT" | grep -oE '[0-9]+')
 
-nohup sgrep watch "$PROJECT_DIR" > /dev/null 2>&1 &
-WATCH_PID=$!
+if [ -z "$WATCH_PID" ]; then
+  echo "{\"error\": \"Failed to start sgrep watch\"}" >&2
+  exit 1
+fi
 
 echo "$WATCH_PID" > "$PID_FILE"
 

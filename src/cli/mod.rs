@@ -85,6 +85,9 @@ pub enum Commands {
         /// Output stats as JSON (only with --stats)
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Run index in detached/background mode
+        #[arg(short = 'd', long, default_value_t = false)]
+        detach: bool,
     },
     /// Watch a repository and keep the index fresh
     Watch {
@@ -102,6 +105,9 @@ pub enum Commands {
             help = "Override embedding batch size (16-2048). Also reads SGREP_BATCH_SIZE."
         )]
         batch_size: Option<usize>,
+        /// Run watch in detached/background mode
+        #[arg(short = 'd', long, default_value_t = false)]
+        detach: bool,
     },
     /// Show or create configuration
     Config {
