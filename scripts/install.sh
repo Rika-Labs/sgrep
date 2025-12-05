@@ -71,31 +71,4 @@ download_and_install() {
   sgrep --version || :
 }
 
-post_install() {
-  if ! command -v sgrep >/dev/null 2>&1; then
-    echo "Warning: sgrep not found in PATH. You may need to restart your shell." >&2
-    return
-  fi
-
-  current_dir="$(pwd)"
-  echo ""
-  echo "Indexing current directory: $current_dir"
-  sgrep index "$current_dir" || {
-    echo "Warning: Initial indexing had issues. You can run 'sgrep index' manually." >&2
-  }
-
-  echo ""
-  echo "Starting background watcher..."
-  nohup sgrep watch "$current_dir" >/dev/null 2>&1 &
-  watch_pid=$!
-  echo "sgrep watch started (PID: $watch_pid)"
-
-  echo ""
-  echo "Testing search..."
-  sgrep search "where do we handle authentication?" --path "$current_dir" --limit 3 || {
-    echo "Search test completed (results may vary)"
-  }
-}
-
 download_and_install
-post_install
