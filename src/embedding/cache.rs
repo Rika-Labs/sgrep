@@ -111,26 +111,14 @@ pub fn get_fastembed_cache_dir() -> PathBuf {
         return PathBuf::from(cache);
     }
 
-    if let Some(dirs) = directories::ProjectDirs::from("dev", "RikaLabs", "sgrep") {
-        let mut cache = dirs.cache_dir().to_path_buf();
-        cache.push("fastembed");
-        return cache;
-    }
-
-    let mut cache = dirs_next_best_cache();
+    let mut cache = if let Some(home) = env::var_os("HOME") {
+        PathBuf::from(home).join(".sgrep")
+    } else {
+        PathBuf::from(".sgrep")
+    };
+    cache.push("cache");
     cache.push("fastembed");
     cache
-}
-
-pub fn dirs_next_best_cache() -> PathBuf {
-    if let Some(home) = env::var_os("HOME") {
-        let mut cache = PathBuf::from(home);
-        cache.push(".sgrep");
-        cache.push("cache");
-        return cache;
-    }
-
-    PathBuf::from(".sgrep").join("cache")
 }
 
 #[cfg(test)]
@@ -223,14 +211,16 @@ mod tests {
     }
 
     #[test]
-    fn dirs_next_best_cache_without_home() {
-        let home_backup = env::var("HOME").ok();
-        env::remove_var("HOME");
-        let dir = dirs_next_best_cache();
-        assert!(dir.ends_with(".sgrep/cache"));
-        env::remove_var("HOME");
-        if let Some(home) = home_backup {
-            env::set_var("HOME", home);
+    #[serial]
+    fn get_fastembed_cache_dir_uses_home_sgrep() {
+        let env_backup = env::var("FASTEMBED_CACHE_DIR").ok();
+        env::remove_var("FASTEMBED_CACHE_DIR");
+        let dir = get_fastembed_cache_dir();
+        assert!(dir.to_string_lossy().contains(".sgrep"));
+        assert!(dir.to_string_lossy().contains("cache"));
+        assert!(dir.to_string_lossy().contains("fastembed"));
+        if let Some(v) = env_backup {
+            env::set_var("FASTEMBED_CACHE_DIR", v);
         }
     }
 
