@@ -20,6 +20,10 @@ sgrep search "where do we handle authentication?"
 sgrep watch
 ```
 
+The install script automatically indexes your current directory, starts `sgrep watch` in the background to keep your index fresh, and runs a test search.
+
+**`sgrep watch`** runs in the background and automatically updates your index as you edit files, so search results stay current without manual re-indexing.
+
 Want source builds? `cargo install --path .`
 
 ## What happens on first run
