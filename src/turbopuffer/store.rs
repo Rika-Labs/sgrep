@@ -31,12 +31,6 @@ pub struct SearchResult {
 }
 
 #[derive(Serialize)]
-struct UpsertRequest {
-    upsert_rows: Vec<UpsertRow>,
-    distance_metric: String,
-}
-
-#[derive(Serialize)]
 struct UpsertRow {
     id: String,
     vector: Vec<f32>,
@@ -61,8 +55,13 @@ struct QueryResponse {
 }
 
 #[derive(Serialize)]
-struct DeleteRequest {
-    deletes: Vec<String>,
+struct WriteRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upsert_rows: Option<Vec<UpsertRow>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    distance_metric: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deletes: Option<Vec<String>>,
 }
 
 pub struct TurbopufferStore {
@@ -109,9 +108,10 @@ impl TurbopufferStore {
             })
             .collect();
 
-        let request = UpsertRequest {
-            upsert_rows: rows,
-            distance_metric: "cosine_distance".to_string(),
+        let request = WriteRequest {
+            upsert_rows: Some(rows),
+            distance_metric: Some("cosine_distance".to_string()),
+            deletes: None,
         };
 
         self.post_with_retry::<_, serde_json::Value>(&url, &request)?;
@@ -146,8 +146,10 @@ impl TurbopufferStore {
         }
 
         let url = self.base_url();
-        let request = DeleteRequest {
-            deletes: ids.to_vec(),
+        let request = WriteRequest {
+            upsert_rows: None,
+            distance_metric: None,
+            deletes: Some(ids.to_vec()),
         };
 
         self.post_with_retry::<_, serde_json::Value>(&url, &request)?;
@@ -343,9 +345,9 @@ mod tests {
     }
 
     #[test]
-    fn upsert_request_serialization() {
-        let request = UpsertRequest {
-            upsert_rows: vec![UpsertRow {
+    fn write_request_upsert_serialization() {
+        let request = WriteRequest {
+            upsert_rows: Some(vec![UpsertRow {
                 id: "test".to_string(),
                 vector: vec![0.1, 0.2],
                 path: "test.rs".to_string(),
@@ -353,11 +355,26 @@ mod tests {
                 end_line: 10,
                 content: "code".to_string(),
                 language: "rust".to_string(),
-            }],
-            distance_metric: "cosine_distance".to_string(),
+            }]),
+            distance_metric: Some("cosine_distance".to_string()),
+            deletes: None,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("upsert_rows"));
         assert!(json.contains("cosine_distance"));
+        assert!(!json.contains("deletes")); // None fields should be skipped
+    }
+
+    #[test]
+    fn write_request_delete_serialization() {
+        let request = WriteRequest {
+            upsert_rows: None,
+            distance_metric: None,
+            deletes: Some(vec!["id1".to_string(), "id2".to_string()]),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("deletes"));
+        assert!(json.contains("id1"));
+        assert!(!json.contains("upsert_rows")); // None fields should be skipped
     }
 }

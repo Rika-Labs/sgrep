@@ -918,6 +918,8 @@ mod tests {
                 profile: false,
                 stats,
                 json: false,
+                offload: false,
+                remote: false,
                 detach,
             },
         }
@@ -1240,6 +1242,7 @@ mod tests {
                 json: false,
                 offload: false,
                 remote: false,
+                detach: false,
             },
         };
         run_with_cli(cli).unwrap();
@@ -1262,6 +1265,7 @@ mod tests {
                 batch_size: Some(16),
                 offload: false,
                 remote: false,
+                detach: false,
             },
         };
         run_with_cli(cli).unwrap();
