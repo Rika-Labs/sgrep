@@ -16,17 +16,19 @@ Fast, private, local semantic code search for developers and coding agents.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install.sh | sh
-sgrep index .
+sgrep index
 sgrep watch
 sgrep search "where do we handle authentication?"
 ```
 
-Want source builds? `cargo install --path .`
+Run `sgrep index` from the repo you want searched; it writes the index to your sgrep data dir.
+
+Prefer source builds? Run `cargo install --path .` from the repo root.
 
 ## What happens on first run
 
 - Downloads `jina-embeddings-v2-base-code` once to the fastembed cache (honors `HTTP(S)_PROXY`).
-- Indexes each repo into `SGREP_HOME` (default: OS data dir such as `~/.local/share/sgrep` or `~/.sgrep`).
+- Indexes the repo you run it in into `SGREP_HOME` (default: OS data dir such as `~/.local/share/sgrep` or `~/.sgrep`).
 - `--offline` or `SGREP_OFFLINE=1` forbids network access and fails fast if the model is missing.
 
 ## Platforms
