@@ -17,7 +17,7 @@ use crate::threading::{CpuPreset, ThreadConfig};
 use crate::{indexer, search, store, watch};
 
 /// Parameters for executing a search operation.
-/// Consolidates the 8 search-related parameters into a single struct
+/// Consolidates the search-related parameters into a single struct
 /// to improve readability and reduce function parameter count (KISS principle).
 pub struct SearchParams<'a> {
     pub query: &'a str,
@@ -28,6 +28,8 @@ pub struct SearchParams<'a> {
     pub filters: Vec<String>,
     pub json: bool,
     pub debug: bool,
+    pub no_rerank: bool,
+    pub rerank_oversample: usize,
 }
 
 struct ProgressLine {
@@ -119,6 +121,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             filters,
             json,
             debug,
+            no_rerank,
+            rerank_oversample,
         } => handle_search(
             embedder,
             SearchParams {
@@ -130,6 +134,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                 filters,
                 json,
                 debug,
+                no_rerank,
+                rerank_oversample,
             },
         ),
         Commands::Watch {
@@ -176,6 +182,34 @@ fn build_embedder(
     progress.finish("Embedding model ready");
 
     Ok(embedder)
+}
+
+#[cfg(not(test))]
+fn build_reranker_silent(
+    json_mode: bool,
+) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
+    use crate::reranker::CrossEncoderReranker;
+
+    match CrossEncoderReranker::new(!json_mode) {
+        Ok(reranker) => Some(Arc::new(reranker)),
+        Err(e) => {
+            if !json_mode {
+                eprintln!(
+                    "{} Reranker unavailable: {} (falling back to semantic search)",
+                    style("⚠").yellow(),
+                    e
+                );
+            }
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+fn build_reranker_silent(
+    _json_mode: bool,
+) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
+    None
 }
 
 fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result<()> {
@@ -383,7 +417,17 @@ fn handle_search(
     params: SearchParams<'_>,
 ) -> Result<()> {
     let start = Instant::now();
-    let mut engine = search::SearchEngine::new(embedder.clone());
+
+    let reranker = if params.no_rerank {
+        None
+    } else {
+        build_reranker_silent(params.json)
+    };
+
+    let mut engine = match &reranker {
+        Some(r) => search::SearchEngine::with_reranker(embedder.clone(), r.clone()),
+        None => search::SearchEngine::new(embedder.clone()),
+    };
 
     if let Err(e) = engine.enable_query_expander_silent() {
         if !params.json {
@@ -397,6 +441,8 @@ fn handle_search(
         engine.set_graph(graph);
     }
 
+    let rerank_enabled = reranker.is_some();
+
     // Try mmap-based search first for zero-copy performance
     if let Ok(Some(mmap_index)) = store_result.load_mmap() {
         if mmap_index.metadata.vector_dim == embedder.dimension() {
@@ -408,7 +454,8 @@ fn handle_search(
                     include_context: params.context,
                     glob: params.glob.clone(),
                     filters: params.filters.clone(),
-                    rerank: false,
+                    rerank: rerank_enabled,
+                    oversample_factor: params.rerank_oversample,
                 },
             )?;
             let elapsed = start.elapsed();
@@ -435,7 +482,8 @@ fn handle_search(
             include_context: params.context,
             glob: params.glob,
             filters: params.filters,
-            rerank: false,
+            rerank: rerank_enabled,
+            oversample_factor: params.rerank_oversample,
         },
     )?;
     let elapsed = start.elapsed();
@@ -985,6 +1033,8 @@ mod tests {
                 filters: vec![],
                 json: true,
                 debug: false,
+                no_rerank: false,
+                rerank_oversample: 3,
             },
         };
         run_with_cli(cli).unwrap();
@@ -1084,6 +1134,8 @@ mod tests {
             filters: vec!["lang=rust".to_string()],
             json: false,
             debug: true,
+            no_rerank: false,
+            rerank_oversample: 3,
         };
 
         assert_eq!(params.query, "test query");
@@ -1094,6 +1146,8 @@ mod tests {
         assert_eq!(params.filters.len(), 1);
         assert!(!params.json);
         assert!(params.debug);
+        assert!(!params.no_rerank);
+        assert_eq!(params.rerank_oversample, 3);
     }
 
     #[test]

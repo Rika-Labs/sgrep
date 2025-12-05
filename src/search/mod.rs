@@ -66,6 +66,7 @@ pub struct SearchOptions {
     pub glob: Vec<String>,
     pub filters: Vec<String>,
     pub rerank: bool,
+    pub oversample_factor: usize,
 }
 
 impl Default for SearchOptions {
@@ -75,7 +76,8 @@ impl Default for SearchOptions {
             include_context: false,
             glob: vec![],
             filters: vec![],
-            rerank: false,
+            rerank: true,
+            oversample_factor: RERANK_OVERSAMPLE_FACTOR,
         }
     }
 }
@@ -751,7 +753,7 @@ impl SearchEngine {
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
         let fetch_limit = if options.rerank && self.reranker.is_some() {
-            limit * RERANK_OVERSAMPLE_FACTOR
+            limit * options.oversample_factor.max(1)
         } else {
             limit
         };
@@ -1254,6 +1256,7 @@ mod tests {
                     glob: vec![],
                     filters: vec![],
                     rerank: false,
+                    oversample_factor: 3,
                 },
             )
             .unwrap();
@@ -1285,6 +1288,7 @@ mod tests {
                     glob: vec!["src/**/*.rs".to_string()],
                     filters: vec![],
                     rerank: false,
+                    oversample_factor: 3,
                 },
             )
             .unwrap();
@@ -1317,6 +1321,7 @@ mod tests {
                     glob: vec![],
                     filters: vec!["lang=rust".to_string()],
                     rerank: false,
+                    oversample_factor: 3,
                 },
             )
             .unwrap();
@@ -1395,6 +1400,7 @@ mod tests {
                     glob: vec![],
                     filters: vec![],
                     rerank: false,
+                    oversample_factor: 3,
                 },
             )
             .unwrap();
@@ -1431,6 +1437,7 @@ mod tests {
                     glob: vec![],
                     filters: vec![],
                     rerank: false,
+                    oversample_factor: 3,
                 },
             )
             .unwrap();
@@ -1470,6 +1477,7 @@ mod tests {
                     glob: vec![],
                     filters: vec![],
                     rerank: true,
+                    oversample_factor: 3,
                 },
             )
             .unwrap();
@@ -1505,6 +1513,7 @@ mod tests {
                     glob: vec![],
                     filters: vec![],
                     rerank: false,
+                    oversample_factor: 3,
                 },
             )
             .unwrap();
@@ -1536,6 +1545,7 @@ mod tests {
                     glob: vec![],
                     filters: vec![],
                     rerank: true,
+                    oversample_factor: 3,
                 },
             )
             .unwrap();
@@ -1544,10 +1554,11 @@ mod tests {
     }
 
     #[test]
-    fn search_options_default_has_rerank_disabled() {
+    fn search_options_default_has_rerank_enabled_and_oversample() {
         let options = SearchOptions::default();
-        assert!(!options.rerank);
+        assert!(options.rerank, "Rerank should be enabled by default");
         assert_eq!(options.limit, 10);
+        assert_eq!(options.oversample_factor, RERANK_OVERSAMPLE_FACTOR);
     }
 
     #[test]
@@ -1672,6 +1683,7 @@ mod tests {
                     glob: vec![],
                     filters: vec!["lang=python".to_string()],
                     rerank: false,
+                    oversample_factor: 3,
                 },
             )
             .unwrap();
@@ -1706,6 +1718,7 @@ mod tests {
                     glob: vec!["src/**/*.rs".to_string()],
                     filters: vec![],
                     rerank: false,
+                    oversample_factor: 3,
                 },
             )
             .unwrap();
@@ -1959,6 +1972,7 @@ mod tests {
                     glob: vec![],
                     filters: vec![],
                     rerank: false,
+                    oversample_factor: 3,
                 },
             )
             .unwrap();
