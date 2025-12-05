@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_run:
+    workflows: ["Auto Tag on Version Bump"]
+    types:
+      - completed
   workflow_dispatch:
 
 permissions:
@@ -13,6 +17,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    if: github.event_name == 'push' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     strategy:
       matrix:
         include:
@@ -24,6 +29,21 @@ jobs:
             archive: sgrep-macos-aarch64.tar.gz
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout tag if triggered by workflow_run
+        if: github.event_name == 'workflow_run'
+        run: |
+          cargo_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          tag_name="v${cargo_version}"
+          git fetch --tags --force
+          if git rev-parse "$tag_name" >/dev/null 2>&1; then
+            git checkout "$tag_name"
+          else
+            echo "Error: Tag $tag_name not found" >&2
+            exit 1
+          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -66,7 +86,18 @@ jobs:
           cargo_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           echo "cargo_version=$cargo_version" >> "$GITHUB_OUTPUT"
           
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            git fetch --tags --force
+            tag_name="v${cargo_version}"
+            if git rev-parse "$tag_name" >/dev/null 2>&1; then
+              git checkout "$tag_name"
+              echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+              echo "release_name=sgrep $tag_name" >> "$GITHUB_OUTPUT"
+            else
+              echo "Error: Tag $tag_name not found" >&2
+              exit 1
+            fi
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             tag_name="${GITHUB_REF#refs/tags/}"
             echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
             echo "release_name=sgrep $tag_name" >> "$GITHUB_OUTPUT"
