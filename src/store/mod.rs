@@ -9,8 +9,26 @@ pub use mmap::MmapIndex;
 pub use utils::quantize_to_binary;
 
 use std::fs::{self, File};
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexStats {
+    pub repo_path: PathBuf,
+    pub indexed_at: DateTime<Utc>,
+    pub vector_dim: usize,
+    pub total_files: usize,
+    pub total_chunks: usize,
+    pub graph_symbols: usize,
+    pub graph_edges: usize,
+    pub mmap_available: bool,
+    pub binary_vectors_available: bool,
+}
+
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
@@ -264,6 +282,30 @@ impl IndexStore {
 
     pub fn repo_hash(&self) -> &str {
         &self.repo_hash
+    }
+
+    pub fn get_stats(&self) -> Result<Option<IndexStats>> {
+        let mmap = self.load_mmap()?;
+        let Some(mmap) = mmap else {
+            return Ok(None);
+        };
+
+        let graph = self.load_graph()?;
+        let (graph_symbols, graph_edges) = graph
+            .map(|g| (g.symbols.len(), g.edges.len()))
+            .unwrap_or((0, 0));
+
+        Ok(Some(IndexStats {
+            repo_path: mmap.metadata.repo_path,
+            indexed_at: mmap.metadata.indexed_at,
+            vector_dim: mmap.vector_dim,
+            total_files: mmap.metadata.total_files,
+            total_chunks: mmap.metadata.total_chunks,
+            graph_symbols,
+            graph_edges,
+            mmap_available: true,
+            binary_vectors_available: mmap.binary_mmap.is_some(),
+        }))
     }
 
     fn load_legacy_format(&self, path: &Path) -> Result<Option<RepositoryIndex>> {
