@@ -1,4 +1,5 @@
 mod language;
+mod parser_pool;
 mod treesitter;
 
 pub use language::detect_language;
@@ -11,7 +12,6 @@ use anyhow::{Context, Result};
 use blake3::Hasher;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tree_sitter::Parser;
 use uuid::Uuid;
 
 use treesitter::chunk_with_tree;
@@ -50,19 +50,15 @@ pub fn chunk_file(path: &Path, repo_root: &Path) -> Result<Vec<CodeChunk>> {
         .unwrap_or_else(|_| SystemTime::now());
     let modified_at: DateTime<Utc> = modified.into();
 
-    let mut parser = Parser::new();
     let mut chunks = if let Some(lang_kind) = language {
         let label = lang_kind.label().to_string();
-        if let Some(lang) = lang_kind.language() {
-            parser.set_language(&lang).ok();
-            if let Some(tree) = parser.parse(&source, None) {
-                chunk_with_tree(&source, &relative, &tree, &label, modified_at)
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        }
+        parser_pool::with_parser(lang_kind, |parser| {
+            parser
+                .parse(&source, None)
+                .map(|tree| chunk_with_tree(&source, &relative, &tree, &label, modified_at))
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -323,5 +319,84 @@ impl Foo {
             "Expected Foo in chunks: {:?}",
             chunks.iter().map(|c| &c.text).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn chunk_file_deterministic_with_pooling() {
+        let dir = std::env::temp_dir().join("sgrep_chunk_determ");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("deterministic.rs");
+        std::fs::write(&path, "fn main() { println!(\"hello\"); }\n").unwrap();
+
+        let first = chunk_file(&path, &dir).unwrap();
+        let second = chunk_file(&path, &dir).unwrap();
+        let third = chunk_file(&path, &dir).unwrap();
+
+        assert!(!first.is_empty());
+        assert_eq!(first.len(), second.len());
+        assert_eq!(second.len(), third.len());
+
+        for i in 0..first.len() {
+            assert_eq!(first[i].hash, second[i].hash);
+            assert_eq!(second[i].hash, third[i].hash);
+        }
+    }
+
+    #[test]
+    fn chunk_multiple_files_same_language() {
+        let dir = std::env::temp_dir().join("sgrep_chunk_multi");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        for i in 0..10 {
+            let path = dir.join(format!("file_{}.rs", i));
+            std::fs::write(&path, format!("fn func_{}() {{ }}\n", i)).unwrap();
+        }
+
+        for i in 0..10 {
+            let path = dir.join(format!("file_{}.rs", i));
+            let chunks = chunk_file(&path, &dir).unwrap();
+            assert!(!chunks.is_empty());
+            assert_eq!(chunks[0].language, "rust");
+        }
+    }
+
+    #[test]
+    fn parallel_chunking_produces_correct_results() {
+        use rayon::prelude::*;
+
+        let dir = std::env::temp_dir().join("sgrep_chunk_parallel");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let files: Vec<_> = (0..20)
+            .map(|i| {
+                let ext = match i % 4 {
+                    0 => "rs",
+                    1 => "py",
+                    2 => "js",
+                    _ => "go",
+                };
+                let content = match ext {
+                    "rs" => format!("fn func_{}() {{}}", i),
+                    "py" => format!("def func_{}(): pass", i),
+                    "js" => format!("function func_{}() {{}}", i),
+                    "go" => format!("func func_{}() {{}}", i),
+                    _ => unreachable!(),
+                };
+                let path = dir.join(format!("file_{}.{}", i, ext));
+                std::fs::write(&path, content).unwrap();
+                path
+            })
+            .collect();
+
+        let results: Vec<_> = files
+            .par_iter()
+            .map(|path| chunk_file(path, &dir))
+            .collect();
+
+        for (i, result) in results.iter().enumerate() {
+            assert!(result.is_ok(), "File {} failed", i);
+            let chunks = result.as_ref().unwrap();
+            assert!(!chunks.is_empty());
+        }
     }
 }
