@@ -1060,4 +1060,372 @@ mod tests {
 
         fs::remove_dir_all(&repo).ok();
     }
+
+    #[test]
+    #[serial]
+    fn embedding_reuse_verified_via_counters() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let text_count = Arc::new(AtomicUsize::new(0));
+
+        #[derive(Clone)]
+        struct CountingEmbedder {
+            call_count: Arc<AtomicUsize>,
+            text_count: Arc<AtomicUsize>,
+        }
+
+        impl BatchEmbedder for CountingEmbedder {
+            fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                self.text_count.fetch_add(texts.len(), Ordering::SeqCst);
+                Ok(texts.iter().map(|t| vec![t.len() as f32; 4]).collect())
+            }
+            fn dimension(&self) -> usize {
+                4
+            }
+        }
+
+        let embedder = Arc::new(CountingEmbedder {
+            call_count: call_count.clone(),
+            text_count: text_count.clone(),
+        });
+        let indexer = Indexer::new(embedder);
+
+        let _home = set_test_home();
+        let repo = std::env::temp_dir().join(format!("sgrep_reuse_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&repo).unwrap();
+
+        fs::write(repo.join("main.rs"), "fn main() { println!(\"hello\"); }").unwrap();
+        fs::write(repo.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+        fs::write(repo.join("utils.rs"), "pub fn helper() -> bool { true }").unwrap();
+
+        let first_report = indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: None,
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        let first_call_count = call_count.load(Ordering::SeqCst);
+        let first_text_count = text_count.load(Ordering::SeqCst);
+
+        assert!(first_call_count >= 1);
+        assert!(first_text_count >= 3);
+        assert!(first_report.cache_misses > 0);
+
+        call_count.store(0, Ordering::SeqCst);
+        text_count.store(0, Ordering::SeqCst);
+
+        let second_report = indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: false,
+                batch_size: None,
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        let second_call_count = call_count.load(Ordering::SeqCst);
+        let second_text_count = text_count.load(Ordering::SeqCst);
+
+        assert_eq!(second_text_count, 0);
+        assert!(second_report.cache_hits >= first_report.chunks_indexed);
+        assert_eq!(second_report.cache_misses, 0);
+        assert_eq!(second_call_count, 0);
+
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn version_mismatch_forces_full_reindex() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        #[derive(Clone)]
+        struct VersionTestEmbedder {
+            call_count: Arc<AtomicUsize>,
+        }
+
+        impl BatchEmbedder for VersionTestEmbedder {
+            fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                self.call_count.fetch_add(texts.len(), Ordering::SeqCst);
+                Ok(texts.iter().map(|t| vec![t.len() as f32; 4]).collect())
+            }
+            fn dimension(&self) -> usize {
+                4
+            }
+        }
+
+        let embedder = Arc::new(VersionTestEmbedder {
+            call_count: call_count.clone(),
+        });
+        let indexer = Indexer::new(embedder);
+
+        let _home = set_test_home();
+        let repo = std::env::temp_dir().join(format!("sgrep_version_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&repo).unwrap();
+
+        fs::write(repo.join("test.rs"), "fn test() { }").unwrap();
+
+        indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: None,
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        let first_count = call_count.load(Ordering::SeqCst);
+        assert!(first_count >= 1);
+
+        let store = IndexStore::new(&repo).unwrap();
+        let mut index = store.load().unwrap().unwrap();
+        index.metadata.version = "0.0.0-fake".to_string();
+        store.save(&index).unwrap();
+
+        call_count.store(0, Ordering::SeqCst);
+
+        fs::write(repo.join("new.rs"), "fn new() {}").unwrap();
+
+        let report = indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: false,
+                batch_size: None,
+                profile: false,
+                dirty: Some(DirtySet {
+                    touched: vec![repo.join("new.rs")],
+                    deleted: vec![],
+                }),
+            })
+            .unwrap();
+
+        let second_count = call_count.load(Ordering::SeqCst);
+
+        assert!(second_count >= 2);
+        assert!(report.chunks_indexed >= 2);
+
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn dimension_mismatch_forces_full_reindex() {
+        let _home = set_test_home();
+        let repo = std::env::temp_dir().join(format!("sgrep_dim_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&repo).unwrap();
+
+        fs::write(repo.join("test.rs"), "fn test() { }").unwrap();
+
+        let embedder4 = Arc::new(DeterministicEmbedder::default());
+        let indexer4 = Indexer::new(embedder4);
+
+        indexer4
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: None,
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        let store = IndexStore::new(&repo).unwrap();
+        let index = store.load().unwrap().unwrap();
+        assert_eq!(index.metadata.vector_dim, 4);
+
+        #[derive(Clone)]
+        struct Embedder8Dim;
+
+        impl BatchEmbedder for Embedder8Dim {
+            fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+                Ok(texts.iter().map(|t| vec![t.len() as f32; 8]).collect())
+            }
+            fn dimension(&self) -> usize {
+                8
+            }
+        }
+
+        let embedder8 = Arc::new(Embedder8Dim);
+        let indexer8 = Indexer::new(embedder8);
+
+        fs::write(repo.join("new.rs"), "fn new() {}").unwrap();
+
+        let report = indexer8
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: false,
+                batch_size: None,
+                profile: false,
+                dirty: Some(DirtySet {
+                    touched: vec![repo.join("new.rs")],
+                    deleted: vec![],
+                }),
+            })
+            .unwrap();
+
+        let store = IndexStore::new(&repo).unwrap();
+        let index = store.load().unwrap().unwrap();
+
+        assert_eq!(index.metadata.vector_dim, 8);
+        assert!(index.vectors.iter().all(|v| v.len() == 8));
+        assert!(report.chunks_indexed >= 2);
+
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn deleted_files_removed_from_index() {
+        let embedder = Arc::new(StubEmbedder::default());
+        let indexer = Indexer::new(embedder);
+
+        let _home = set_test_home();
+        let repo = std::env::temp_dir().join(format!("sgrep_delete_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&repo).unwrap();
+
+        fs::write(repo.join("keep.rs"), "fn keep() { }").unwrap();
+        fs::write(repo.join("delete_me.rs"), "fn delete_me() { }").unwrap();
+        fs::write(repo.join("also_keep.rs"), "fn also_keep() { }").unwrap();
+
+        let first_report = indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: None,
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        assert_eq!(first_report.files_indexed, 3);
+
+        let store = IndexStore::new(&repo).unwrap();
+        let index = store.load().unwrap().unwrap();
+        let has_deleted_file = index
+            .chunks
+            .iter()
+            .any(|c| c.path.ends_with(std::path::Path::new("delete_me.rs")));
+        assert!(has_deleted_file);
+
+        fs::remove_file(repo.join("delete_me.rs")).unwrap();
+
+        let _second_report = indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: false,
+                batch_size: None,
+                profile: false,
+                dirty: Some(DirtySet {
+                    touched: vec![],
+                    deleted: vec![repo.join("delete_me.rs")],
+                }),
+            })
+            .unwrap();
+
+        let store = IndexStore::new(&repo).unwrap();
+        let index = store.load().unwrap().unwrap();
+
+        let still_has_deleted = index
+            .chunks
+            .iter()
+            .any(|c| c.path.ends_with(std::path::Path::new("delete_me.rs")));
+        assert!(!still_has_deleted);
+
+        let has_keep = index
+            .chunks
+            .iter()
+            .any(|c| c.path.ends_with(std::path::Path::new("keep.rs")));
+        let has_also_keep = index
+            .chunks
+            .iter()
+            .any(|c| c.path.ends_with(std::path::Path::new("also_keep.rs")));
+
+        assert!(has_keep);
+        assert!(has_also_keep);
+        assert!(index.chunks.len() < first_report.chunks_indexed);
+
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn deleted_directory_removes_all_nested_files() {
+        let embedder = Arc::new(StubEmbedder::default());
+        let indexer = Indexer::new(embedder);
+
+        let _home = set_test_home();
+        let repo = std::env::temp_dir().join(format!("sgrep_dir_delete_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&repo).unwrap();
+
+        let subdir = repo.join("subdir");
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(repo.join("root.rs"), "fn root() { }").unwrap();
+        fs::write(subdir.join("nested1.rs"), "fn nested1() { }").unwrap();
+        fs::write(subdir.join("nested2.rs"), "fn nested2() { }").unwrap();
+
+        indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: None,
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        let store = IndexStore::new(&repo).unwrap();
+        let index = store.load().unwrap().unwrap();
+
+        let nested_count = index
+            .chunks
+            .iter()
+            .filter(|c| {
+                let path_str = c.path.to_string_lossy();
+                path_str.contains("nested1") || path_str.contains("nested2")
+            })
+            .count();
+        assert!(nested_count >= 2);
+
+        fs::remove_dir_all(&subdir).unwrap();
+
+        indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: false,
+                batch_size: None,
+                profile: false,
+                dirty: Some(DirtySet {
+                    touched: vec![],
+                    deleted: vec![subdir.clone()],
+                }),
+            })
+            .unwrap();
+
+        let store = IndexStore::new(&repo).unwrap();
+        let index = store.load().unwrap().unwrap();
+
+        let remaining_nested = index
+            .chunks
+            .iter()
+            .filter(|c| {
+                let path_str = c.path.to_string_lossy();
+                path_str.contains("nested1") || path_str.contains("nested2")
+            })
+            .count();
+        assert_eq!(remaining_nested, 0);
+
+        let has_root = index
+            .chunks
+            .iter()
+            .any(|c| c.path.ends_with(std::path::Path::new("root.rs")));
+        assert!(has_root);
+
+        fs::remove_dir_all(&repo).ok();
+    }
 }
