@@ -6,6 +6,11 @@ This service provides:
 - /rerank - Reranking endpoint using Qwen3-Reranker-8B
 - /health - Health check endpoint
 
+Configuration via environment variables:
+- GPU_TIER: "budget" (T4), "balanced" (A10G), or "high" (L40S, default)
+- SGREP_EMBED_MODEL: Embedding model (default: Qwen/Qwen3-Embedding-8B)
+- SGREP_RERANK_MODEL: Reranker model (default: Qwen/Qwen3-Reranker-8B)
+
 Deploy with: modal deploy modal/service.py
 """
 
@@ -25,8 +30,9 @@ GPU_TIERS = {
 GPU_TIER = os.environ.get("GPU_TIER", "high")
 GPU_CONFIG = GPU_TIERS.get(GPU_TIER, "L40S")
 
-EMBED_MODEL = "Qwen/Qwen3-Embedding-8B"
-RERANK_MODEL = "Qwen/Qwen3-Reranker-8B"
+# Model configuration via environment variables
+EMBED_MODEL = os.environ.get("SGREP_EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
+RERANK_MODEL = os.environ.get("SGREP_RERANK_MODEL", "Qwen/Qwen3-Reranker-8B")
 
 MINUTES = 60
 
