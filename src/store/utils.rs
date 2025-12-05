@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use blake3::Hasher;
-use directories::ProjectDirs;
 
 pub fn find_worktree_root(path: &Path) -> Option<PathBuf> {
     let mut current = path.to_path_buf();
@@ -82,13 +81,7 @@ pub fn data_dir() -> PathBuf {
     if let Ok(home) = env::var("SGREP_HOME") {
         return PathBuf::from(home);
     }
-    ProjectDirs::from("dev", "RikaLabs", "sgrep")
-        .map(|d| d.data_local_dir().to_path_buf())
-        .unwrap_or_else(fallback_data_dir)
-}
-
-pub fn fallback_data_dir() -> PathBuf {
-    std::env::var_os("HOME")
+    env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".sgrep")
@@ -133,9 +126,14 @@ mod tests {
     }
 
     #[test]
-    fn fallback_uses_home_directory() {
-        let dir = fallback_data_dir();
+    fn data_dir_uses_home_sgrep() {
+        let prev_home = std::env::var("SGREP_HOME").ok();
+        std::env::remove_var("SGREP_HOME");
+        let dir = data_dir();
         assert!(dir.to_string_lossy().contains(".sgrep"));
+        if let Some(v) = prev_home {
+            std::env::set_var("SGREP_HOME", v);
+        }
     }
 
     #[test]
