@@ -5,14 +5,10 @@
 
 use crate::fts::Bm25FIndex;
 
-/// Cache key identifying when a BM25F index can be reused.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Bm25CacheKey {
-    /// Repository hash from IndexMetadata
     pub repo_hash: String,
-    /// Number of chunks in the index
     pub chunk_count: usize,
-    /// Whether CodeGraph symbols were included
     pub has_graph: bool,
 }
 
@@ -26,10 +22,6 @@ impl Bm25CacheKey {
     }
 }
 
-/// Single-entry BM25F cache with metrics for testing.
-///
-/// Uses a single-entry design since searches typically target one repository
-/// at a time. The entry is replaced when the key changes.
 pub struct Bm25FCache {
     entry: Option<(Bm25CacheKey, Bm25FIndex)>,
     hit_count: usize,
@@ -45,8 +37,6 @@ impl Bm25FCache {
         }
     }
 
-    /// Get the cached index if the key matches.
-    /// Increments hit_count on match, miss_count on mismatch.
     pub fn get(&mut self, key: &Bm25CacheKey) -> Option<&Bm25FIndex> {
         match &self.entry {
             Some((cached_key, index)) if cached_key == key => {
@@ -60,27 +50,22 @@ impl Bm25FCache {
         }
     }
 
-    /// Insert an index into the cache, replacing any existing entry.
     pub fn insert(&mut self, key: Bm25CacheKey, index: Bm25FIndex) {
         self.entry = Some((key, index));
     }
 
-    /// Clear the cache, removing any stored entry.
     pub fn clear(&mut self) {
         self.entry = None;
     }
 
-    /// Get the number of cache hits.
     pub fn hit_count(&self) -> usize {
         self.hit_count
     }
 
-    /// Get the number of cache misses.
     pub fn miss_count(&self) -> usize {
         self.miss_count
     }
 
-    /// Get the number of entries in the cache (0 or 1).
     pub fn entry_count(&self) -> usize {
         if self.entry.is_some() {
             1
@@ -99,8 +84,6 @@ impl Default for Bm25FCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Phase 1: Unit Tests for Cache Key
 
     #[test]
     fn cache_key_equals_with_same_values() {
@@ -129,8 +112,6 @@ mod tests {
         let key2 = Bm25CacheKey::new("hash123", 100, false);
         assert_ne!(key1, key2);
     }
-
-    // Phase 1: Unit Tests for Cache Operations
 
     #[test]
     fn bm25_cache_stores_and_retrieves() {
