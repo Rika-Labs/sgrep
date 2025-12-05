@@ -53,6 +53,12 @@ pub enum Commands {
         /// Show debug info (scores, timing)
         #[arg(long)]
         debug: bool,
+        /// Disable cross-encoder reranking (enabled by default)
+        #[arg(long)]
+        no_rerank: bool,
+        /// Oversample factor for reranking (default: 3, meaning fetch 3x candidates before rerank)
+        #[arg(long, default_value_t = 3)]
+        rerank_oversample: usize,
     },
     /// Index a repository for semantic search
     Index {
@@ -178,6 +184,54 @@ mod tests {
                 assert!(init);
             }
             _ => panic!("Expected Config command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_no_rerank_flag() {
+        let cli = Cli::parse_from(["sgrep", "search", "query", "--no-rerank"]);
+        match cli.command {
+            Commands::Search { no_rerank, .. } => {
+                assert!(no_rerank, "Expected --no-rerank flag to be true");
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn cli_search_rerank_enabled_by_default() {
+        let cli = Cli::parse_from(["sgrep", "search", "query"]);
+        match cli.command {
+            Commands::Search { no_rerank, .. } => {
+                assert!(!no_rerank, "Expected no_rerank to be false by default");
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_rerank_oversample() {
+        let cli = Cli::parse_from(["sgrep", "search", "query", "--rerank-oversample", "5"]);
+        match cli.command {
+            Commands::Search {
+                rerank_oversample, ..
+            } => {
+                assert_eq!(rerank_oversample, 5);
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn cli_rerank_oversample_default() {
+        let cli = Cli::parse_from(["sgrep", "search", "query"]);
+        match cli.command {
+            Commands::Search {
+                rerank_oversample, ..
+            } => {
+                assert_eq!(rerank_oversample, 3, "Expected default oversample to be 3");
+            }
+            _ => panic!("Expected Search command"),
         }
     }
 }
