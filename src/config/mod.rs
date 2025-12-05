@@ -26,8 +26,6 @@ pub struct ModalConfig {
     pub token_id: Option<String>,
     /// Modal token secret for CLI authentication (from modal.com dashboard)
     pub token_secret: Option<String>,
-    /// API token for Modal endpoint authentication
-    pub api_token: Option<String>,
     /// GPU tier: "budget" (T4), "balanced" (A10G), "high" (L40S)
     #[serde(default = "default_gpu_tier")]
     pub gpu_tier: String,
@@ -240,7 +238,8 @@ provider = "local"
 provider = "modal"
 
 [modal]
-api_token = "test-token"
+token_id = "ak-test"
+token_secret = "as-test"
 gpu_tier = "balanced"
 dimension = 1024
 batch_size = 64
@@ -248,7 +247,8 @@ endpoint = "https://example.modal.run"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
-        assert_eq!(config.modal.api_token, Some("test-token".to_string()));
+        assert_eq!(config.modal.token_id, Some("ak-test".to_string()));
+        assert_eq!(config.modal.token_secret, Some("as-test".to_string()));
         assert_eq!(config.modal.gpu_tier, "balanced");
         assert_eq!(config.modal.dimension, 1024);
         assert_eq!(config.modal.batch_size, 64);
@@ -262,7 +262,7 @@ endpoint = "https://example.modal.run"
     fn modal_config_defaults() {
         let toml = r#"
 [modal]
-api_token = "test-token"
+token_id = "ak-test"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.modal.gpu_tier, "high");
@@ -312,7 +312,8 @@ api_key = "tpuf_test_key"
 provider = "modal"
 
 [modal]
-api_token = "modal-token"
+token_id = "ak-test"
+token_secret = "as-test"
 gpu_tier = "high"
 dimension = 4096
 
@@ -322,7 +323,7 @@ region = "gcp-us-central1"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
-        assert_eq!(config.modal.api_token, Some("modal-token".to_string()));
+        assert_eq!(config.modal.token_id, Some("ak-test".to_string()));
         assert_eq!(config.turbopuffer.api_key, Some("tpuf-key".to_string()));
     }
 }

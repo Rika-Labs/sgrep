@@ -255,16 +255,6 @@ fn build_embedder(
 fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
     let config = Config::load().context("Failed to load config")?;
 
-    let api_token = config
-        .modal
-        .api_token
-        .or_else(|| env::var("SGREP_MODAL_TOKEN").ok())
-        .ok_or_else(|| {
-            anyhow!(
-                "Modal API token not found. Set SGREP_MODAL_TOKEN or add api_token to [modal] in config."
-            )
-        })?;
-
     let gpu_tier = if config.modal.gpu_tier.is_empty() {
         "high".to_string()
     } else {
@@ -299,7 +289,6 @@ fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
         );
         let deployer = ModalDeployer::new(
             gpu_tier,
-            api_token.clone(),
             config.modal.token_id.clone(),
             config.modal.token_secret.clone(),
         );
@@ -312,8 +301,7 @@ fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
         embed_endpoint
     };
 
-    let embedder = ModalEmbedder::new(endpoint, api_token, dimension)
-        .with_batch_size(batch_size);
+    let embedder = ModalEmbedder::new(endpoint, dimension).with_batch_size(batch_size);
 
     Ok(Arc::new(embedder))
 }
@@ -364,24 +352,6 @@ fn build_modal_reranker(
         }
     };
 
-    let api_token = config
-        .modal
-        .api_token
-        .or_else(|| env::var("SGREP_MODAL_TOKEN").ok());
-
-    let api_token = match api_token {
-        Some(t) => t,
-        None => {
-            if !json_mode {
-                eprintln!(
-                    "{} Modal reranker unavailable: no API token (set SGREP_MODAL_TOKEN)",
-                    style("⚠").yellow()
-                );
-            }
-            return None;
-        }
-    };
-
     let gpu_tier = if config.modal.gpu_tier.is_empty() {
         "high".to_string()
     } else {
@@ -390,7 +360,6 @@ fn build_modal_reranker(
 
     let deployer = ModalDeployer::new(
         gpu_tier,
-        api_token.clone(),
         config.modal.token_id.clone(),
         config.modal.token_secret.clone(),
     );
@@ -415,7 +384,7 @@ fn build_modal_reranker(
         );
     }
 
-    Some(Arc::new(ModalReranker::new(rerank_endpoint, api_token)))
+    Some(Arc::new(ModalReranker::new(rerank_endpoint)))
 }
 
 #[cfg(test)]

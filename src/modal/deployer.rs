@@ -21,7 +21,6 @@ struct EndpointCache {
 
 pub struct ModalDeployer {
     gpu_tier: String,
-    api_token: String,
     token_id: Option<String>,
     token_secret: Option<String>,
     cache_path: PathBuf,
@@ -30,14 +29,12 @@ pub struct ModalDeployer {
 impl ModalDeployer {
     pub fn new(
         gpu_tier: String,
-        api_token: String,
         token_id: Option<String>,
         token_secret: Option<String>,
     ) -> Self {
         let cache_path = Self::default_cache_path();
         Self {
             gpu_tier,
-            api_token,
             token_id,
             token_secret,
             cache_path,
@@ -156,32 +153,8 @@ impl ModalDeployer {
         Ok(())
     }
 
-    fn ensure_secret(&self) -> Result<()> {
-        let check = self
-            .modal_command(&["secret", "list"])
-            .output()
-            .context("Failed to list Modal secrets")?;
-
-        let stdout = String::from_utf8_lossy(&check.stdout);
-
-        if !stdout.contains("sgrep-auth") {
-            eprintln!("Creating Modal secret 'sgrep-auth'...");
-            let secret_value = format!("SGREP_API_TOKEN={}", self.api_token);
-            let status = self
-                .modal_command(&["secret", "create", "sgrep-auth", &secret_value])
-                .status()
-                .context("Failed to create Modal secret")?;
-
-            if !status.success() {
-                return Err(anyhow!("Failed to create Modal secret 'sgrep-auth'"));
-            }
-        }
-        Ok(())
-    }
-
     fn deploy(&self) -> Result<EndpointCache> {
         self.check_modal_cli()?;
-        self.ensure_secret()?;
 
         let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
         let service_path = temp_dir.path().join("service.py");
@@ -280,19 +253,17 @@ mod tests {
     fn new_deployer_has_correct_fields() {
         let deployer = ModalDeployer::new(
             "balanced".to_string(),
-            "test-token".to_string(),
             Some("token-id".to_string()),
             Some("token-secret".to_string()),
         );
         assert_eq!(deployer.gpu_tier, "balanced");
-        assert_eq!(deployer.api_token, "test-token");
         assert_eq!(deployer.token_id, Some("token-id".to_string()));
         assert_eq!(deployer.token_secret, Some("token-secret".to_string()));
     }
 
     #[test]
     fn parse_deploy_output_extracts_urls() {
-        let deployer = ModalDeployer::new("high".to_string(), "token".to_string(), None, None);
+        let deployer = ModalDeployer::new("high".to_string(), None, None);
         let output = r#"
 Creating objects...
 Created fastapi_endpoint embed at https://user--sgrep-offload-embed.modal.run
@@ -316,7 +287,7 @@ Created fastapi_endpoint health at https://user--sgrep-offload-health.modal.run
 
     #[test]
     fn check_health_returns_false_for_invalid_url() {
-        let deployer = ModalDeployer::new("high".to_string(), "token".to_string(), None, None);
+        let deployer = ModalDeployer::new("high".to_string(), None, None);
         let result = deployer.check_health("http://localhost:99999");
         assert!(result.is_ok());
         assert!(!result.unwrap());

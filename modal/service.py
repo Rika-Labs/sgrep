@@ -17,8 +17,6 @@ Deploy with: modal deploy modal/service.py
 import modal
 import os
 from pydantic import BaseModel
-from fastapi import HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import List, Tuple
 
 GPU_TIERS = {
@@ -76,21 +74,10 @@ class RerankResponse(BaseModel):
     model: str
 
 
-auth_scheme = HTTPBearer()
-
-
-def verify_token(token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
-    """Verify the Bearer token against the stored secret."""
-    expected = os.environ.get("SGREP_API_TOKEN")
-    if not expected or token.credentials != expected:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-
 @app.cls(
     gpu=GPU_CONFIG,
     image=image,
     scaledown_window=5 * MINUTES,
-    secrets=[modal.Secret.from_name("sgrep-auth")],
 )
 class Embedder:
     @modal.enter()
@@ -108,9 +95,9 @@ class Embedder:
         return [list(out.outputs.embedding[:dimension]) for out in outputs]
 
 
-@app.function(image=image, secrets=[modal.Secret.from_name("sgrep-auth")])
+@app.function(image=image)
 @modal.fastapi_endpoint(method="POST")
-def embed(request: EmbedRequest, _: None = Depends(verify_token)) -> EmbedResponse:
+def embed(request: EmbedRequest) -> EmbedResponse:
     """Embed texts using Qwen3-Embedding-8B."""
     embedder = Embedder()
     embeddings = embedder.embed.remote(request.texts, request.dimension)
@@ -125,7 +112,6 @@ def embed(request: EmbedRequest, _: None = Depends(verify_token)) -> EmbedRespon
     gpu=GPU_CONFIG,
     image=image,
     scaledown_window=5 * MINUTES,
-    secrets=[modal.Secret.from_name("sgrep-auth")],
 )
 class Reranker:
     @modal.enter()
@@ -173,9 +159,9 @@ class Reranker:
         return indexed_scores[:top_k]
 
 
-@app.function(image=image, secrets=[modal.Secret.from_name("sgrep-auth")])
+@app.function(image=image)
 @modal.fastapi_endpoint(method="POST")
-def rerank(request: RerankRequest, _: None = Depends(verify_token)) -> RerankResponse:
+def rerank(request: RerankRequest) -> RerankResponse:
     """Rerank documents by relevance to query using Qwen3-Reranker-8B."""
     reranker = Reranker()
     results = reranker.rerank.remote(request.query, request.documents, request.top_k)

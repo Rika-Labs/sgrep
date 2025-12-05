@@ -32,20 +32,15 @@ struct RerankResponse {
 pub struct ModalReranker {
     client: ureq::Agent,
     endpoint: String,
-    token: String,
 }
 
 impl ModalReranker {
-    pub fn new(endpoint: String, token: String) -> Self {
+    pub fn new(endpoint: String) -> Self {
         let client = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .build();
 
-        Self {
-            client,
-            endpoint,
-            token,
-        }
+        Self { client, endpoint }
     }
 
     pub fn rerank(
@@ -70,10 +65,6 @@ impl ModalReranker {
             match self.do_rerank(&request) {
                 Ok(results) => return Ok(results),
                 Err(e) => {
-                    if e.to_string().contains("Authentication failed") {
-                        return Err(e);
-                    }
-
                     if attempt < MAX_RETRIES {
                         eprintln!(
                             "Modal rerank retry {}/{}: {}",
@@ -95,13 +86,11 @@ impl ModalReranker {
         let response = self
             .client
             .post(&self.endpoint)
-            .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .send_json(request)
             .map_err(|e| {
                 if let ureq::Error::Status(status, _) = &e {
                     match *status {
-                        401 => anyhow!("Authentication failed: invalid Modal API token"),
                         429 => anyhow!("Rate limited by Modal. Please wait and retry."),
                         500..=599 => anyhow!("Modal server error ({}). Please retry.", status),
                         _ => anyhow!("Modal request failed with status {}: {}", status, e),
@@ -136,20 +125,13 @@ mod tests {
 
     #[test]
     fn new_reranker_has_correct_fields() {
-        let reranker = ModalReranker::new(
-            "https://rerank.modal.run".to_string(),
-            "test-token".to_string(),
-        );
+        let reranker = ModalReranker::new("https://rerank.modal.run".to_string());
         assert_eq!(reranker.endpoint, "https://rerank.modal.run");
-        assert_eq!(reranker.token, "test-token");
     }
 
     #[test]
     fn rerank_returns_empty_for_empty_documents() {
-        let reranker = ModalReranker::new(
-            "https://rerank.modal.run".to_string(),
-            "test-token".to_string(),
-        );
+        let reranker = ModalReranker::new("https://rerank.modal.run".to_string());
         let result = reranker.rerank("query", &[], 10);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());

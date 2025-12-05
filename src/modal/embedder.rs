@@ -28,13 +28,12 @@ struct EmbedResponse {
 pub struct ModalEmbedder {
     client: ureq::Agent,
     endpoint: String,
-    token: String,
     dimension: usize,
     batch_size: usize,
 }
 
 impl ModalEmbedder {
-    pub fn new(endpoint: String, token: String, dimension: usize) -> Self {
+    pub fn new(endpoint: String, dimension: usize) -> Self {
         let client = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .build();
@@ -42,7 +41,6 @@ impl ModalEmbedder {
         Self {
             client,
             endpoint,
-            token,
             dimension,
             batch_size: DEFAULT_BATCH_SIZE,
         }
@@ -62,13 +60,11 @@ impl ModalEmbedder {
         let response = self
             .client
             .post(&self.endpoint)
-            .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .send_json(&request)
             .map_err(|e| {
                 if let ureq::Error::Status(status, _) = &e {
                     match *status {
-                        401 => anyhow!("Authentication failed: invalid Modal API token"),
                         429 => anyhow!("Rate limited by Modal. Please wait and retry."),
                         500..=599 => anyhow!("Modal server error ({}). Please retry.", status),
                         _ => anyhow!("Modal request failed with status {}: {}", status, e),
@@ -105,10 +101,6 @@ impl BatchEmbedder for ModalEmbedder {
                         break;
                     }
                     Err(e) => {
-                        if e.to_string().contains("Authentication failed") {
-                            return Err(e);
-                        }
-
                         if attempt < MAX_RETRIES {
                             eprintln!(
                                 "Modal embed retry {}/{}: {}",
@@ -142,45 +134,27 @@ mod tests {
 
     #[test]
     fn new_embedder_has_correct_fields() {
-        let embedder = ModalEmbedder::new(
-            "https://embed.modal.run".to_string(),
-            "test-token".to_string(),
-            4096,
-        );
+        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 4096);
         assert_eq!(embedder.endpoint, "https://embed.modal.run");
-        assert_eq!(embedder.token, "test-token");
         assert_eq!(embedder.dimension, 4096);
         assert_eq!(embedder.batch_size, DEFAULT_BATCH_SIZE);
     }
 
     #[test]
     fn with_batch_size_sets_batch_size() {
-        let embedder = ModalEmbedder::new(
-            "https://embed.modal.run".to_string(),
-            "test-token".to_string(),
-            4096,
-        )
-        .with_batch_size(64);
+        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 4096).with_batch_size(64);
         assert_eq!(embedder.batch_size, 64);
     }
 
     #[test]
     fn dimension_returns_correct_value() {
-        let embedder = ModalEmbedder::new(
-            "https://embed.modal.run".to_string(),
-            "test-token".to_string(),
-            1024,
-        );
+        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 1024);
         assert_eq!(embedder.dimension(), 1024);
     }
 
     #[test]
     fn embed_batch_returns_empty_for_empty_input() {
-        let embedder = ModalEmbedder::new(
-            "https://embed.modal.run".to_string(),
-            "test-token".to_string(),
-            4096,
-        );
+        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 4096);
         let result = embedder.embed_batch(&[]);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());

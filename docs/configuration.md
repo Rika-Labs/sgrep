@@ -57,7 +57,6 @@ Offload embeddings and reranking to [Modal.dev](https://modal.com) GPUs for fast
 [modal]
 token_id = "ak-..."              # Modal token ID from https://modal.com/settings
 token_secret = "as-..."          # Modal token secret from https://modal.com/settings
-api_token = "your-api-token"     # or set SGREP_MODAL_TOKEN (for endpoint auth)
 gpu_tier = "high"                # budget (T4), balanced (A10G), high (L40S)
 dimension = 4096                 # embedding dimension
 batch_size = 32                  # texts per request
@@ -102,7 +101,6 @@ namespace_prefix = "sgrep"       # namespace prefix for indexes
 - `SGREP_INIT_TIMEOUT_SECS` to extend model startup (default `120`)
 - `MODAL_TOKEN_ID` for Modal CLI authentication (token ID from modal.com/settings)
 - `MODAL_TOKEN_SECRET` for Modal CLI authentication (token secret from modal.com/settings)
-- `SGREP_MODAL_TOKEN` for Modal.dev endpoint API authentication
 - `SGREP_OFFLOAD` to enable Modal.dev offload (`1` or `true`)
 - `SGREP_REMOTE` to enable Turbopuffer remote storage (`1` or `true`)
 - `HTTP_PROXY` / `HTTPS_PROXY` for model downloads
