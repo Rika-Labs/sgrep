@@ -68,6 +68,7 @@ num_cpus = "1.16"
 # Query expansion with Qwen2.5 via llama.cpp
 llama-cpp-2 = "0.1"
 encoding_rs = "0.8"
+tempfile = "3.20"
 
 [dev-dependencies]
 serial_test = "3.2"

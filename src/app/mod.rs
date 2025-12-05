@@ -12,13 +12,11 @@ use tracing::{info, warn};
 use crate::cli::{resolve_repo_path, Cli, Commands};
 use crate::config::Config;
 use crate::embedding::{self, Embedder, PooledEmbedder};
+use crate::modal::{ModalDeployer, ModalEmbedder};
 use crate::output::JsonResponse;
 use crate::threading::{CpuPreset, ThreadConfig};
 use crate::{indexer, search, store, watch};
 
-/// Parameters for executing a search operation.
-/// Consolidates the search-related parameters into a single struct
-/// to improve readability and reduce function parameter count (KISS principle).
 pub struct SearchParams<'a> {
     pub query: &'a str,
     pub path: &'a Path,
@@ -30,6 +28,7 @@ pub struct SearchParams<'a> {
     pub debug: bool,
     pub no_rerank: bool,
     pub rerank_oversample: usize,
+    pub offload: bool,
 }
 
 struct ProgressLine {
@@ -64,8 +63,6 @@ impl ProgressLine {
     }
 }
 
-/// Context needed to render search results.
-/// Consolidates the 7 render-related parameters into a single struct.
 pub struct RenderContext<'a> {
     pub results: Vec<search::SearchResult>,
     pub query: &'a str,
@@ -96,7 +93,15 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
         return handle_config(*init, *show_model_dir, *verify_model);
     }
 
-    let embedder = build_embedder(cli.offline, cli.device.clone())?;
+    // Extract offload flag from command to determine embedder type
+    let offload = match &cli.command {
+        Commands::Index { offload, .. } => *offload,
+        Commands::Search { offload, .. } => *offload,
+        Commands::Watch { offload, .. } => *offload,
+        Commands::Config { .. } => false,
+    };
+
+    let embedder = build_embedder(cli.offline, cli.device.clone(), offload)?;
 
     match cli.command {
         Commands::Index {
@@ -106,6 +111,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             profile,
             stats,
             json,
+            offload: _offload,
+            remote: _remote,
         } => {
             if stats {
                 return handle_index_stats(path, json);
@@ -123,26 +130,35 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             debug,
             no_rerank,
             rerank_oversample,
-        } => handle_search(
-            embedder,
-            SearchParams {
-                query: &query,
-                path: &path,
-                limit,
-                context,
-                glob,
-                filters,
-                json,
-                debug,
-                no_rerank,
-                rerank_oversample,
-            },
-        ),
+            offload,
+            remote: _remote,
+        } => {
+            handle_search(
+                embedder,
+                SearchParams {
+                    query: &query,
+                    path: &path,
+                    limit,
+                    context,
+                    glob,
+                    filters,
+                    json,
+                    debug,
+                    no_rerank,
+                    rerank_oversample,
+                    offload,
+                },
+            )
+        }
         Commands::Watch {
             path,
             debounce_ms,
             batch_size,
-        } => handle_watch(embedder, path, debounce_ms, batch_size),
+            offload: _offload,
+            remote: _remote,
+        } => {
+            handle_watch(embedder, path, debounce_ms, batch_size)
+        }
         Commands::Config { .. } => unreachable!(), // Handled above
     }
 }
@@ -150,8 +166,9 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
 fn build_embedder(
     offline: bool,
     device: Option<String>,
+    offload: bool,
 ) -> Result<Arc<dyn embedding::BatchEmbedder>> {
-    let progress = ProgressLine::stderr();
+    let _progress = ProgressLine::stderr();
 
     if env::var("TOKENIZERS_PARALLELISM").is_err() {
         env::set_var("TOKENIZERS_PARALLELISM", "true");
@@ -163,6 +180,11 @@ fn build_embedder(
 
     if let Some(device) = device {
         env::set_var("SGREP_DEVICE", device);
+    }
+
+    // If offload is enabled, use Modal embedder
+    if offload {
+        return build_modal_embedder();
     }
 
     embedding::configure_offline_env(offline)?;
@@ -180,11 +202,77 @@ fn build_embedder(
     Ok(embedder)
 }
 
+fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
+    let config = Config::load().context("Failed to load config")?;
+
+    let api_token = config
+        .modal
+        .api_token
+        .or_else(|| env::var("SGREP_MODAL_TOKEN").ok())
+        .ok_or_else(|| {
+            anyhow!(
+                "Modal API token not found. Set SGREP_MODAL_TOKEN or add api_token to [modal] in config."
+            )
+        })?;
+
+    let gpu_tier = if config.modal.gpu_tier.is_empty() {
+        "high".to_string()
+    } else {
+        config.modal.gpu_tier.clone()
+    };
+
+    let dimension = if config.modal.dimension == 0 {
+        4096
+    } else {
+        config.modal.dimension
+    };
+
+    let batch_size = if config.modal.batch_size == 0 {
+        32
+    } else {
+        config.modal.batch_size
+    };
+
+    eprintln!(
+        "{} Using Modal embedder (GPU: {}, dim: {})",
+        style("ℹ").cyan(),
+        gpu_tier,
+        dimension
+    );
+
+    let endpoint = if let Some(endpoint) = config.modal.endpoint {
+        endpoint
+    } else {
+        eprintln!(
+            "{} Auto-deploying Modal service...",
+            style("⏳").yellow()
+        );
+        let deployer = ModalDeployer::new(gpu_tier, api_token.clone());
+        let (embed_endpoint, _rerank_endpoint) = deployer.ensure_deployed()?;
+        eprintln!(
+            "{} Modal service deployed: {}",
+            style("✔").green(),
+            embed_endpoint
+        );
+        embed_endpoint
+    };
+
+    let embedder = ModalEmbedder::new(endpoint, api_token, dimension)
+        .with_batch_size(batch_size);
+
+    Ok(Arc::new(embedder))
+}
+
 #[cfg(not(test))]
 fn build_reranker_silent(
     json_mode: bool,
+    offload: bool,
 ) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
     use crate::reranker::CrossEncoderReranker;
+
+    if offload {
+        return build_modal_reranker(json_mode);
+    }
 
     match CrossEncoderReranker::new(!json_mode) {
         Ok(reranker) => Some(Arc::new(reranker)),
@@ -201,9 +289,79 @@ fn build_reranker_silent(
     }
 }
 
+#[cfg(not(test))]
+fn build_modal_reranker(
+    json_mode: bool,
+) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
+    use crate::modal::ModalReranker;
+
+    let config = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            if !json_mode {
+                eprintln!(
+                    "{} Modal reranker config error: {}",
+                    style("⚠").yellow(),
+                    e
+                );
+            }
+            return None;
+        }
+    };
+
+    let api_token = config
+        .modal
+        .api_token
+        .or_else(|| env::var("SGREP_MODAL_TOKEN").ok());
+
+    let api_token = match api_token {
+        Some(t) => t,
+        None => {
+            if !json_mode {
+                eprintln!(
+                    "{} Modal reranker unavailable: no API token (set SGREP_MODAL_TOKEN)",
+                    style("⚠").yellow()
+                );
+            }
+            return None;
+        }
+    };
+
+    let gpu_tier = if config.modal.gpu_tier.is_empty() {
+        "high".to_string()
+    } else {
+        config.modal.gpu_tier.clone()
+    };
+
+    let deployer = ModalDeployer::new(gpu_tier, api_token.clone());
+    let rerank_endpoint = match deployer.get_rerank_endpoint() {
+        Ok(endpoint) => endpoint,
+        Err(e) => {
+            if !json_mode {
+                eprintln!(
+                    "{} Modal reranker unavailable: {}",
+                    style("⚠").yellow(),
+                    e
+                );
+            }
+            return None;
+        }
+    };
+
+    if !json_mode {
+        eprintln!(
+            "{} Using Modal reranker (Qwen3-Reranker-8B)",
+            style("ℹ").cyan()
+        );
+    }
+
+    Some(Arc::new(ModalReranker::new(rerank_endpoint, api_token)))
+}
+
 #[cfg(test)]
 fn build_reranker_silent(
     _json_mode: bool,
+    _offload: bool,
 ) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
     None
 }
@@ -417,7 +575,7 @@ fn handle_search(
     let reranker = if params.no_rerank {
         None
     } else {
-        build_reranker_silent(params.json)
+        build_reranker_silent(params.json, params.offload)
     };
 
     let mut engine = match &reranker {
@@ -722,7 +880,7 @@ mod tests {
         env::remove_var("SGREP_DEVICE");
         // Use non-existent config to force local provider
         env::set_var("SGREP_CONFIG", "/nonexistent/config.toml");
-        let _ = build_embedder(true, Some("cpu".into())).unwrap();
+        let _ = build_embedder(true, Some("cpu".into()), false).unwrap();
         assert_eq!(env::var("TOKENIZERS_PARALLELISM").unwrap(), "true");
         assert_eq!(env::var("SGREP_OFFLINE").unwrap(), "1");
         assert_eq!(env::var("SGREP_DEVICE").unwrap(), "cpu");
@@ -766,7 +924,7 @@ mod tests {
     #[test]
     fn build_embedder_respects_use_pooled_flag() {
         env::set_var("SGREP_USE_POOLED_EMBEDDER", "false");
-        let embedder = build_embedder(false, None).unwrap();
+        let embedder = build_embedder(false, None, false).unwrap();
         let ty = type_name_of_val(embedder.as_ref());
         assert!(
             ty.contains("Embedder"),
@@ -971,6 +1129,8 @@ mod tests {
                 profile: false,
                 stats: false,
                 json: false,
+                offload: false,
+                remote: false,
             },
         };
         run_with_cli(cli).unwrap();
@@ -991,6 +1151,8 @@ mod tests {
                 path: Some(repo.clone()),
                 debounce_ms: 50,
                 batch_size: Some(16),
+                offload: false,
+                remote: false,
             },
         };
         run_with_cli(cli).unwrap();
@@ -1031,6 +1193,8 @@ mod tests {
                 debug: false,
                 no_rerank: false,
                 rerank_oversample: 3,
+                offload: false,
+                remote: false,
             },
         };
         run_with_cli(cli).unwrap();
@@ -1132,6 +1296,7 @@ mod tests {
             debug: true,
             no_rerank: false,
             rerank_oversample: 3,
+            offload: false,
         };
 
         assert_eq!(params.query, "test query");
@@ -1144,6 +1309,7 @@ mod tests {
         assert!(params.debug);
         assert!(!params.no_rerank);
         assert_eq!(params.rerank_oversample, 3);
+        assert!(!params.offload);
     }
 
     #[test]

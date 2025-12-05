@@ -9,6 +9,7 @@ use serde::Deserialize;
 pub enum EmbeddingProviderType {
     #[default]
     Local,
+    Modal,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -18,11 +19,66 @@ pub struct EmbeddingConfig {
     pub provider: EmbeddingProviderType,
 }
 
+/// Configuration for Modal.dev offload
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModalConfig {
+    /// API token for Modal endpoint authentication
+    pub api_token: Option<String>,
+    /// GPU tier: "budget" (T4), "balanced" (A10G), "high" (L40S)
+    #[serde(default = "default_gpu_tier")]
+    pub gpu_tier: String,
+    /// Embedding dimension (384-4096)
+    #[serde(default = "default_dimension")]
+    pub dimension: usize,
+    /// Batch size for embedding requests
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// Cached endpoint URL (auto-populated after first deploy)
+    pub endpoint: Option<String>,
+}
+
+fn default_gpu_tier() -> String {
+    "high".to_string()
+}
+
+fn default_dimension() -> usize {
+    4096
+}
+
+fn default_batch_size() -> usize {
+    32
+}
+
+/// Configuration for Turbopuffer remote storage
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TurbopufferConfig {
+    /// Turbopuffer API key
+    pub api_key: Option<String>,
+    /// Region (default: gcp-us-central1)
+    #[serde(default = "default_region")]
+    pub region: String,
+    /// Custom namespace prefix (default: "sgrep")
+    #[serde(default = "default_namespace_prefix")]
+    pub namespace_prefix: String,
+}
+
+fn default_region() -> String {
+    "gcp-us-central1".to_string()
+}
+
+fn default_namespace_prefix() -> String {
+    "sgrep".to_string()
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
 pub struct Config {
     #[serde(default)]
     pub embedding: EmbeddingConfig,
+    #[serde(default)]
+    pub modal: ModalConfig,
+    #[serde(default)]
+    pub turbopuffer: TurbopufferConfig,
 }
 
 #[allow(dead_code)]
@@ -170,5 +226,99 @@ provider = "local"
 
         env::remove_var("SGREP_CONFIG");
         std::fs::remove_dir_all(&temp).ok();
+    }
+
+    // Modal config tests
+    #[test]
+    fn parse_modal_config() {
+        let toml = r#"
+[embedding]
+provider = "modal"
+
+[modal]
+api_token = "test-token"
+gpu_tier = "balanced"
+dimension = 1024
+batch_size = 64
+endpoint = "https://example.modal.run"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
+        assert_eq!(config.modal.api_token, Some("test-token".to_string()));
+        assert_eq!(config.modal.gpu_tier, "balanced");
+        assert_eq!(config.modal.dimension, 1024);
+        assert_eq!(config.modal.batch_size, 64);
+        assert_eq!(
+            config.modal.endpoint,
+            Some("https://example.modal.run".to_string())
+        );
+    }
+
+    #[test]
+    fn modal_config_defaults() {
+        let toml = r#"
+[modal]
+api_token = "test-token"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.modal.gpu_tier, "high");
+        assert_eq!(config.modal.dimension, 4096);
+        assert_eq!(config.modal.batch_size, 32);
+        assert_eq!(config.modal.endpoint, None);
+    }
+
+    #[test]
+    fn empty_config_has_modal_defaults() {
+        let config = Config::default();
+        assert_eq!(config.modal.gpu_tier, "");
+        assert_eq!(config.modal.dimension, 0);
+    }
+
+    // Turbopuffer config tests
+    #[test]
+    fn parse_turbopuffer_config() {
+        let toml = r#"
+[turbopuffer]
+api_key = "tpuf_test_key"
+region = "aws-us-east-1"
+namespace_prefix = "myproject"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.turbopuffer.api_key, Some("tpuf_test_key".to_string()));
+        assert_eq!(config.turbopuffer.region, "aws-us-east-1");
+        assert_eq!(config.turbopuffer.namespace_prefix, "myproject");
+    }
+
+    #[test]
+    fn turbopuffer_config_defaults() {
+        let toml = r#"
+[turbopuffer]
+api_key = "tpuf_test_key"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.turbopuffer.region, "gcp-us-central1");
+        assert_eq!(config.turbopuffer.namespace_prefix, "sgrep");
+    }
+
+    // Combined config test
+    #[test]
+    fn parse_full_config() {
+        let toml = r#"
+[embedding]
+provider = "modal"
+
+[modal]
+api_token = "modal-token"
+gpu_tier = "high"
+dimension = 4096
+
+[turbopuffer]
+api_key = "tpuf-key"
+region = "gcp-us-central1"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
+        assert_eq!(config.modal.api_token, Some("modal-token".to_string()));
+        assert_eq!(config.turbopuffer.api_key, Some("tpuf-key".to_string()));
     }
 }
