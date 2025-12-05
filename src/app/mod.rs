@@ -452,6 +452,7 @@ fn handle_search(
                     filters: params.filters.clone(),
                     rerank: rerank_enabled,
                     oversample_factor: params.rerank_oversample,
+                    dedup: search::DedupOptions::default(),
                 },
             )?;
             let elapsed = start.elapsed();
@@ -480,6 +481,7 @@ fn handle_search(
             filters: params.filters,
             rerank: rerank_enabled,
             oversample_factor: params.rerank_oversample,
+            dedup: search::DedupOptions::default(),
         },
     )?;
     let elapsed = start.elapsed();
