@@ -21,7 +21,6 @@ from fastapi import HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import List, Tuple
 
-# GPU Tiers: configured via GPU_TIER environment variable
 GPU_TIERS = {
     "budget": "T4",        # ~$0.25/hr, slower
     "balanced": "A10G",    # ~$0.45/hr, good balance
@@ -30,7 +29,6 @@ GPU_TIERS = {
 GPU_TIER = os.environ.get("GPU_TIER", "high")
 GPU_CONFIG = GPU_TIERS.get(GPU_TIER, "L40S")
 
-# Model configuration via environment variables
 EMBED_MODEL = os.environ.get("SGREP_EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
 RERANK_MODEL = os.environ.get("SGREP_RERANK_MODEL", "Qwen/Qwen3-Reranker-8B")
 
@@ -51,7 +49,6 @@ image = (
 )
 
 
-# Request/Response models
 class EmbedRequest(BaseModel):
     texts: List[str]
     dimension: int = 4096
@@ -89,7 +86,6 @@ def verify_token(token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
-# Embedding Service
 @app.cls(
     gpu=GPU_CONFIG,
     image=image,
@@ -125,7 +121,6 @@ def embed(request: EmbedRequest, _: None = Depends(verify_token)) -> EmbedRespon
     )
 
 
-# Reranking Service
 @app.cls(
     gpu=GPU_CONFIG,
     image=image,
@@ -190,7 +185,6 @@ def rerank(request: RerankRequest, _: None = Depends(verify_token)) -> RerankRes
     )
 
 
-# Health check (no auth required)
 @app.function(image=image)
 @modal.fastapi_endpoint(method="GET")
 def health():

@@ -233,7 +233,6 @@ fn build_embedder(
         env::set_var("SGREP_DEVICE", device);
     }
 
-    // If offload is enabled, use Modal embedder
     if offload {
         return build_modal_embedder();
     }
