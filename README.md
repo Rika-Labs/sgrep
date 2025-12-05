@@ -16,8 +16,9 @@ Fast, private, local semantic code search for developers and coding agents.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install.sh | sh
-sgrep search "where do we handle authentication?"
+sgrep index .
 sgrep watch
+sgrep search "where do we handle authentication?"
 ```
 
 Want source builds? `cargo install --path .`
