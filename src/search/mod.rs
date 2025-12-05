@@ -569,14 +569,21 @@ impl SearchEngine {
         let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
         let bm25f_index = self.get_or_build_bm25f(&index.chunks, &index.metadata.repo_hash);
 
-        let hnsw = build_hnsw_index(index.metadata.vector_dim, index.len())?;
-        for i in 0..index.len() {
-            hnsw.add(i as u64, index.get_vector(i))
-                .map_err(|e| anyhow::anyhow!("HNSW add failed: {}", e))?;
-        }
+        let fresh_hnsw;
+        let hnsw: &usearch::Index = if let Some(loaded) = index.get_hnsw() {
+            loaded
+        } else {
+            fresh_hnsw = build_hnsw_index(index.metadata.vector_dim, index.len())?;
+            for i in 0..index.len() {
+                fresh_hnsw
+                    .add(i as u64, index.get_vector(i))
+                    .map_err(|e| anyhow::anyhow!("HNSW add failed: {}", e))?;
+            }
+            &fresh_hnsw
+        };
 
         let candidates =
-            search_hnsw_candidates(&hnsw, &query_vec, PRF_TOP_K.max(fetch_limit), index.len())?;
+            search_hnsw_candidates(hnsw, &query_vec, PRF_TOP_K.max(fetch_limit), index.len())?;
 
         let valid_candidates: Vec<usize> = candidates
             .into_iter()
