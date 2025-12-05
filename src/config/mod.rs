@@ -22,6 +22,10 @@ pub struct EmbeddingConfig {
 /// Configuration for Modal.dev offload
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModalConfig {
+    /// Modal token ID for CLI authentication (from modal.com dashboard)
+    pub token_id: Option<String>,
+    /// Modal token secret for CLI authentication (from modal.com dashboard)
+    pub token_secret: Option<String>,
     /// API token for Modal endpoint authentication
     pub api_token: Option<String>,
     /// GPU tier: "budget" (T4), "balanced" (A10G), "high" (L40S)

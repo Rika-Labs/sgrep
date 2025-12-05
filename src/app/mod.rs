@@ -297,7 +297,12 @@ fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
             "{} Auto-deploying Modal service...",
             style("⏳").yellow()
         );
-        let deployer = ModalDeployer::new(gpu_tier, api_token.clone());
+        let deployer = ModalDeployer::new(
+            gpu_tier,
+            api_token.clone(),
+            config.modal.token_id.clone(),
+            config.modal.token_secret.clone(),
+        );
         let (embed_endpoint, _rerank_endpoint) = deployer.ensure_deployed()?;
         eprintln!(
             "{} Modal service deployed: {}",
@@ -383,7 +388,12 @@ fn build_modal_reranker(
         config.modal.gpu_tier.clone()
     };
 
-    let deployer = ModalDeployer::new(gpu_tier, api_token.clone());
+    let deployer = ModalDeployer::new(
+        gpu_tier,
+        api_token.clone(),
+        config.modal.token_id.clone(),
+        config.modal.token_secret.clone(),
+    );
     let rerank_endpoint = match deployer.get_rerank_endpoint() {
         Ok(endpoint) => endpoint,
         Err(e) => {

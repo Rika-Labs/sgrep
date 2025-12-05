@@ -22,15 +22,24 @@ struct EndpointCache {
 pub struct ModalDeployer {
     gpu_tier: String,
     api_token: String,
+    token_id: Option<String>,
+    token_secret: Option<String>,
     cache_path: PathBuf,
 }
 
 impl ModalDeployer {
-    pub fn new(gpu_tier: String, api_token: String) -> Self {
+    pub fn new(
+        gpu_tier: String,
+        api_token: String,
+        token_id: Option<String>,
+        token_secret: Option<String>,
+    ) -> Self {
         let cache_path = Self::default_cache_path();
         Self {
             gpu_tier,
             api_token,
+            token_id,
+            token_secret,
             cache_path,
         }
     }
@@ -47,40 +56,77 @@ impl ModalDeployer {
         PathBuf::from(".sgrep").join("modal_cache.json")
     }
 
-    pub fn check_modal_cli() -> Result<()> {
-        if Command::new("modal").arg("--version").output().is_ok() {
-            return Ok(());
+    pub fn check_modal_cli(&self) -> Result<()> {
+        // Check if Modal CLI is installed
+        if Command::new("modal").arg("--version").output().is_err() {
+            eprintln!("Modal CLI not found. Installing...");
+            let pip = if Command::new("pip3").arg("--version").output().is_ok() {
+                "pip3"
+            } else {
+                "pip"
+            };
+
+            let status = Command::new(pip)
+                .args(["install", "modal"])
+                .status()
+                .context("Failed to run pip install modal")?;
+
+            if !status.success() {
+                return Err(anyhow!(
+                    "Failed to install Modal CLI. Install manually with: pip install modal"
+                ));
+            }
+            eprintln!("Modal CLI installed.");
         }
 
-        eprintln!("Modal CLI not found. Installing...");
-        let pip = if Command::new("pip3").arg("--version").output().is_ok() {
-            "pip3"
-        } else {
-            "pip"
-        };
+        // Check authentication - prefer config tokens over existing auth
+        if let (Some(token_id), Some(token_secret)) = (&self.token_id, &self.token_secret) {
+            // Verify tokens work by running a command with them set
+            let check = Command::new("modal")
+                .args(["token", "show"])
+                .env("MODAL_TOKEN_ID", token_id)
+                .env("MODAL_TOKEN_SECRET", token_secret)
+                .output();
 
-        let status = Command::new(pip)
-            .args(["install", "modal"])
-            .status()
-            .context("Failed to run pip install modal")?;
-
-        if !status.success() {
+            if check.is_ok() && check.unwrap().status.success() {
+                return Ok(());
+            }
             return Err(anyhow!(
-                "Failed to install Modal CLI. Install manually with: pip install modal"
+                "Modal authentication failed. Check your token_id and token_secret in config.\n\
+                 Get tokens from: https://modal.com/settings"
             ));
         }
 
-        eprintln!("Modal CLI installed. Checking authentication...");
+        // No tokens in config - check if already authenticated
         let token_check = Command::new("modal").args(["token", "show"]).output();
 
         if token_check.is_err() || !token_check.unwrap().status.success() {
             return Err(anyhow!(
-                "Modal CLI installed but not authenticated.\n\
-                 Run: modal token new"
+                "Modal CLI not authenticated.\n\
+                 Either:\n\
+                 1. Add token_id and token_secret to your config (~/.sgrep/config.toml):\n\
+                    [modal]\n\
+                    token_id = \"your-token-id\"\n\
+                    token_secret = \"your-token-secret\"\n\n\
+                 2. Or run: modal token new\n\n\
+                 Get tokens from: https://modal.com/settings"
             ));
         }
 
         Ok(())
+    }
+
+    /// Build a Command with Modal token env vars set if available
+    fn modal_command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new("modal");
+        cmd.args(args);
+        if let Some(token_id) = &self.token_id {
+            cmd.env("MODAL_TOKEN_ID", token_id);
+        }
+        if let Some(token_secret) = &self.token_secret {
+            cmd.env("MODAL_TOKEN_SECRET", token_secret);
+        }
+        cmd
     }
 
     pub fn check_health(&self, base_url: &str) -> Result<bool> {
@@ -111,8 +157,8 @@ impl ModalDeployer {
     }
 
     fn ensure_secret(&self) -> Result<()> {
-        let check = Command::new("modal")
-            .args(["secret", "list"])
+        let check = self
+            .modal_command(&["secret", "list"])
             .output()
             .context("Failed to list Modal secrets")?;
 
@@ -120,13 +166,9 @@ impl ModalDeployer {
 
         if !stdout.contains("sgrep-auth") {
             eprintln!("Creating Modal secret 'sgrep-auth'...");
-            let status = Command::new("modal")
-                .args([
-                    "secret",
-                    "create",
-                    "sgrep-auth",
-                    &format!("SGREP_API_TOKEN={}", self.api_token),
-                ])
+            let secret_value = format!("SGREP_API_TOKEN={}", self.api_token);
+            let status = self
+                .modal_command(&["secret", "create", "sgrep-auth", &secret_value])
                 .status()
                 .context("Failed to create Modal secret")?;
 
@@ -138,7 +180,7 @@ impl ModalDeployer {
     }
 
     fn deploy(&self) -> Result<EndpointCache> {
-        Self::check_modal_cli()?;
+        self.check_modal_cli()?;
         self.ensure_secret()?;
 
         let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
@@ -150,8 +192,8 @@ impl ModalDeployer {
             self.gpu_tier
         );
 
-        let output = Command::new("modal")
-            .args(["deploy", service_path.to_str().unwrap()])
+        let output = self
+            .modal_command(&["deploy", service_path.to_str().unwrap()])
             .env("GPU_TIER", &self.gpu_tier)
             .output()
             .context("Failed to run modal deploy")?;
@@ -236,14 +278,21 @@ mod tests {
 
     #[test]
     fn new_deployer_has_correct_fields() {
-        let deployer = ModalDeployer::new("balanced".to_string(), "test-token".to_string());
+        let deployer = ModalDeployer::new(
+            "balanced".to_string(),
+            "test-token".to_string(),
+            Some("token-id".to_string()),
+            Some("token-secret".to_string()),
+        );
         assert_eq!(deployer.gpu_tier, "balanced");
         assert_eq!(deployer.api_token, "test-token");
+        assert_eq!(deployer.token_id, Some("token-id".to_string()));
+        assert_eq!(deployer.token_secret, Some("token-secret".to_string()));
     }
 
     #[test]
     fn parse_deploy_output_extracts_urls() {
-        let deployer = ModalDeployer::new("high".to_string(), "token".to_string());
+        let deployer = ModalDeployer::new("high".to_string(), "token".to_string(), None, None);
         let output = r#"
 Creating objects...
 Created fastapi_endpoint embed at https://user--sgrep-offload-embed.modal.run
@@ -267,7 +316,7 @@ Created fastapi_endpoint health at https://user--sgrep-offload-health.modal.run
 
     #[test]
     fn check_health_returns_false_for_invalid_url() {
-        let deployer = ModalDeployer::new("high".to_string(), "token".to_string());
+        let deployer = ModalDeployer::new("high".to_string(), "token".to_string(), None, None);
         let result = deployer.check_health("http://localhost:99999");
         assert!(result.is_ok());
         assert!(!result.unwrap());
