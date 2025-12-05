@@ -14,7 +14,6 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-/// Statistics about an existing index
 #[derive(Debug, Clone, Serialize)]
 pub struct IndexStats {
     pub repo_path: PathBuf,
@@ -285,7 +284,6 @@ impl IndexStore {
         &self.repo_hash
     }
 
-    /// Get statistics about the existing index without loading all data
     pub fn get_stats(&self) -> Result<Option<IndexStats>> {
         let mmap = self.load_mmap()?;
         let Some(mmap) = mmap else {

@@ -1172,7 +1172,6 @@ mod tests {
             })
             .unwrap();
 
-        // JSON output should succeed
         let result = handle_index_stats(Some(repo.clone()), true);
         assert!(result.is_ok());
         std::fs::remove_dir_all(&repo).ok();
