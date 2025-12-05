@@ -97,6 +97,9 @@ pub enum Commands {
         /// Store index in Turbopuffer (serverless vector DB)
         #[arg(long, env = "SGREP_REMOTE")]
         remote: bool,
+        /// Run index in detached/background mode
+        #[arg(short = 'd', long, default_value_t = false)]
+        detach: bool,
     },
     /// Watch a repository and keep the index fresh
     Watch {
@@ -120,6 +123,9 @@ pub enum Commands {
         /// Store index in Turbopuffer (serverless vector DB)
         #[arg(long, env = "SGREP_REMOTE")]
         remote: bool,
+        /// Run watch in detached/background mode
+        #[arg(short = 'd', long, default_value_t = false)]
+        detach: bool,
     },
     /// Show or create configuration
     Config {

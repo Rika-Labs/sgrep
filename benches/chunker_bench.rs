@@ -89,9 +89,11 @@ fn bench_chunk_single_file(c: &mut Criterion) {
     let (dir, files) = setup_test_files(1);
     let file = &files[0];
 
-    c.bench_with_input(BenchmarkId::new("chunk_single_file", "rust"), file, |b, path| {
-        b.iter(|| chunker::chunk_file(path, &dir).unwrap())
-    });
+    c.bench_with_input(
+        BenchmarkId::new("chunk_single_file", "rust"),
+        file,
+        |b, path| b.iter(|| chunker::chunk_file(path, &dir).unwrap()),
+    );
 
     cleanup_test_files(&dir);
 }

@@ -1100,7 +1100,11 @@ mod tests {
         fs::create_dir_all(&repo).unwrap();
 
         fs::write(repo.join("main.rs"), "fn main() { println!(\"hello\"); }").unwrap();
-        fs::write(repo.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+        fs::write(
+            repo.join("lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }",
+        )
+        .unwrap();
         fs::write(repo.join("utils.rs"), "pub fn helper() -> bool { true }").unwrap();
 
         let first_report = indexer

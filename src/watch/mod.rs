@@ -473,11 +473,7 @@ mod tests {
         }
 
         fn create_sample_files(repo: &Path) {
-            fs::write(
-                repo.join("main.rs"),
-                "fn main() { println!(\"Hello\"); }",
-            )
-            .unwrap();
+            fs::write(repo.join("main.rs"), "fn main() { println!(\"Hello\"); }").unwrap();
             fs::write(
                 repo.join("lib.rs"),
                 "pub fn add(a: i32, b: i32) -> i32 { a + b }",
@@ -661,8 +657,12 @@ mod tests {
             assert_eq!(processor.dirty_paths.len(), 2);
             assert_eq!(processor.deleted_paths.len(), 1);
             assert!(processor.dirty_paths.contains(&PathBuf::from("new.rs")));
-            assert!(processor.dirty_paths.contains(&PathBuf::from("modified.rs")));
-            assert!(processor.deleted_paths.contains(&PathBuf::from("deleted.rs")));
+            assert!(processor
+                .dirty_paths
+                .contains(&PathBuf::from("modified.rs")));
+            assert!(processor
+                .deleted_paths
+                .contains(&PathBuf::from("deleted.rs")));
         }
 
         #[test]
@@ -689,7 +689,10 @@ mod tests {
 
             let store = IndexStore::new(&repo).unwrap();
             let initial_index = store.load().unwrap().unwrap();
-            assert!(initial_index.chunks.iter().any(|c| c.path.ends_with("main.rs")));
+            assert!(initial_index
+                .chunks
+                .iter()
+                .any(|c| c.path.ends_with("main.rs")));
 
             let deleted_file = repo.join("main.rs");
             fs::remove_file(&deleted_file).unwrap();
@@ -710,7 +713,10 @@ mod tests {
             assert!(report.chunks_indexed < initial_chunks);
 
             let updated_index = store.load().unwrap().unwrap();
-            assert!(!updated_index.chunks.iter().any(|c| c.path.ends_with("main.rs")));
+            assert!(!updated_index
+                .chunks
+                .iter()
+                .any(|c| c.path.ends_with("main.rs")));
 
             cleanup_test_env(&home, &repo);
         }
@@ -770,7 +776,10 @@ mod tests {
                 .filter(|c| c.path.starts_with("submodule"))
                 .count();
             assert_eq!(subdir_count_after, 0);
-            assert!(updated_index.chunks.iter().any(|c| c.path.ends_with("root.rs")));
+            assert!(updated_index
+                .chunks
+                .iter()
+                .any(|c| c.path.ends_with("root.rs")));
 
             cleanup_test_env(&home, &repo);
         }
@@ -796,7 +805,10 @@ mod tests {
 
             let store = IndexStore::new(&repo).unwrap();
             let initial_index = store.load().unwrap().unwrap();
-            assert!(initial_index.chunks.iter().any(|c| c.path.ends_with("main.rs")));
+            assert!(initial_index
+                .chunks
+                .iter()
+                .any(|c| c.path.ends_with("main.rs")));
 
             let old_path = repo.join("main.rs");
             let new_path = repo.join("entry.rs");
@@ -816,8 +828,14 @@ mod tests {
                 .unwrap();
 
             let updated_index = store.load().unwrap().unwrap();
-            assert!(!updated_index.chunks.iter().any(|c| c.path.ends_with("main.rs")));
-            assert!(updated_index.chunks.iter().any(|c| c.path.ends_with("entry.rs")));
+            assert!(!updated_index
+                .chunks
+                .iter()
+                .any(|c| c.path.ends_with("main.rs")));
+            assert!(updated_index
+                .chunks
+                .iter()
+                .any(|c| c.path.ends_with("entry.rs")));
 
             cleanup_test_env(&home, &repo);
         }
@@ -997,7 +1015,9 @@ mod tests {
             }
 
             assert_eq!(processor.dirty_paths.len(), 1);
-            assert!(processor.dirty_paths.contains(&PathBuf::from("same_file.rs")));
+            assert!(processor
+                .dirty_paths
+                .contains(&PathBuf::from("same_file.rs")));
         }
 
         #[test]

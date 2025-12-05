@@ -1,5 +1,7 @@
 use std::env;
+use std::ffi::OsString;
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -73,6 +75,50 @@ pub struct RenderContext<'a> {
     pub debug: bool,
 }
 
+fn spawn_detached_without_detach_flag() -> Result<u32> {
+    let exe = env::current_exe()?;
+    if env::var("SGREP_DETACH_TEST").is_ok() {
+        return Ok(0);
+    }
+
+    let args: Vec<OsString> = sanitize_detach_args(env::args_os().skip(1));
+
+    let child = Command::new(exe)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to spawn detached process")?;
+
+    Ok(child.id())
+}
+
+fn sanitize_detach_args<I: Iterator<Item = OsString>>(args: I) -> Vec<OsString> {
+    args.filter(|arg| arg != "-d" && arg != "--detach")
+        .collect()
+}
+
+fn maybe_detach(cli: &Cli) -> Result<Option<(&'static str, u32)>> {
+    match &cli.command {
+        Commands::Index { stats, detach, .. } => {
+            if *detach {
+                if *stats {
+                    return Err(anyhow!("--detach cannot be used with --stats"));
+                }
+                return spawn_detached_without_detach_flag().map(|pid| Some(("index", pid)));
+            }
+        }
+        Commands::Watch { detach, .. } => {
+            if *detach {
+                return spawn_detached_without_detach_flag().map(|pid| Some(("watch", pid)));
+            }
+        }
+        _ => {}
+    }
+    Ok(None)
+}
+
 pub fn run() -> Result<()> {
     setup_tracing();
     let cli = parse_cli();
@@ -91,6 +137,11 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
     } = &cli.command
     {
         return handle_config(*init, *show_model_dir, *verify_model);
+    }
+
+    if let Some((command, pid)) = maybe_detach(&cli)? {
+        println!("Detached {command} (pid {pid})");
+        return Ok(());
     }
 
     // Extract offload flag from command to determine embedder type
@@ -113,6 +164,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             json,
             offload: _offload,
             remote: _remote,
+            detach: _,
         } => {
             if stats {
                 return handle_index_stats(path, json);
@@ -156,9 +208,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             batch_size,
             offload: _offload,
             remote: _remote,
-        } => {
-            handle_watch(embedder, path, debounce_ms, batch_size)
-        }
+            detach: _,
+        } => handle_watch(embedder, path, debounce_ms, batch_size),
         Commands::Config { .. } => unreachable!(), // Handled above
     }
 }
@@ -820,7 +871,9 @@ mod tests {
     use chrono::Utc;
     use serial_test::serial;
     use std::any::type_name_of_val;
+    use std::ffi::OsString;
     use std::path::PathBuf;
+    use std::sync::Once;
     use uuid::Uuid;
 
     #[derive(Clone, Default)]
@@ -844,6 +897,62 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("lib.rs"), "pub fn hi() {}\n").unwrap();
         dir
+    }
+
+    static DETACH_ENV: Once = Once::new();
+
+    fn clear_detach_env() {
+        env::remove_var("SGREP_DETACH_TEST");
+    }
+
+    fn cli_for_index_detach(detach: bool, stats: bool) -> Cli {
+        Cli {
+            device: None,
+            offline: false,
+            max_threads: None,
+            cpu_preset: None,
+            command: Commands::Index {
+                path: None,
+                force: false,
+                batch_size: None,
+                profile: false,
+                stats,
+                json: false,
+                detach,
+            },
+        }
+    }
+
+    #[test]
+    fn sanitize_detach_args_strips_flags() {
+        let args = vec![
+            OsString::from("index"),
+            OsString::from("-d"),
+            OsString::from("--detach"),
+            OsString::from("path"),
+        ];
+        let filtered = sanitize_detach_args(args.into_iter());
+        assert_eq!(
+            filtered,
+            vec![OsString::from("index"), OsString::from("path")]
+        );
+    }
+
+    #[test]
+    fn maybe_detach_rejects_stats() {
+        let cli = cli_for_index_detach(true, true);
+        let result = maybe_detach(&cli);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn maybe_detach_returns_pid_when_env_set() {
+        DETACH_ENV.call_once(clear_detach_env);
+        env::set_var("SGREP_DETACH_TEST", "1");
+        let cli = cli_for_index_detach(true, false);
+        let result = maybe_detach(&cli).unwrap();
+        env::remove_var("SGREP_DETACH_TEST");
+        assert_eq!(result, Some(("index", 0)));
     }
 
     fn sample_index(root: &Path) -> RepositoryIndex {
