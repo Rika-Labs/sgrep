@@ -118,6 +118,8 @@ impl WatchService {
 
     #[cfg(not(test))]
     pub fn run(&mut self, path: &Path) -> Result<()> {
+        self.indexer.warmup()?;
+
         let store = IndexStore::new(path)?;
         if store.load()?.is_none() {
             info!("Creating initial index: {}", path.display());
@@ -155,9 +157,12 @@ impl WatchService {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = shutdown.clone();
-        ctrlc::set_handler(move || {
+        if let Err(e) = ctrlc::set_handler(move || {
             shutdown_clone.store(true, Ordering::Relaxed);
-        })?;
+        }) {
+            warn!("error" = %e, "msg" = "failed to set Ctrl+C handler, shutdown may not work properly");
+        }
+        info!("msg" = "Press Ctrl+C to exit");
 
         let mut last_event: Option<Instant> = None;
         let mut indexing_thread: Option<thread::JoinHandle<()>> = None;

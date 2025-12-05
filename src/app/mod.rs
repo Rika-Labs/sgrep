@@ -171,15 +171,11 @@ fn build_embedder(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
 
-    progress.set("Loading embedding model…");
-
     let embedder: Arc<dyn embedding::BatchEmbedder> = if use_pooled {
         Arc::new(PooledEmbedder::default())
     } else {
         Arc::new(Embedder::default())
     };
-
-    progress.finish("Embedding model ready");
 
     Ok(embedder)
 }

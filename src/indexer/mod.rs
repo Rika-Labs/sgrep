@@ -88,6 +88,11 @@ impl Indexer {
         Self { embedder }
     }
 
+    pub fn warmup(&self) -> Result<()> {
+        let _ = self.embedder.embed("warmup")?;
+        Ok(())
+    }
+
     pub fn build_index(&self, request: IndexRequest) -> Result<IndexReport> {
         let total_start = Instant::now();
         let root = canonical(&request.path);
