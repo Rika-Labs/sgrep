@@ -48,19 +48,38 @@ impl ModalDeployer {
     }
 
     pub fn check_modal_cli() -> Result<()> {
-        let output = Command::new("modal")
-            .arg("--version")
-            .output()
-            .map_err(|_| {
-                anyhow!(
-                    "Modal CLI not found. Install with: pip install modal\n\
-                     Then authenticate with: modal token new"
-                )
-            })?;
-
-        if !output.status.success() {
-            return Err(anyhow!("Modal CLI check failed"));
+        if Command::new("modal").arg("--version").output().is_ok() {
+            return Ok(());
         }
+
+        eprintln!("Modal CLI not found. Installing...");
+        let pip = if Command::new("pip3").arg("--version").output().is_ok() {
+            "pip3"
+        } else {
+            "pip"
+        };
+
+        let status = Command::new(pip)
+            .args(["install", "modal"])
+            .status()
+            .context("Failed to run pip install modal")?;
+
+        if !status.success() {
+            return Err(anyhow!(
+                "Failed to install Modal CLI. Install manually with: pip install modal"
+            ));
+        }
+
+        eprintln!("Modal CLI installed. Checking authentication...");
+        let token_check = Command::new("modal").args(["token", "show"]).output();
+
+        if token_check.is_err() || !token_check.unwrap().status.success() {
+            return Err(anyhow!(
+                "Modal CLI installed but not authenticated.\n\
+                 Run: modal token new"
+            ));
+        }
+
         Ok(())
     }
 
