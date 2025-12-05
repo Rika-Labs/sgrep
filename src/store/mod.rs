@@ -5,17 +5,37 @@ pub mod utils;
 
 pub use hierarchy::HierarchicalIndex;
 pub use index::{IndexMetadata, PartialIndex, RepositoryIndex};
-pub use mmap::MmapIndex;
+pub use mmap::{HnswHeader, MmapIndex};
 pub use utils::quantize_to_binary;
 
 use std::fs::{self, File};
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexStats {
+    pub repo_path: PathBuf,
+    pub indexed_at: DateTime<Utc>,
+    pub vector_dim: usize,
+    pub total_files: usize,
+    pub total_chunks: usize,
+    pub graph_symbols: usize,
+    pub graph_edges: usize,
+    pub mmap_available: bool,
+    pub binary_vectors_available: bool,
+}
+
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
+use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 use crate::graph::CodeGraph;
+use crate::search::config::{HNSW_CONNECTIVITY, HNSW_EXPANSION_ADD, HNSW_EXPANSION_SEARCH, HNSW_THRESHOLD};
 use mmap::{
     parse_binary_header, parse_vectors_header, read_vectors_from_mmap, validate_vectors_size,
     BYTES_PER_F32, VECTOR_HEADER_SIZE,
@@ -29,6 +49,8 @@ const DIR_VECTORS_FILE: &str = "dir_vectors.bin";
 const VECTORS_FILE: &str = "vectors.bin";
 const BINARY_VECTORS_FILE: &str = "binary_vectors.bin";
 const GRAPH_FILE: &str = "graph.bin.zst";
+const HNSW_FILE: &str = "hnsw.usearch";
+const HNSW_HEADER_FILE: &str = "hnsw_header.bin";
 const INDEX_FORMAT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone)]
@@ -91,6 +113,7 @@ impl IndexStore {
         self.write_vectors_file(&vectors_path, index)?;
         self.write_binary_vectors_file(&binary_vectors_path, index)?;
         self.write_index_file(&index_path, index)?;
+        self.save_hnsw(index)?;
 
         Ok(())
     }
@@ -252,6 +275,8 @@ impl IndexStore {
             (None, 0)
         };
 
+        let hnsw = self.load_hnsw(vector_dim, partial.chunks.len());
+
         Ok(Some(MmapIndex {
             metadata: partial.metadata,
             chunks: partial.chunks,
@@ -259,11 +284,36 @@ impl IndexStore {
             binary_mmap,
             vector_dim,
             binary_words,
+            hnsw,
         }))
     }
 
     pub fn repo_hash(&self) -> &str {
         &self.repo_hash
+    }
+
+    pub fn get_stats(&self) -> Result<Option<IndexStats>> {
+        let mmap = self.load_mmap()?;
+        let Some(mmap) = mmap else {
+            return Ok(None);
+        };
+
+        let graph = self.load_graph()?;
+        let (graph_symbols, graph_edges) = graph
+            .map(|g| (g.symbols.len(), g.edges.len()))
+            .unwrap_or((0, 0));
+
+        Ok(Some(IndexStats {
+            repo_path: mmap.metadata.repo_path,
+            indexed_at: mmap.metadata.indexed_at,
+            vector_dim: mmap.vector_dim,
+            total_files: mmap.metadata.total_files,
+            total_chunks: mmap.metadata.total_chunks,
+            graph_symbols,
+            graph_edges,
+            mmap_available: true,
+            binary_vectors_available: mmap.binary_mmap.is_some(),
+        }))
     }
 
     fn load_legacy_format(&self, path: &Path) -> Result<Option<RepositoryIndex>> {
@@ -355,6 +405,86 @@ impl IndexStore {
         fs::write(path, compressed)?;
         Ok(())
     }
+
+    pub fn save_hnsw(&self, index: &RepositoryIndex) -> Result<()> {
+        let num_vectors = index.vectors.len();
+        if num_vectors < HNSW_THRESHOLD {
+            return Ok(());
+        }
+
+        let options = IndexOptions {
+            dimensions: index.metadata.vector_dim,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::F32,
+            connectivity: HNSW_CONNECTIVITY,
+            expansion_add: HNSW_EXPANSION_ADD,
+            expansion_search: HNSW_EXPANSION_SEARCH,
+            multi: false,
+        };
+
+        let hnsw = Index::new(&options)
+            .map_err(|e| anyhow::anyhow!("Failed to create HNSW index: {}", e))?;
+        hnsw.reserve(num_vectors)
+            .map_err(|e| anyhow::anyhow!("Failed to reserve HNSW capacity: {}", e))?;
+
+        for (i, vector) in index.vectors.iter().enumerate() {
+            hnsw.add(i as u64, vector)
+                .map_err(|e| anyhow::anyhow!("Failed to add vector {} to HNSW: {}", i, e))?;
+        }
+
+        let hnsw_path = self.root.join(HNSW_FILE);
+        hnsw.save(&hnsw_path.to_string_lossy())
+            .map_err(|e| anyhow::anyhow!("Failed to save HNSW index: {}", e))?;
+
+        let header = HnswHeader {
+            format_version: INDEX_FORMAT_VERSION,
+            vector_dim: index.metadata.vector_dim as u32,
+            connectivity: HNSW_CONNECTIVITY as u32,
+            expansion_add: HNSW_EXPANSION_ADD as u32,
+            num_vectors: num_vectors as u32,
+        };
+        let header_path = self.root.join(HNSW_HEADER_FILE);
+        fs::write(&header_path, header.to_bytes())
+            .with_context(|| format!("Failed to write HNSW header to {}", header_path.display()))?;
+
+        Ok(())
+    }
+
+    fn load_hnsw(&self, expected_dim: usize, expected_count: usize) -> Option<Index> {
+        let hnsw_path = self.root.join(HNSW_FILE);
+        let header_path = self.root.join(HNSW_HEADER_FILE);
+
+        if !hnsw_path.exists() || !header_path.exists() {
+            return None;
+        }
+
+        let header_bytes = fs::read(&header_path).ok()?;
+        let header = HnswHeader::from_bytes(&header_bytes).ok()?;
+
+        if header.format_version != INDEX_FORMAT_VERSION
+            || header.vector_dim as usize != expected_dim
+            || header.connectivity as usize != HNSW_CONNECTIVITY
+            || header.expansion_add as usize != HNSW_EXPANSION_ADD
+            || header.num_vectors as usize != expected_count
+        {
+            return None;
+        }
+
+        let options = IndexOptions {
+            dimensions: expected_dim,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::F32,
+            connectivity: HNSW_CONNECTIVITY,
+            expansion_add: HNSW_EXPANSION_ADD,
+            expansion_search: HNSW_EXPANSION_SEARCH,
+            multi: false,
+        };
+
+        let hnsw = Index::new(&options).ok()?;
+        hnsw.load(&hnsw_path.to_string_lossy()).ok()?;
+
+        Some(hnsw)
+    }
 }
 
 fn copy_index_files(src: &Path, dst: &Path) -> Result<()> {
@@ -366,6 +496,8 @@ fn copy_index_files(src: &Path, dst: &Path) -> Result<()> {
         FILE_VECTORS_FILE,
         DIR_VECTORS_FILE,
         GRAPH_FILE,
+        HNSW_FILE,
+        HNSW_HEADER_FILE,
     ];
 
     for file in &files {
@@ -654,6 +786,223 @@ mod tests {
         let store = IndexStore::new(&temp_dir).unwrap();
         assert!(!store.has_hierarchy());
         assert!(store.load_hierarchy().unwrap().is_none());
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    fn make_chunks_with_vectors(count: usize, vector_dim: usize) -> (Vec<CodeChunk>, Vec<Vec<f32>>) {
+        let chunks: Vec<CodeChunk> = (0..count)
+            .map(|i| CodeChunk {
+                id: Uuid::new_v4(),
+                path: PathBuf::from(format!("test_{}.rs", i)),
+                language: "rust".to_string(),
+                start_line: 1,
+                end_line: 10,
+                text: format!("fn test_{}() {{}}", i),
+                hash: format!("hash_{}", i),
+                modified_at: Utc::now(),
+            })
+            .collect();
+
+        let vectors: Vec<Vec<f32>> = (0..count)
+            .map(|i| {
+                (0..vector_dim)
+                    .map(|j| ((i + j) as f32 * 0.01).sin())
+                    .collect()
+            })
+            .collect();
+
+        (chunks, vectors)
+    }
+
+    #[test]
+    #[serial]
+    fn save_and_load_hnsw_roundtrip() {
+        use crate::search::config::HNSW_THRESHOLD;
+
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("hnsw_roundtrip");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let vector_dim = 384;
+        let num_vectors = HNSW_THRESHOLD + 100; // Above threshold
+
+        let (chunks, vectors) = make_chunks_with_vectors(num_vectors, vector_dim);
+        let metadata = make_metadata(temp_dir.clone(), store.repo_hash().to_string(), vector_dim);
+        let original = RepositoryIndex::new(metadata, chunks, vectors);
+
+        store.save(&original).unwrap();
+
+        // HNSW file should exist
+        let hnsw_path = store.root.join("hnsw.usearch");
+        let header_path = store.root.join("hnsw_header.bin");
+        assert!(hnsw_path.exists(), "HNSW file should be created");
+        assert!(header_path.exists(), "HNSW header file should be created");
+
+        // Load via mmap and verify HNSW is loaded
+        let loaded = store.load_mmap().unwrap().unwrap();
+        assert!(loaded.has_hnsw(), "MmapIndex should have loaded HNSW");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn small_index_does_not_persist_hnsw() {
+        use crate::search::config::HNSW_THRESHOLD;
+
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("hnsw_small");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let vector_dim = 384;
+        let num_vectors = HNSW_THRESHOLD - 100; // Below threshold
+
+        let (chunks, vectors) = make_chunks_with_vectors(num_vectors, vector_dim);
+        let metadata = make_metadata(temp_dir.clone(), store.repo_hash().to_string(), vector_dim);
+        let original = RepositoryIndex::new(metadata, chunks, vectors);
+
+        store.save(&original).unwrap();
+
+        // HNSW files should NOT exist for small indexes
+        let hnsw_path = store.root.join("hnsw.usearch");
+        let header_path = store.root.join("hnsw_header.bin");
+        assert!(!hnsw_path.exists(), "HNSW file should not be created for small indexes");
+        assert!(!header_path.exists(), "HNSW header should not be created for small indexes");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn hnsw_fallback_on_version_mismatch() {
+        use crate::search::config::HNSW_THRESHOLD;
+
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("hnsw_version");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let vector_dim = 384;
+        let num_vectors = HNSW_THRESHOLD + 100;
+
+        let (chunks, vectors) = make_chunks_with_vectors(num_vectors, vector_dim);
+        let metadata = make_metadata(temp_dir.clone(), store.repo_hash().to_string(), vector_dim);
+        let original = RepositoryIndex::new(metadata, chunks, vectors);
+
+        store.save(&original).unwrap();
+
+        // Corrupt the header with a wrong version
+        let header_path = store.root.join("hnsw_header.bin");
+        let mut header_bytes = std::fs::read(&header_path).unwrap();
+        // Set format_version to 999 (first 4 bytes)
+        header_bytes[0..4].copy_from_slice(&999u32.to_le_bytes());
+        std::fs::write(&header_path, header_bytes).unwrap();
+
+        // Load should succeed but HNSW should be None (fallback)
+        let loaded = store.load_mmap().unwrap().unwrap();
+        assert!(!loaded.has_hnsw(), "HNSW should not load with version mismatch");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn hnsw_fallback_on_dimension_mismatch() {
+        use crate::search::config::HNSW_THRESHOLD;
+
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("hnsw_dim");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let vector_dim = 384;
+        let num_vectors = HNSW_THRESHOLD + 100;
+
+        let (chunks, vectors) = make_chunks_with_vectors(num_vectors, vector_dim);
+        let metadata = make_metadata(temp_dir.clone(), store.repo_hash().to_string(), vector_dim);
+        let original = RepositoryIndex::new(metadata, chunks, vectors);
+
+        store.save(&original).unwrap();
+
+        // Corrupt the header with a wrong dimension
+        let header_path = store.root.join("hnsw_header.bin");
+        let mut header_bytes = std::fs::read(&header_path).unwrap();
+        // Set vector_dim to 768 (bytes 4-7)
+        header_bytes[4..8].copy_from_slice(&768u32.to_le_bytes());
+        std::fs::write(&header_path, header_bytes).unwrap();
+
+        // Load should succeed but HNSW should be None (fallback)
+        let loaded = store.load_mmap().unwrap().unwrap();
+        assert!(!loaded.has_hnsw(), "HNSW should not load with dimension mismatch");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn hnsw_fallback_on_count_mismatch() {
+        use crate::search::config::HNSW_THRESHOLD;
+
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("hnsw_count");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let vector_dim = 384;
+        let num_vectors = HNSW_THRESHOLD + 100;
+
+        let (chunks, vectors) = make_chunks_with_vectors(num_vectors, vector_dim);
+        let metadata = make_metadata(temp_dir.clone(), store.repo_hash().to_string(), vector_dim);
+        let original = RepositoryIndex::new(metadata, chunks, vectors);
+
+        store.save(&original).unwrap();
+
+        // Corrupt the header with a wrong count
+        let header_path = store.root.join("hnsw_header.bin");
+        let mut header_bytes = std::fs::read(&header_path).unwrap();
+        // Set num_vectors to a different value (bytes 16-19)
+        header_bytes[16..20].copy_from_slice(&(num_vectors as u32 + 50).to_le_bytes());
+        std::fs::write(&header_path, header_bytes).unwrap();
+
+        // Load should succeed but HNSW should be None (fallback)
+        let loaded = store.load_mmap().unwrap().unwrap();
+        assert!(!loaded.has_hnsw(), "HNSW should not load with count mismatch");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn search_works_without_hnsw_file() {
+        use crate::search::config::HNSW_THRESHOLD;
+
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("hnsw_missing");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let vector_dim = 384;
+        let num_vectors = HNSW_THRESHOLD + 100;
+
+        let (chunks, vectors) = make_chunks_with_vectors(num_vectors, vector_dim);
+        let metadata = make_metadata(temp_dir.clone(), store.repo_hash().to_string(), vector_dim);
+        let original = RepositoryIndex::new(metadata, chunks, vectors);
+
+        store.save(&original).unwrap();
+
+        // Delete HNSW files to simulate old index
+        let hnsw_path = store.root.join("hnsw.usearch");
+        let header_path = store.root.join("hnsw_header.bin");
+        std::fs::remove_file(&hnsw_path).ok();
+        std::fs::remove_file(&header_path).ok();
+
+        // Load should succeed but without HNSW
+        let loaded = store.load_mmap().unwrap().unwrap();
+        assert!(!loaded.has_hnsw(), "MmapIndex should not have HNSW when files are missing");
+        assert_eq!(loaded.chunks.len(), num_vectors, "Chunks should still be loaded");
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

@@ -325,12 +325,11 @@ fn parse_response(response: &str, original_query: &str) -> Result<QueryAnalysis>
     }
 }
 
-/// Get the cache directory for the model.
 fn get_model_cache_dir() -> PathBuf {
-    let base = directories::BaseDirs::new()
-        .map(|d| d.cache_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(".cache"));
-    base.join("sgrep").join("models")
+    let base = env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(".sgrep").join("cache").join("models")
 }
 
 pub fn get_model_path() -> PathBuf {

@@ -104,7 +104,14 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             force,
             batch_size,
             profile,
-        } => handle_index(embedder, path, force, batch_size, profile),
+            stats,
+            json,
+        } => {
+            if stats {
+                return handle_index_stats(path, json);
+            }
+            handle_index(embedder, path, force, batch_size, profile)
+        }
         Commands::Search {
             query,
             path,
@@ -294,6 +301,41 @@ fn verify_model_files() -> Result<()> {
         println!("Place files in: {}", model_dir.display());
         Err(anyhow!("Model files incomplete"))
     }
+}
+
+fn handle_index_stats(path: Option<std::path::PathBuf>, json: bool) -> Result<()> {
+    let repo_path = resolve_repo_path(path)?;
+    let store = store::IndexStore::new(&repo_path)?;
+
+    let stats = store
+        .get_stats()?
+        .ok_or_else(|| anyhow!("No index found. Run 'sgrep index' first."))?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&stats)?);
+    } else {
+        println!("Index Statistics");
+        println!("  Repository:     {}", stats.repo_path.display());
+        println!("  Indexed at:     {}", stats.indexed_at);
+        println!("  Vector dim:     {}", stats.vector_dim);
+        println!("  Files:          {}", stats.total_files);
+        println!("  Chunks:         {}", stats.total_chunks);
+        println!("  Graph symbols:  {}", stats.graph_symbols);
+        println!("  Graph edges:    {}", stats.graph_edges);
+        println!(
+            "  Mmap:           {}",
+            if stats.mmap_available { "yes" } else { "no" }
+        );
+        println!(
+            "  Binary vectors: {}",
+            if stats.binary_vectors_available {
+                "yes"
+            } else {
+                "no"
+            }
+        );
+    }
+    Ok(())
 }
 
 fn handle_index(
@@ -931,6 +973,8 @@ mod tests {
                 force: true,
                 batch_size: Some(16),
                 profile: false,
+                stats: false,
+                json: false,
             },
         };
         run_with_cli(cli).unwrap();
@@ -1127,5 +1171,63 @@ mod tests {
         assert_eq!(ctx.elapsed, Duration::from_millis(100));
         assert!(ctx.json);
         assert!(!ctx.debug);
+    }
+
+    #[test]
+    #[serial]
+    fn index_stats_errors_on_missing_index() {
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let result = handle_index_stats(Some(repo.clone()), false);
+        assert!(result.is_err());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn index_stats_succeeds_with_index() {
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+
+        // Build index first
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let indexer = indexer::Indexer::new(embedder);
+        indexer
+            .build_index(indexer::IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: Some(8),
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        let result = handle_index_stats(Some(repo.clone()), false);
+        assert!(result.is_ok());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn index_stats_json_output() {
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+
+        // Build index first
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let indexer = indexer::Indexer::new(embedder);
+        indexer
+            .build_index(indexer::IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: Some(8),
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        let result = handle_index_stats(Some(repo.clone()), true);
+        assert!(result.is_ok());
+        std::fs::remove_dir_all(&repo).ok();
     }
 }

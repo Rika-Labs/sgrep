@@ -1,4 +1,5 @@
 mod binary;
+mod bm25_cache;
 pub mod config;
 mod hnsw;
 mod results;
@@ -7,6 +8,7 @@ mod scoring;
 pub use results::{DirectorySearchResult, FileSearchResult, SearchResult};
 pub use scoring::cosine_similarity;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -19,6 +21,8 @@ use crate::graph::{CodeGraph, Symbol};
 use crate::query_expander::{QueryAnalysis, QueryExpander};
 use crate::reranker::Reranker;
 use crate::store::{HierarchicalIndex, MmapIndex, RepositoryIndex};
+
+use bm25_cache::{Bm25CacheKey, Bm25FCache};
 
 use binary::{binary_shortlist, binary_shortlist_precomputed, quantize_to_binary};
 use config::{
@@ -83,6 +87,7 @@ pub struct SearchEngine {
     reranker: Option<Arc<dyn Reranker>>,
     graph: Option<CodeGraph>,
     query_expander: Option<QueryExpander>,
+    bm25_cache: RefCell<Bm25FCache>,
 }
 
 #[allow(dead_code)]
@@ -93,6 +98,7 @@ impl SearchEngine {
             reranker: None,
             graph: None,
             query_expander: None,
+            bm25_cache: RefCell::new(Bm25FCache::new()),
         }
     }
 
@@ -103,6 +109,7 @@ impl SearchEngine {
             reranker: Some(reranker),
             graph: None,
             query_expander: None,
+            bm25_cache: RefCell::new(Bm25FCache::new()),
         }
     }
 
@@ -124,10 +131,28 @@ impl SearchEngine {
 
     pub fn set_graph(&mut self, graph: CodeGraph) {
         self.graph = Some(graph);
+        // Invalidate cache since graph affects BM25F index
+        self.bm25_cache.borrow_mut().clear();
     }
 
     pub fn has_graph(&self) -> bool {
         self.graph.is_some()
+    }
+
+    /// Get or build a BM25F index, using the cache when possible.
+    /// This avoids rebuilding the expensive index on every search.
+    fn get_or_build_bm25f(&self, chunks: &[CodeChunk], repo_hash: &str) -> Bm25FIndex {
+        let key = Bm25CacheKey::new(repo_hash, chunks.len(), self.graph.is_some());
+
+        let mut cache = self.bm25_cache.borrow_mut();
+        if let Some(index) = cache.get(&key) {
+            return index.clone();
+        }
+
+        // Cache miss - build the index
+        let index = build_bm25f_from_chunks(chunks, self.graph.as_ref());
+        cache.insert(key, index.clone());
+        index
     }
 
     /// Analyze a query using the LLM-based expander, or fall back to heuristics.
@@ -198,7 +223,7 @@ impl SearchEngine {
         let weights = Weights::from_query(query);
         let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
         let globset = fts::build_globset(&options.glob);
-        let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
+        let bm25f_index = self.get_or_build_bm25f(&index.chunks, &index.metadata.repo_hash);
 
         let candidates: Vec<(usize, &CodeChunk, &[f32], f32)> = index
             .chunks
@@ -284,7 +309,7 @@ impl SearchEngine {
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
         let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
-        let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
+        let bm25f_index = self.get_or_build_bm25f(&index.chunks, &index.metadata.repo_hash);
 
         let query_binary = quantize_to_binary(&query_vec);
         let index_binary: Vec<Vec<u64>> = index
@@ -362,7 +387,7 @@ impl SearchEngine {
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
         let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
-        let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
+        let bm25f_index = self.get_or_build_bm25f(&index.chunks, &index.metadata.repo_hash);
 
         let hnsw = build_hnsw_index(index.metadata.vector_dim, index.vectors.len())?;
         for (i, vector) in index.vectors.iter().enumerate() {
@@ -457,7 +482,7 @@ impl SearchEngine {
         let weights = Weights::from_query(query);
         let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
         let globset = fts::build_globset(&options.glob);
-        let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
+        let bm25f_index = self.get_or_build_bm25f(&index.chunks, &index.metadata.repo_hash);
 
         let candidates: Vec<(usize, f32)> = (0..index.len())
             .filter_map(|i| {
@@ -544,16 +569,23 @@ impl SearchEngine {
     ) -> Result<Vec<SearchResult>> {
         let weights = Weights::from_query(query);
         let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
-        let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
+        let bm25f_index = self.get_or_build_bm25f(&index.chunks, &index.metadata.repo_hash);
 
-        let hnsw = build_hnsw_index(index.metadata.vector_dim, index.len())?;
-        for i in 0..index.len() {
-            hnsw.add(i as u64, index.get_vector(i))
-                .map_err(|e| anyhow::anyhow!("HNSW add failed: {}", e))?;
-        }
+        let fresh_hnsw;
+        let hnsw: &usearch::Index = if let Some(loaded) = index.get_hnsw() {
+            loaded
+        } else {
+            fresh_hnsw = build_hnsw_index(index.metadata.vector_dim, index.len())?;
+            for i in 0..index.len() {
+                fresh_hnsw
+                    .add(i as u64, index.get_vector(i))
+                    .map_err(|e| anyhow::anyhow!("HNSW add failed: {}", e))?;
+            }
+            &fresh_hnsw
+        };
 
         let candidates =
-            search_hnsw_candidates(&hnsw, &query_vec, PRF_TOP_K.max(fetch_limit), index.len())?;
+            search_hnsw_candidates(hnsw, &query_vec, PRF_TOP_K.max(fetch_limit), index.len())?;
 
         let valid_candidates: Vec<usize> = candidates
             .into_iter()
@@ -636,7 +668,7 @@ impl SearchEngine {
         let (query_vec, fetch_limit) = self.prepare_search(query, &options)?;
         let shortlist_size =
             (PRF_TOP_K.max(fetch_limit) * BINARY_SHORTLIST_FACTOR).min(index.len());
-        let bm25f_index = build_bm25f_from_chunks(&index.chunks, self.graph.as_ref());
+        let bm25f_index = self.get_or_build_bm25f(&index.chunks, &index.metadata.repo_hash);
 
         let query_binary = quantize_to_binary(&query_vec);
 
@@ -2146,6 +2178,167 @@ mod tests {
                 "Expected embed() to be called once, but was called {} times",
                 calls_made
             );
+        }
+    }
+
+    // Tests for BM25F caching (GitHub issue #19)
+    mod bm25_cache_integration_tests {
+        use super::*;
+
+        #[test]
+        fn cache_hit_on_multiple_searches_same_index() {
+            let embedder = Arc::new(MockEmbedder);
+            let engine = SearchEngine::new(embedder.clone());
+
+            let chunks = vec![
+                make_chunk("fn foo() {}", "rust", "a.rs"),
+                make_chunk("fn bar() {}", "rust", "b.rs"),
+            ];
+            let vectors: Vec<Vec<f32>> = chunks
+                .iter()
+                .map(|c| embedder.embed(&c.text).unwrap())
+                .collect();
+            let index = make_index(chunks, vectors);
+
+            // First search - cache miss
+            let _ = engine
+                .search(&index, "function", SearchOptions::default())
+                .unwrap();
+
+            // Check cache has entry
+            assert_eq!(engine.bm25_cache.borrow().entry_count(), 1);
+            assert_eq!(engine.bm25_cache.borrow().miss_count(), 1);
+
+            // Second search - should be cache hit
+            let _ = engine
+                .search(&index, "different query", SearchOptions::default())
+                .unwrap();
+
+            assert_eq!(engine.bm25_cache.borrow().hit_count(), 1);
+        }
+
+        #[test]
+        fn cache_invalidated_on_set_graph() {
+            use crate::graph::{CodeGraph, Symbol, SymbolKind};
+
+            let embedder = Arc::new(MockEmbedder);
+            let mut engine = SearchEngine::new(embedder.clone());
+
+            let chunks = vec![make_chunk("fn test() {}", "rust", "test.rs")];
+            let vectors: Vec<Vec<f32>> = chunks
+                .iter()
+                .map(|c| embedder.embed(&c.text).unwrap())
+                .collect();
+            let index = make_index(chunks, vectors);
+
+            // First search - cache miss, stores entry
+            let _ = engine
+                .search(&index, "test", SearchOptions::default())
+                .unwrap();
+            assert_eq!(engine.bm25_cache.borrow().entry_count(), 1);
+
+            // Set graph - should invalidate cache
+            let mut graph = CodeGraph::new();
+            graph.add_symbol(Symbol {
+                id: Uuid::new_v4(),
+                name: "test".to_string(),
+                qualified_name: "test::test".to_string(),
+                kind: SymbolKind::Function,
+                file_path: PathBuf::from("test.rs"),
+                start_line: 1,
+                end_line: 10,
+                language: "rust".to_string(),
+                signature: "fn test()".to_string(),
+                parent_id: None,
+                chunk_id: None,
+            });
+            engine.set_graph(graph);
+
+            // Cache should be cleared
+            assert_eq!(engine.bm25_cache.borrow().entry_count(), 0);
+
+            // Next search should be cache miss
+            let _ = engine
+                .search(&index, "test", SearchOptions::default())
+                .unwrap();
+            assert_eq!(engine.bm25_cache.borrow().miss_count(), 2);
+        }
+
+        #[test]
+        fn cache_miss_on_different_repo() {
+            let embedder = Arc::new(MockEmbedder);
+            let engine = SearchEngine::new(embedder.clone());
+
+            let chunks1 = vec![make_chunk("fn foo() {}", "rust", "a.rs")];
+            let vectors1: Vec<Vec<f32>> = chunks1
+                .iter()
+                .map(|c| embedder.embed(&c.text).unwrap())
+                .collect();
+
+            let mut index1 = make_index(chunks1.clone(), vectors1.clone());
+            index1.metadata.repo_hash = "repo1".to_string();
+
+            let chunks2 = vec![make_chunk("fn bar() {}", "rust", "b.rs")];
+            let vectors2: Vec<Vec<f32>> = chunks2
+                .iter()
+                .map(|c| embedder.embed(&c.text).unwrap())
+                .collect();
+
+            let mut index2 = make_index(chunks2, vectors2);
+            index2.metadata.repo_hash = "repo2".to_string();
+
+            // Search on first index
+            let _ = engine
+                .search(&index1, "test", SearchOptions::default())
+                .unwrap();
+            assert_eq!(engine.bm25_cache.borrow().miss_count(), 1);
+
+            // Search on second index - different repo, should be cache miss
+            let _ = engine
+                .search(&index2, "test", SearchOptions::default())
+                .unwrap();
+            assert_eq!(engine.bm25_cache.borrow().miss_count(), 2);
+
+            // Cache should still have 1 entry (replaced)
+            assert_eq!(engine.bm25_cache.borrow().entry_count(), 1);
+        }
+
+        #[test]
+        fn cache_miss_on_different_chunk_count() {
+            let embedder = Arc::new(MockEmbedder);
+            let engine = SearchEngine::new(embedder.clone());
+
+            let chunks1 = vec![make_chunk("fn foo() {}", "rust", "a.rs")];
+            let vectors1: Vec<Vec<f32>> = chunks1
+                .iter()
+                .map(|c| embedder.embed(&c.text).unwrap())
+                .collect();
+            let index1 = make_index(chunks1, vectors1);
+
+            let chunks2 = vec![
+                make_chunk("fn foo() {}", "rust", "a.rs"),
+                make_chunk("fn bar() {}", "rust", "b.rs"),
+            ];
+            let vectors2: Vec<Vec<f32>> = chunks2
+                .iter()
+                .map(|c| embedder.embed(&c.text).unwrap())
+                .collect();
+
+            let mut index2 = make_index(chunks2, vectors2);
+            // Same repo_hash but different chunk count
+            index2.metadata.repo_hash = index1.metadata.repo_hash.clone();
+
+            // Search on first index
+            let _ = engine
+                .search(&index1, "test", SearchOptions::default())
+                .unwrap();
+            assert_eq!(engine.bm25_cache.borrow().miss_count(), 1);
+
+            // Search on second index - different chunk count, should be cache miss
+            let _ = engine
+                .search(&index2, "test", SearchOptions::default())
+                .unwrap();
+            assert_eq!(engine.bm25_cache.borrow().miss_count(), 2);
         }
     }
 }

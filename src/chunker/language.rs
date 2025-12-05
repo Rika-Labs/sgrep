@@ -2,7 +2,7 @@ use std::path::Path;
 
 use tree_sitter::Language;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 pub enum LanguageKind {
     Rust,
     Python,

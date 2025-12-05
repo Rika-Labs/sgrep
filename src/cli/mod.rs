@@ -79,6 +79,12 @@ pub enum Commands {
         /// Emit per-phase timings and throughput stats
         #[arg(long, default_value_t = false)]
         profile: bool,
+        /// Show index statistics without rebuilding
+        #[arg(long, default_value_t = false)]
+        stats: bool,
+        /// Output stats as JSON (only with --stats)
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Watch a repository and keep the index fresh
     Watch {
@@ -184,6 +190,27 @@ mod tests {
                 assert!(init);
             }
             _ => panic!("Expected Config command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_index_stats_flag() {
+        let cli = Cli::parse_from(["sgrep", "index", "--stats"]);
+        match cli.command {
+            Commands::Index { stats, .. } => assert!(stats),
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_index_stats_with_json() {
+        let cli = Cli::parse_from(["sgrep", "index", "--stats", "--json"]);
+        match cli.command {
+            Commands::Index { stats, json, .. } => {
+                assert!(stats);
+                assert!(json);
+            }
+            _ => panic!("Expected Index command"),
         }
     }
 
