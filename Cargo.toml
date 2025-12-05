@@ -72,3 +72,8 @@ encoding_rs = "0.8"
 
 [dev-dependencies]
 serial_test = "3.2"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "chunker_bench"
+harness = false
