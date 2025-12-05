@@ -1,4 +1,5 @@
 use memmap2::Mmap;
+use usearch::Index;
 
 use super::index::IndexMetadata;
 use super::RepositoryIndex;
@@ -8,6 +9,46 @@ pub const VECTOR_HEADER_SIZE: usize = 8;
 pub const BYTES_PER_F32: usize = 4;
 pub const BYTES_PER_U64: usize = 8;
 
+pub const HNSW_HEADER_SIZE: usize = 20;
+
+#[derive(Debug, Clone, Copy)]
+pub struct HnswHeader {
+    pub format_version: u32,
+    pub vector_dim: u32,
+    pub connectivity: u32,
+    pub expansion_add: u32,
+    pub num_vectors: u32,
+}
+
+impl HnswHeader {
+    pub fn to_bytes(&self) -> [u8; HNSW_HEADER_SIZE] {
+        let mut bytes = [0u8; HNSW_HEADER_SIZE];
+        bytes[0..4].copy_from_slice(&self.format_version.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.vector_dim.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.connectivity.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.expansion_add.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.num_vectors.to_le_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
+        if bytes.len() < HNSW_HEADER_SIZE {
+            return Err(anyhow::anyhow!(
+                "Invalid HNSW header: expected {} bytes, got {}",
+                HNSW_HEADER_SIZE,
+                bytes.len()
+            ));
+        }
+        Ok(Self {
+            format_version: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            vector_dim: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            connectivity: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            expansion_add: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+            num_vectors: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
+        })
+    }
+}
+
 pub struct MmapIndex {
     pub metadata: IndexMetadata,
     pub chunks: Vec<CodeChunk>,
@@ -15,6 +56,7 @@ pub struct MmapIndex {
     pub(crate) binary_mmap: Option<Mmap>,
     pub(crate) vector_dim: usize,
     pub(crate) binary_words: usize,
+    pub(crate) hnsw: Option<Index>,
 }
 
 impl MmapIndex {
@@ -38,6 +80,16 @@ impl MmapIndex {
     #[inline]
     pub fn has_binary_vectors(&self) -> bool {
         self.binary_mmap.is_some()
+    }
+
+    #[inline]
+    pub fn has_hnsw(&self) -> bool {
+        self.hnsw.is_some()
+    }
+
+    #[inline]
+    pub fn get_hnsw(&self) -> Option<&Index> {
+        self.hnsw.as_ref()
     }
 
     #[inline]
