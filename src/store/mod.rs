@@ -372,8 +372,13 @@ fn copy_index_files(src: &Path, dst: &Path) -> Result<()> {
         let src_path = src.join(file);
         let dst_path = dst.join(file);
         if src_path.exists() {
-            fs::copy(&src_path, &dst_path)
-                .with_context(|| format!("Failed to copy {} to {}", src_path.display(), dst_path.display()))?;
+            fs::copy(&src_path, &dst_path).with_context(|| {
+                format!(
+                    "Failed to copy {} to {}",
+                    src_path.display(),
+                    dst_path.display()
+                )
+            })?;
         }
     }
 

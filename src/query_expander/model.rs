@@ -120,7 +120,6 @@ impl QueryAnalysis {
             expanded_queries: vec![query.to_string()],
         }
     }
-
 }
 
 /// Query expander using Qwen2.5 model via llama.cpp.

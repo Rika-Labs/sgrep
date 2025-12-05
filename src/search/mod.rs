@@ -739,6 +739,7 @@ impl SearchEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn score_chunk(
         &self,
         chunk: &CodeChunk,
@@ -826,7 +827,7 @@ impl SearchEngine {
                         if idx < results.len() {
                             let mut result = results[idx].clone();
                             let rerank_boost = rerank_score * 0.4;
-                            result.score = result.score + rerank_boost;
+                            result.score += rerank_boost;
                             Some(result)
                         } else {
                             None

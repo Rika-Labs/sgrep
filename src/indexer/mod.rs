@@ -26,7 +26,7 @@ use anyhow::{anyhow, Result};
 use dashmap::DashMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rayon::prelude::*;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::chunker::{self, CodeChunk};
 use crate::embedding::BatchEmbedder;
@@ -92,9 +92,9 @@ impl Indexer {
         let total_start = Instant::now();
         let root = canonical(&request.path);
         if request.force {
-            info!("Full indexing: {}", root.display());
+            debug!("Full indexing: {}", root.display());
         } else {
-            info!("Indexing: {}", root.display());
+            debug!("Indexing: {}", root.display());
         }
         let store = IndexStore::new(&root)?;
         let existing_index = if request.force {
@@ -107,7 +107,7 @@ impl Indexer {
             let reusable = index.metadata.vector_dim == self.embedder.dimension()
                 && index.metadata.version == env!("CARGO_PKG_VERSION");
             if reusable && !dirty.is_empty() {
-                info!(
+                debug!(
                     "Incremental indexing: {} changed, {} deleted",
                     dirty.touched.len(),
                     dirty.deleted.len()
@@ -128,7 +128,7 @@ impl Indexer {
                         "embedder_dim" = self.embedder.dimension()
                     );
                 } else {
-                    info!("No changes detected, skipping incremental");
+                    debug!("No changes detected, skipping incremental");
                 }
             }
         }
@@ -399,7 +399,7 @@ impl Indexer {
 
         let hierarchy = build_hierarchical_index(&chunks, &vectors);
         let hier_stats = hierarchy.stats();
-        info!(
+        debug!(
             "Built hierarchical index: {} files, {} directories",
             hier_stats.file_count, hier_stats.directory_count
         );

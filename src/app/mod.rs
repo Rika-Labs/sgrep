@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use console::style;
+use console::{style, Term};
 use indicatif::HumanDuration;
 use tracing::{info, warn};
 
@@ -28,6 +28,38 @@ pub struct SearchParams<'a> {
     pub filters: Vec<String>,
     pub json: bool,
     pub debug: bool,
+}
+
+struct ProgressLine {
+    term: Term,
+    enabled: bool,
+}
+
+impl ProgressLine {
+    fn stderr() -> Self {
+        let term = Term::stderr();
+        let enabled = term.is_term();
+        Self { term, enabled }
+    }
+
+    fn set(&self, message: &str) {
+        if self.enabled {
+            let _ = self.term.clear_line();
+            let _ = self.term.write_str(&format!("\r{message}"));
+            let _ = self.term.flush();
+        } else {
+            eprintln!("{message}");
+        }
+    }
+
+    fn finish(&self, message: &str) {
+        if self.enabled {
+            let _ = self.term.clear_line();
+            let _ = self.term.write_line(&format!("\r{message}"));
+        } else {
+            eprintln!("{message}");
+        }
+    }
 }
 
 /// Context needed to render search results.
@@ -106,6 +138,8 @@ fn build_embedder(
     offline: bool,
     device: Option<String>,
 ) -> Result<Arc<dyn embedding::BatchEmbedder>> {
+    let progress = ProgressLine::stderr();
+
     if env::var("TOKENIZERS_PARALLELISM").is_err() {
         env::set_var("TOKENIZERS_PARALLELISM", "true");
     }
@@ -124,10 +158,7 @@ fn build_embedder(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
 
-    eprintln!(
-        "{} Loading embedding model...",
-        style("ℹ").cyan()
-    );
+    progress.set("Loading embedding model…");
 
     let embedder: Arc<dyn embedding::BatchEmbedder> = if use_pooled {
         Arc::new(PooledEmbedder::default())
@@ -135,10 +166,7 @@ fn build_embedder(
         Arc::new(Embedder::default())
     };
 
-    eprintln!(
-        "{} Embedding model ready",
-        style("✔").green()
-    );
+    progress.finish("Embedding model ready");
 
     Ok(embedder)
 }

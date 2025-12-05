@@ -77,6 +77,7 @@ impl SymbolExtractor {
         Ok((symbols, edges, imports))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn collect_symbols(
         &self,
         node: &tree_sitter::Node,
@@ -472,6 +473,7 @@ impl SymbolExtractor {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn extract_callee_name(&self, node: &tree_sitter::Node, source: &str) -> Option<String> {
         let mut cursor = node.walk();
 
