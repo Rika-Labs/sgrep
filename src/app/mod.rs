@@ -262,13 +262,13 @@ fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
     };
 
     let dimension = if config.modal.dimension == 0 {
-        4096
+        384 // Match local embedder dimension for compatibility
     } else {
         config.modal.dimension
     };
 
     let batch_size = if config.modal.batch_size == 0 {
-        32
+        128 // Optimized for GPU workloads
     } else {
         config.modal.batch_size
     };

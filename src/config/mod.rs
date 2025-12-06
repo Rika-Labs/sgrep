@@ -33,7 +33,7 @@ pub struct ModalConfig {
     /// GPU tier: "budget" (T4), "balanced" (A10G), "high" (L40S)
     #[serde(default = "default_gpu_tier")]
     pub gpu_tier: String,
-    /// Embedding dimension (384-4096)
+    /// Embedding dimension (default: 384 to match local embedder)
     #[serde(default = "default_dimension")]
     pub dimension: usize,
     /// Batch size for embedding requests
@@ -48,7 +48,7 @@ fn default_gpu_tier() -> String {
 }
 
 fn default_dimension() -> usize {
-    4096
+    384 // Matches local embedder dimension for compatibility
 }
 
 fn default_batch_size() -> usize {
@@ -274,7 +274,7 @@ token_id = "ak-test"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.modal.gpu_tier, "high");
-        assert_eq!(config.modal.dimension, 4096);
+        assert_eq!(config.modal.dimension, 384);
         assert_eq!(config.modal.batch_size, 128);
         assert_eq!(config.modal.endpoint, None);
     }

@@ -49,7 +49,7 @@ image = (
 
 class EmbedRequest(BaseModel):
     texts: List[str]
-    dimension: int = 4096
+    dimension: int = 384  # Matches local embedder for compatibility
 
 
 class EmbedResponse(BaseModel):

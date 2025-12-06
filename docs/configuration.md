@@ -64,8 +64,8 @@ proxy_token_id = "wk-..."        # Modal proxy auth token ID from https://modal.
 proxy_token_secret = "ws-..."    # Modal proxy auth token secret from https://modal.com/settings
 
 gpu_tier = "high"                # budget (T4), balanced (A10G), high (L40S)
-dimension = 4096                 # embedding dimension
-batch_size = 32                  # texts per request
+dimension = 384                  # embedding dimension (matches local embedder)
+batch_size = 128                 # texts per request
 endpoint = "https://..."         # auto-populated after first deploy
 ```
 
