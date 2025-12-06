@@ -29,52 +29,52 @@ pub fn suppress_near_duplicates(
         return;
     }
 
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+    let mut sorted_indices: Vec<usize> = (0..results.len()).collect();
+    sorted_indices.sort_by(|&a, &b| {
+        results[b]
+            .score
+            .partial_cmp(&results[a].score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let mut seen_hashes: HashSet<&str> = HashSet::new();
-    let mut indices_to_remove: Vec<usize> = Vec::new();
+    let mut indices_to_remove: HashSet<usize> = HashSet::new();
 
-    for (idx, result) in results.iter().enumerate() {
-        if seen_hashes.contains(result.chunk.hash.as_str()) {
-            indices_to_remove.push(idx);
+    for &idx in &sorted_indices {
+        let hash = results[idx].chunk.hash.as_str();
+        if seen_hashes.contains(hash) {
+            indices_to_remove.insert(idx);
         } else {
-            seen_hashes.insert(&result.chunk.hash);
+            seen_hashes.insert(hash);
         }
     }
 
     if !vectors.is_empty() && vectors.len() == results.len() && options.semantic_threshold < 1.0 {
-        let hash_removed: HashSet<usize> = indices_to_remove.iter().cloned().collect();
-
-        for i in 0..results.len() {
-            if hash_removed.contains(&i) || indices_to_remove.contains(&i) {
+        for (pos_i, &idx_i) in sorted_indices.iter().enumerate() {
+            if indices_to_remove.contains(&idx_i) {
                 continue;
             }
 
-            for j in 0..i {
-                if hash_removed.contains(&j) || indices_to_remove.contains(&j) {
+            for &idx_j in sorted_indices.iter().take(pos_i) {
+                if indices_to_remove.contains(&idx_j) {
                     continue;
                 }
 
-                let similarity = cosine_similarity(&vectors[i], &vectors[j]);
+                let similarity = cosine_similarity(&vectors[idx_i], &vectors[idx_j]);
                 if similarity > options.semantic_threshold {
-                    indices_to_remove.push(i);
+                    indices_to_remove.insert(idx_i);
                     break;
                 }
             }
         }
     }
 
-    indices_to_remove.sort_by(|a, b| b.cmp(a));
-    indices_to_remove.dedup();
-    for idx in indices_to_remove {
-        if idx < results.len() {
-            results.remove(idx);
-        }
-    }
+    let mut result_options: Vec<Option<SearchResult>> = results.drain(..).map(Some).collect();
+    *results = sorted_indices
+        .into_iter()
+        .filter(|idx| !indices_to_remove.contains(idx))
+        .map(|idx| result_options[idx].take().unwrap())
+        .collect();
 }
 
 #[cfg(test)]
@@ -223,5 +223,57 @@ mod tests {
         for (r1, r2) in results1.iter().zip(results2.iter()) {
             assert!((r1.score - r2.score).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn semantic_dedup_with_unsorted_input() {
+        let chunk_low = make_chunk_with_hash("fn low_score() {}", "low.rs", "h_low");
+        let chunk_high = make_chunk_with_hash("fn high_score() {}", "high.rs", "h_high");
+        let chunk_similar = make_chunk_with_hash("fn similar_to_high() {}", "similar.rs", "h_similar");
+
+        let mut results = vec![
+            make_result(chunk_low.clone(), 0.5),
+            make_result(chunk_high.clone(), 0.9),
+            make_result(chunk_similar.clone(), 0.7),
+        ];
+
+        let vectors = vec![
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.99, 0.14, 0.0, 0.0],
+        ];
+
+        let options = DedupOptions {
+            semantic_threshold: 0.95,
+            ..Default::default()
+        };
+
+        suppress_near_duplicates(&mut results, &vectors, &options);
+
+        assert_eq!(results.len(), 2);
+        assert!((results[0].score - 0.9).abs() < 1e-6);
+        assert!(results[0].chunk.path.to_string_lossy().contains("high.rs"));
+        assert!((results[1].score - 0.5).abs() < 1e-6);
+        assert!(results[1].chunk.path.to_string_lossy().contains("low.rs"));
+    }
+
+    #[test]
+    fn hash_dedup_with_unsorted_input() {
+        let chunk1 = make_chunk_with_hash("fn foo() {}", "low.rs", "same_hash");
+        let chunk2 = make_chunk_with_hash("fn foo() {}", "high.rs", "same_hash");
+        let chunk3 = make_chunk_with_hash("fn bar() {}", "other.rs", "different");
+
+        let mut results = vec![
+            make_result(chunk1, 0.5),
+            make_result(chunk2, 0.9),
+            make_result(chunk3, 0.7),
+        ];
+
+        suppress_near_duplicates(&mut results, &[], &DedupOptions::default());
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].chunk.hash, "same_hash");
+        assert!((results[0].score - 0.9).abs() < 1e-6);
+        assert!(results[0].chunk.path.to_string_lossy().contains("high.rs"));
     }
 }
