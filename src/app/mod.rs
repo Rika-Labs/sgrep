@@ -6,16 +6,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
 use clap::Parser;
 use console::{style, Term};
 use indicatif::HumanDuration;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::cli::{resolve_repo_path, Cli, Commands};
-use crate::config::Config;
+use crate::config::{Config, RemoteProviderType};
 use crate::embedding::{self, Embedder, PooledEmbedder};
 use crate::modal::{ModalDeployer, ModalEmbedder};
 use crate::output::JsonResponse;
+use crate::remote::{RemoteChunk, RemoteFactory, RemoteVectorStore};
 use crate::threading::{CpuPreset, ThreadConfig};
 use crate::{indexer, search, store, watch};
 
@@ -31,6 +34,7 @@ pub struct SearchParams<'a> {
     pub no_rerank: bool,
     pub rerank_oversample: usize,
     pub offload: bool,
+    pub remote: Option<Arc<dyn RemoteVectorStore>>,
 }
 
 #[allow(dead_code)]
@@ -165,13 +169,13 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             stats,
             json,
             offload: _offload,
-            remote: _remote,
+            remote,
             detach: _,
         } => {
             if stats {
                 return handle_index_stats(path, json);
             }
-            handle_index(embedder, path, force, batch_size, profile)
+            handle_index(embedder, path, force, batch_size, profile, remote)
         }
         Commands::Search {
             query,
@@ -185,8 +189,9 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             no_rerank,
             rerank_oversample,
             offload,
-            remote: _remote,
+            remote,
         } => {
+            let remote_store = build_remote_store(remote, &path)?;
             handle_search(
                 embedder,
                 SearchParams {
@@ -201,6 +206,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                     no_rerank,
                     rerank_oversample,
                     offload,
+                    remote: remote_store,
                 },
             )
         }
@@ -209,9 +215,16 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             debounce_ms,
             batch_size,
             offload: _offload,
-            remote: _remote,
+            remote,
             detach: _,
-        } => handle_watch(embedder, path, debounce_ms, batch_size),
+        } => {
+            if remote {
+                eprintln!(
+                    "[warn] Remote indexing via watch is not yet supported; proceeding locally."
+                );
+            }
+            handle_watch(embedder, path, debounce_ms, batch_size)
+        }
         Commands::Config { .. } => unreachable!(), // Handled above
     }
 }
@@ -321,7 +334,10 @@ fn build_reranker_silent(
         Ok(reranker) => Some(Arc::new(reranker)),
         Err(e) => {
             if !json_mode {
-                eprintln!("[warn] Reranker unavailable: {} (falling back to semantic search)", e);
+                eprintln!(
+                    "[warn] Reranker unavailable: {} (falling back to semantic search)",
+                    e
+                );
             }
             None
         }
@@ -332,7 +348,7 @@ fn build_reranker_silent(
 fn build_modal_reranker(
     json_mode: bool,
 ) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
-    use crate::modal::ModalReranker;
+    use crate::modal::reranker::ModalReranker;
 
     let config = match Config::load() {
         Ok(c) => c,
@@ -435,7 +451,12 @@ fn verify_model_files() -> Result<()> {
     let mut all_ok = true;
     for file in embedding::MODEL_FILES {
         let exists = model_dir.join(file).exists();
-        let status = if exists { "OK" } else { all_ok = false; "MISSING" };
+        let status = if exists {
+            "OK"
+        } else {
+            all_ok = false;
+            "MISSING"
+        };
         println!("  [{}] {}", status, file);
     }
 
@@ -492,6 +513,7 @@ fn handle_index(
     force: bool,
     batch_size: Option<usize>,
     profile: bool,
+    remote_flag: bool,
 ) -> Result<()> {
     let path = resolve_repo_path(path)?;
 
@@ -505,6 +527,8 @@ fn handle_index(
         }
     }
 
+    let remote_store = build_remote_store(remote_flag, &path)?;
+
     let indexer = indexer::Indexer::new(embedder.clone());
     let report = indexer
         .build_index(indexer::IndexRequest {
@@ -515,6 +539,11 @@ fn handle_index(
             dirty: None,
         })
         .context("Failed to build index")?;
+
+    if let Some(remote) = remote_store {
+        push_remote_index(&path, &remote)?;
+        eprintln!("[ok] Remote index pushed to {}", remote.name());
+    }
 
     println!(
         "[ok] Indexed {} files ({} chunks) in {}",
@@ -563,6 +592,10 @@ fn handle_search(
     params: SearchParams<'_>,
 ) -> Result<()> {
     let start = Instant::now();
+
+    if let Some(remote) = params.remote.clone() {
+        return handle_remote_search(embedder, params, remote, start);
+    }
 
     let reranker = if params.no_rerank {
         None
@@ -643,6 +676,112 @@ fn handle_search(
         json: params.json,
         debug: params.debug,
     })
+}
+
+fn handle_remote_search(
+    embedder: Arc<dyn embedding::BatchEmbedder>,
+    params: SearchParams<'_>,
+    remote: Arc<dyn RemoteVectorStore>,
+    start: Instant,
+) -> Result<()> {
+    let query_vec = embedder.embed(params.query)?;
+    let hits = remote.query(&query_vec, params.limit)?;
+
+    let results: Vec<search::SearchResult> = hits
+        .into_iter()
+        .map(|h| {
+            let chunk = crate::chunker::CodeChunk {
+                id: Uuid::new_v4(),
+                path: Path::new(&h.path).to_path_buf(),
+                language: h.language,
+                start_line: h.start_line,
+                end_line: h.end_line,
+                text: h.content,
+                hash: h.id.clone(),
+                modified_at: Utc::now(),
+            };
+            search::SearchResult {
+                chunk,
+                score: h.score,
+                semantic_score: h.score,
+                bm25_score: 0.0,
+                show_full_context: params.context,
+            }
+        })
+        .collect();
+
+    let elapsed = start.elapsed();
+    let store = store::IndexStore::new(params.path)?;
+    let metadata = store::IndexMetadata {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        repo_path: params.path.to_path_buf(),
+        repo_hash: store.repo_hash().to_string(),
+        vector_dim: embedder.dimension(),
+        indexed_at: Utc::now(),
+        total_files: 0,
+        total_chunks: results.len(),
+    };
+    let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
+
+    render_results(RenderContext {
+        results,
+        query: params.query,
+        limit: params.limit,
+        index: &index,
+        elapsed,
+        json: params.json,
+        debug: params.debug,
+    })
+}
+
+fn build_remote_store(
+    remote_flag: bool,
+    path: &Path,
+) -> Result<Option<Arc<dyn RemoteVectorStore>>> {
+    let config = Config::load().unwrap_or_default();
+    let provider_set = config.remote.provider.is_some();
+    if !remote_flag && !provider_set {
+        return Ok(None);
+    }
+
+    let store = store::IndexStore::new(path)?;
+    let repo_hash = store.repo_hash().to_string();
+    let chosen_provider = match (remote_flag, config.remote.provider.clone()) {
+        (_, Some(p)) if p != RemoteProviderType::None => Some(p),
+        (true, None) => Some(RemoteProviderType::Turbopuffer),
+        _ => None,
+    };
+
+    let mut cfg = config.remote.clone();
+    cfg.provider = chosen_provider;
+    RemoteFactory::build_from_config(&cfg, &repo_hash)
+}
+
+fn push_remote_index(path: &Path, remote: &Arc<dyn RemoteVectorStore>) -> Result<()> {
+    let store = store::IndexStore::new(path)?;
+    let Some(index) = store.load()? else {
+        return Err(anyhow!(
+            "Remote push requested but no local index found for {}",
+            path.display()
+        ));
+    };
+
+    let chunks: Vec<RemoteChunk> = index
+        .chunks
+        .iter()
+        .zip(index.vectors.iter())
+        .map(|(chunk, vec)| RemoteChunk {
+            id: chunk.hash.clone(),
+            vector: vec.clone(),
+            path: chunk.path.display().to_string(),
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            content: chunk.text.clone(),
+            language: chunk.language.clone(),
+        })
+        .collect();
+
+    remote.upsert(&chunks)
 }
 
 fn handle_watch(
@@ -802,7 +941,6 @@ mod tests {
     use super::*;
     use crate::chunker::CodeChunk;
     use crate::store::{IndexMetadata, RepositoryIndex};
-    use chrono::Utc;
     use serial_test::serial;
     use std::any::type_name_of_val;
     use std::ffi::OsString;
@@ -985,7 +1123,7 @@ mod tests {
         let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
-        handle_index(embedder, Some(repo.clone()), true, Some(32), true)
+        handle_index(embedder, Some(repo.clone()), true, Some(32), true, false)
             .expect("indexing should succeed");
         std::fs::remove_dir_all(&repo).ok();
     }
@@ -999,7 +1137,7 @@ mod tests {
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
 
         // No files means cache_hits + cache_misses = 0, exercising the zero-hit-rate branch.
-        handle_index(embedder, Some(repo.clone()), true, None, true).unwrap();
+        handle_index(embedder, Some(repo.clone()), true, None, true, false).unwrap();
 
         std::fs::remove_dir_all(&repo).ok();
     }
@@ -1011,9 +1149,17 @@ mod tests {
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
 
-        handle_index(embedder.clone(), Some(repo.clone()), true, None, true).unwrap();
+        handle_index(
+            embedder.clone(),
+            Some(repo.clone()),
+            true,
+            None,
+            true,
+            false,
+        )
+        .unwrap();
         // second run should see cache hits > 0 and exercise hit-rate branch
-        handle_index(embedder, Some(repo.clone()), false, None, true).unwrap();
+        handle_index(embedder, Some(repo.clone()), false, None, true, false).unwrap();
 
         std::fs::remove_dir_all(&repo).ok();
     }
@@ -1344,6 +1490,7 @@ mod tests {
             no_rerank: false,
             rerank_oversample: 3,
             offload: false,
+            remote: None,
         };
 
         assert_eq!(params.query, "test query");

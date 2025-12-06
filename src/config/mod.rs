@@ -60,6 +60,9 @@ pub struct TurbopufferConfig {
     /// Custom namespace prefix (default: "sgrep")
     #[serde(default = "default_namespace_prefix")]
     pub namespace_prefix: String,
+    /// Optional request timeout seconds
+    #[serde(default = "default_remote_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 fn default_region() -> String {
@@ -68,6 +71,41 @@ fn default_region() -> String {
 
 fn default_namespace_prefix() -> String {
     "sgrep".to_string()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteProviderType {
+    Turbopuffer,
+    Pinecone,
+    #[default]
+    None,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PineconeConfig {
+    pub api_key: Option<String>,
+    /// Fully qualified endpoint, e.g. https://YOUR-INDEX-XXXX.svc.us-east1-gcp.pinecone.io
+    pub endpoint: Option<String>,
+    /// Optional namespace override (defaults to repo hash)
+    pub namespace: Option<String>,
+    /// Optional request timeout seconds
+    #[serde(default = "default_remote_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RemoteConfig {
+    /// Provider to use when --remote or SGREP_REMOTE is enabled
+    pub provider: Option<RemoteProviderType>,
+    #[serde(default)]
+    pub turbopuffer: TurbopufferConfig,
+    #[serde(default)]
+    pub pinecone: PineconeConfig,
+}
+
+fn default_remote_timeout_secs() -> u64 {
+    120
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -79,6 +117,8 @@ pub struct Config {
     pub modal: ModalConfig,
     #[serde(default)]
     pub turbopuffer: TurbopufferConfig,
+    #[serde(default)]
+    pub remote: RemoteConfig,
 }
 
 #[allow(dead_code)]
@@ -248,8 +288,14 @@ endpoint = "https://example.modal.run"
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
         assert_eq!(config.modal.token_id, Some("ak-test".to_string()));
         assert_eq!(config.modal.token_secret, Some("as-test".to_string()));
-        assert_eq!(config.modal.proxy_token_id, Some("wk-proxy-test".to_string()));
-        assert_eq!(config.modal.proxy_token_secret, Some("ws-proxy-test".to_string()));
+        assert_eq!(
+            config.modal.proxy_token_id,
+            Some("wk-proxy-test".to_string())
+        );
+        assert_eq!(
+            config.modal.proxy_token_secret,
+            Some("ws-proxy-test".to_string())
+        );
         assert_eq!(config.modal.gpu_tier, "balanced");
         assert_eq!(config.modal.batch_size, 64);
         assert_eq!(
@@ -286,7 +332,10 @@ region = "aws-us-east-1"
 namespace_prefix = "myproject"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.turbopuffer.api_key, Some("tpuf_test_key".to_string()));
+        assert_eq!(
+            config.turbopuffer.api_key,
+            Some("tpuf_test_key".to_string())
+        );
         assert_eq!(config.turbopuffer.region, "aws-us-east-1");
         assert_eq!(config.turbopuffer.namespace_prefix, "myproject");
     }
@@ -319,11 +368,34 @@ gpu_tier = "high"
 [turbopuffer]
 api_key = "tpuf-key"
 region = "gcp-us-central1"
+
+[remote]
+provider = "turbopuffer"
+
+[remote.turbopuffer]
+api_key = "tpuf-key"
+namespace_prefix = "acme"
+
+[remote.pinecone]
+api_key = "pc-key"
+endpoint = "https://idx.svc.test.pinecone.io"
+namespace = "ns"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
         assert_eq!(config.modal.token_id, Some("ak-test".to_string()));
         assert_eq!(config.modal.proxy_token_id, Some("wk-proxy".to_string()));
         assert_eq!(config.turbopuffer.api_key, Some("tpuf-key".to_string()));
+        assert_eq!(
+            config.remote.provider,
+            Some(RemoteProviderType::Turbopuffer)
+        );
+        assert_eq!(config.remote.turbopuffer.namespace_prefix, "acme");
+        assert_eq!(config.remote.pinecone.api_key, Some("pc-key".to_string()));
+        assert_eq!(
+            config.remote.pinecone.endpoint,
+            Some("https://idx.svc.test.pinecone.io".to_string())
+        );
+        assert_eq!(config.remote.pinecone.namespace, Some("ns".to_string()));
     }
 }

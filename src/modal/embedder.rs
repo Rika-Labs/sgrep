@@ -75,7 +75,9 @@ impl ModalEmbedder {
             .set("Content-Type", "application/json");
 
         // Add Modal proxy auth headers if credentials are available (wk-/ws- tokens)
-        if let (Some(proxy_id), Some(proxy_secret)) = (&self.proxy_token_id, &self.proxy_token_secret) {
+        if let (Some(proxy_id), Some(proxy_secret)) =
+            (&self.proxy_token_id, &self.proxy_token_secret)
+        {
             req = req
                 .set("Modal-Key", proxy_id)
                 .set("Modal-Secret", proxy_secret);
@@ -138,10 +140,7 @@ impl BatchEmbedder for ModalEmbedder {
                     }
                     Err(e) => {
                         if attempt < MAX_RETRIES {
-                            eprintln!(
-                                "Modal embed retry {}/{}: {}",
-                                attempt, MAX_RETRIES, e
-                            );
+                            eprintln!("Modal embed retry {}/{}: {}", attempt, MAX_RETRIES, e);
                             std::thread::sleep(Duration::from_millis(500 * attempt as u64));
                             last_err = Some(e);
                         } else {
@@ -179,15 +178,17 @@ mod tests {
         assert_eq!(embedder.endpoint, "https://embed.modal.run");
         assert_eq!(embedder.dimension, 384);
         assert_eq!(embedder.proxy_token_id, Some("wk-proxy-id".to_string()));
-        assert_eq!(embedder.proxy_token_secret, Some("ws-proxy-secret".to_string()));
+        assert_eq!(
+            embedder.proxy_token_secret,
+            Some("ws-proxy-secret".to_string())
+        );
         assert_eq!(embedder.batch_size, DEFAULT_BATCH_SIZE);
     }
 
     #[test]
     fn with_batch_size_sets_batch_size() {
-        let embedder =
-            ModalEmbedder::new("https://embed.modal.run".to_string(), 384, None, None)
-                .with_batch_size(64);
+        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 384, None, None)
+            .with_batch_size(64);
         assert_eq!(embedder.batch_size, 64);
     }
 
@@ -244,6 +245,9 @@ mod tests {
         let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 0, None, None);
         let result = embedder.embed_batch(&["test".to_string()]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Dimension must be 384"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Dimension must be 384"));
     }
 }

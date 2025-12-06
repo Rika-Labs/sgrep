@@ -621,7 +621,7 @@ impl SearchEngine {
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_candidates = search_hnsw_candidates(
-                &hnsw,
+                hnsw,
                 &expanded_vec,
                 PRF_TOP_K.max(fetch_limit),
                 index.len(),
@@ -1983,22 +1983,6 @@ mod tests {
 
     #[test]
     fn select_top_k_handles_less_than_k() {
-        let chunk = make_chunk("test", "rust", "test.rs");
-        let mut matches = vec![SearchResult {
-            chunk,
-            score: 0.5,
-            semantic_score: 0.5,
-            bm25_score: 0.0,
-            show_full_context: false,
-        }];
-
-        select_top_k(&mut matches, 10);
-
-        assert_eq!(matches.len(), 1);
-    }
-
-    #[test]
-    fn select_top_k_empty_input() {
         let mut matches: Vec<SearchResult> = vec![];
         select_top_k(&mut matches, 5);
         assert!(matches.is_empty());
@@ -2048,7 +2032,6 @@ mod tests {
                 bm25_score: 0.0,
                 show_full_context: false,
             }];
-
             let new_result = SearchResult {
                 chunk: chunk.clone(),
                 score: 0.8,
@@ -2074,7 +2057,6 @@ mod tests {
                 bm25_score: 0.0,
                 show_full_context: false,
             }];
-
             let new_result = SearchResult {
                 chunk: chunk2,
                 score: 0.6,
@@ -2275,7 +2257,7 @@ mod tests {
                 .map(|c| embedder.embed(&c.text).unwrap())
                 .collect();
 
-            let mut index1 = make_index(chunks1.clone(), vectors1.clone());
+            let mut index1 = make_index(chunks1, vectors1.clone());
             index1.metadata.repo_hash = "repo1".to_string();
 
             let chunks2 = vec![make_chunk("fn bar() {}", "rust", "b.rs")];

@@ -27,11 +27,7 @@ pub struct ModalDeployer {
 }
 
 impl ModalDeployer {
-    pub fn new(
-        gpu_tier: String,
-        token_id: Option<String>,
-        token_secret: Option<String>,
-    ) -> Self {
+    pub fn new(gpu_tier: String, token_id: Option<String>, token_secret: Option<String>) -> Self {
         let cache_path = Self::default_cache_path();
         Self {
             gpu_tier,
@@ -46,9 +42,7 @@ impl ModalDeployer {
             return PathBuf::from(home).join("modal_cache.json");
         }
         if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home)
-                .join(".sgrep")
-                .join("modal_cache.json");
+            return PathBuf::from(home).join(".sgrep").join("modal_cache.json");
         }
         PathBuf::from(".sgrep").join("modal_cache.json")
     }
@@ -196,10 +190,8 @@ impl ModalDeployer {
         }
 
         let embed_url = embed_url.ok_or_else(|| anyhow!("Could not find embed endpoint URL"))?;
-        let rerank_url =
-            rerank_url.ok_or_else(|| anyhow!("Could not find rerank endpoint URL"))?;
-        let health_url =
-            health_url.ok_or_else(|| anyhow!("Could not find health endpoint URL"))?;
+        let rerank_url = rerank_url.ok_or_else(|| anyhow!("Could not find rerank endpoint URL"))?;
+        let health_url = health_url.ok_or_else(|| anyhow!("Could not find health endpoint URL"))?;
 
         Ok(EndpointCache {
             embed_url,

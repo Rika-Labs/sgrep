@@ -348,7 +348,10 @@ impl Indexer {
             pb.set_message("embedding...");
 
             // Collect all texts for batch embedding (much faster for remote embedders like Modal)
-            let texts: Vec<String> = pending_chunks.iter().map(|(_, text)| text.clone()).collect();
+            let texts: Vec<String> = pending_chunks
+                .iter()
+                .map(|(_, text)| text.clone())
+                .collect();
             let indices: Vec<usize> = pending_chunks.iter().map(|(idx, _)| *idx).collect();
 
             // Embed in batches using embed_batch for efficiency
@@ -901,6 +904,13 @@ mod tests {
         assert!(report.duration.as_secs() < 60);
 
         fs::remove_dir_all(&test_repo).ok();
+    }
+
+    #[test]
+    fn warmup_executes() {
+        let embedder = Arc::new(DeterministicEmbedder::default());
+        let indexer = Indexer::new_concrete(embedder);
+        assert!(indexer.warmup().is_ok());
     }
 
     #[test]

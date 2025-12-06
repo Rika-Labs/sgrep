@@ -381,7 +381,9 @@ mod tests {
     fn cli_parses_index_offload_and_remote_flags() {
         let cli = Cli::parse_from(["sgrep", "index", "--offload", "--remote"]);
         match cli.command {
-            Commands::Index { offload, remote, .. } => {
+            Commands::Index {
+                offload, remote, ..
+            } => {
                 assert!(offload, "Expected --offload flag to be true");
                 assert!(remote, "Expected --remote flag to be true");
             }

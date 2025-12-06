@@ -21,6 +21,7 @@ pub struct HnswHeader {
 }
 
 impl HnswHeader {
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_bytes(&self) -> [u8; HNSW_HEADER_SIZE] {
         let mut bytes = [0u8; HNSW_HEADER_SIZE];
         bytes[0..4].copy_from_slice(&self.format_version.to_le_bytes());

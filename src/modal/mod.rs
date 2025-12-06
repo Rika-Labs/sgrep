@@ -7,11 +7,10 @@
 
 mod deployer;
 mod embedder;
-mod reranker;
+pub mod reranker;
 
 pub use deployer::ModalDeployer;
 pub use embedder::ModalEmbedder;
-pub use reranker::ModalReranker;
 
 /// The bundled Modal Python service code
 pub const MODAL_SERVICE_PY: &str = include_str!("../../modal/service.py");

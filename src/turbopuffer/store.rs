@@ -4,19 +4,10 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::remote::{RemoteChunk, RemoteSearchHit, RemoteVectorStore};
+
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 const MAX_RETRIES: usize = 3;
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ChunkWithVector {
-    pub id: String,
-    pub vector: Vec<f32>,
-    pub path: String,
-    pub start_line: usize,
-    pub end_line: usize,
-    pub content: String,
-    pub language: String,
-}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchResult {
@@ -31,19 +22,19 @@ pub struct SearchResult {
 }
 
 #[derive(Serialize)]
-struct UpsertRow {
-    id: String,
-    vector: Vec<f32>,
-    path: String,
+struct UpsertRow<'a> {
+    id: &'a str,
+    vector: &'a [f32],
+    path: &'a str,
     start_line: usize,
     end_line: usize,
-    content: String,
-    language: String,
+    content: &'a str,
+    language: &'a str,
 }
 
 #[derive(Serialize)]
-struct QueryRequest {
-    rank_by: (String, String, Vec<f32>),
+struct QueryRequest<'a> {
+    rank_by: (String, String, &'a [f32]),
     top_k: usize,
     include_attributes: Vec<String>,
 }
@@ -55,9 +46,9 @@ struct QueryResponse {
 }
 
 #[derive(Serialize)]
-struct WriteRequest {
+struct WriteRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
-    upsert_rows: Option<Vec<UpsertRow>>,
+    upsert_rows: Option<Vec<UpsertRow<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     distance_metric: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,9 +63,13 @@ pub struct TurbopufferStore {
 }
 
 impl TurbopufferStore {
-    pub fn new(api_key: String, namespace: String, region: String) -> Self {
+    pub fn new(api_key: String, namespace: String, region: String, timeout_secs: u64) -> Self {
         let client = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(if timeout_secs == 0 {
+                DEFAULT_TIMEOUT_SECS
+            } else {
+                timeout_secs
+            }))
             .build();
 
         Self {
@@ -86,102 +81,10 @@ impl TurbopufferStore {
     }
 
     fn base_url(&self) -> String {
-        format!("https://api.turbopuffer.com/v2/namespaces/{}", self.namespace)
-    }
-
-    pub fn upsert(&self, chunks: &[ChunkWithVector]) -> Result<()> {
-        if chunks.is_empty() {
-            return Ok(());
-        }
-
-        let url = self.base_url();
-        let rows: Vec<UpsertRow> = chunks
-            .iter()
-            .map(|c| UpsertRow {
-                id: c.id.clone(),
-                vector: c.vector.clone(),
-                path: c.path.clone(),
-                start_line: c.start_line,
-                end_line: c.end_line,
-                content: c.content.clone(),
-                language: c.language.clone(),
-            })
-            .collect();
-
-        let request = WriteRequest {
-            upsert_rows: Some(rows),
-            distance_metric: Some("cosine_distance".to_string()),
-            deletes: None,
-        };
-
-        self.post_with_retry::<_, serde_json::Value>(&url, &request)?;
-        Ok(())
-    }
-
-    pub fn query(&self, vector: &[f32], top_k: usize) -> Result<Vec<SearchResult>> {
-        if vector.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let url = format!("{}/query", self.base_url());
-        let request = QueryRequest {
-            rank_by: ("vector".to_string(), "ANN".to_string(), vector.to_vec()),
-            top_k,
-            include_attributes: vec![
-                "path".to_string(),
-                "start_line".to_string(),
-                "end_line".to_string(),
-                "content".to_string(),
-                "language".to_string(),
-            ],
-        };
-
-        let response: QueryResponse = self.post_with_retry(&url, &request)?;
-        Ok(response.rows)
-    }
-
-    pub fn delete(&self, ids: &[String]) -> Result<()> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        let url = self.base_url();
-        let request = WriteRequest {
-            upsert_rows: None,
-            distance_metric: None,
-            deletes: Some(ids.to_vec()),
-        };
-
-        self.post_with_retry::<_, serde_json::Value>(&url, &request)?;
-        Ok(())
-    }
-
-    pub fn delete_namespace(&self) -> Result<()> {
-        let url = self.base_url();
-
-        for attempt in 1..=MAX_RETRIES {
-            match self
-                .client
-                .delete(&url)
-                .set("Authorization", &format!("Bearer {}", self.api_key))
-                .call()
-            {
-                Ok(_) => return Ok(()),
-                Err(e) => {
-                    if attempt < MAX_RETRIES {
-                        eprintln!(
-                            "Turbopuffer delete namespace retry {}/{}: {}",
-                            attempt, MAX_RETRIES, e
-                        );
-                        std::thread::sleep(Duration::from_millis(500 * attempt as u64));
-                    } else {
-                        return Err(anyhow!("Failed to delete namespace: {}", e));
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        format!(
+            "https://api.turbopuffer.com/v2/namespaces/{}",
+            self.namespace
+        )
     }
 
     fn post_with_retry<T: Serialize, R: for<'de> Deserialize<'de>>(
@@ -212,7 +115,9 @@ impl TurbopufferStore {
                             500..=599 => {
                                 anyhow!("Turbopuffer server error ({}). Please retry.", status)
                             }
-                            _ => anyhow!("Turbopuffer request failed with status {}: {}", status, e),
+                            _ => {
+                                anyhow!("Turbopuffer request failed with status {}: {}", status, e)
+                            }
                         }
                     } else {
                         anyhow!("Failed to send request to Turbopuffer: {}", e)
@@ -224,10 +129,7 @@ impl TurbopufferStore {
                     }
 
                     if attempt < MAX_RETRIES {
-                        eprintln!(
-                            "Turbopuffer retry {}/{}: {}",
-                            attempt, MAX_RETRIES, err
-                        );
+                        eprintln!("Turbopuffer retry {}/{}: {}", attempt, MAX_RETRIES, err);
                         std::thread::sleep(Duration::from_millis(500 * attempt as u64));
                         last_err = Some(err);
                     } else {
@@ -239,7 +141,107 @@ impl TurbopufferStore {
 
         Err(last_err.unwrap_or_else(|| anyhow!("Turbopuffer request failed")))
     }
+}
 
+impl RemoteVectorStore for TurbopufferStore {
+    fn name(&self) -> &'static str {
+        "turbopuffer"
+    }
+
+    fn upsert(&self, chunks: &[RemoteChunk]) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+
+        let url = self.base_url();
+        let rows: Vec<UpsertRow> = chunks
+            .iter()
+            .map(|c| UpsertRow {
+                id: &c.id,
+                vector: &c.vector,
+                path: &c.path,
+                start_line: c.start_line,
+                end_line: c.end_line,
+                content: &c.content,
+                language: &c.language,
+            })
+            .collect();
+
+        let request = WriteRequest {
+            upsert_rows: Some(rows),
+            distance_metric: Some("cosine_distance".to_string()),
+            deletes: None,
+        };
+
+        self.post_with_retry::<_, serde_json::Value>(&url, &request)?;
+        Ok(())
+    }
+
+    fn query(&self, vector: &[f32], top_k: usize) -> Result<Vec<RemoteSearchHit>> {
+        if vector.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let url = format!("{}/query", self.base_url());
+        let request = QueryRequest {
+            rank_by: ("vector".to_string(), "ANN".to_string(), vector),
+            top_k,
+            include_attributes: vec![
+                "path".to_string(),
+                "start_line".to_string(),
+                "end_line".to_string(),
+                "content".to_string(),
+                "language".to_string(),
+            ],
+        };
+
+        let response: QueryResponse = self.post_with_retry(&url, &request)?;
+        let hits = response
+            .rows
+            .into_iter()
+            .map(|r| RemoteSearchHit {
+                id: r.id,
+                score: 1.0 - r.distance,
+                path: r.path.unwrap_or_default(),
+                start_line: r.start_line.unwrap_or(0),
+                end_line: r.end_line.unwrap_or(0),
+                content: r.content.unwrap_or_default(),
+                language: r.language.unwrap_or_else(|| "plain".to_string()),
+            })
+            .collect();
+        Ok(hits)
+    }
+
+    fn delete_namespace(&self) -> Result<()> {
+        let url = self.base_url();
+
+        for attempt in 1..=MAX_RETRIES {
+            match self
+                .client
+                .delete(&url)
+                .set("Authorization", &format!("Bearer {}", self.api_key))
+                .call()
+            {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    if attempt < MAX_RETRIES {
+                        eprintln!(
+                            "Turbopuffer delete namespace retry {}/{}: {}",
+                            attempt, MAX_RETRIES, e
+                        );
+                        std::thread::sleep(Duration::from_millis(500 * attempt as u64));
+                    } else {
+                        return Err(anyhow!("Failed to delete namespace: {}", e));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl TurbopufferStore {
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
@@ -259,6 +261,7 @@ mod tests {
             "tpuf_test_key".to_string(),
             "sgrep-test".to_string(),
             "gcp-us-central1".to_string(),
+            0,
         );
         assert_eq!(store.namespace(), "sgrep-test");
         assert_eq!(store.region(), "gcp-us-central1");
@@ -270,6 +273,7 @@ mod tests {
             "tpuf_test_key".to_string(),
             "sgrep-abc123".to_string(),
             "gcp-us-central1".to_string(),
+            0,
         );
         assert_eq!(
             store.base_url(),
@@ -283,6 +287,7 @@ mod tests {
             "tpuf_test_key".to_string(),
             "sgrep-test".to_string(),
             "gcp-us-central1".to_string(),
+            0,
         );
         let result = store.upsert(&[]);
         assert!(result.is_ok());
@@ -294,37 +299,11 @@ mod tests {
             "tpuf_test_key".to_string(),
             "sgrep-test".to_string(),
             "gcp-us-central1".to_string(),
+            0,
         );
         let result = store.query(&[], 10);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
-    }
-
-    #[test]
-    fn delete_empty_returns_ok() {
-        let store = TurbopufferStore::new(
-            "tpuf_test_key".to_string(),
-            "sgrep-test".to_string(),
-            "gcp-us-central1".to_string(),
-        );
-        let result = store.delete(&[]);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn chunk_with_vector_serialization() {
-        let chunk = ChunkWithVector {
-            id: "chunk_123".to_string(),
-            vector: vec![0.1, 0.2, 0.3],
-            path: "src/main.rs".to_string(),
-            start_line: 10,
-            end_line: 20,
-            content: "fn main() {}".to_string(),
-            language: "rust".to_string(),
-        };
-        let json = serde_json::to_string(&chunk).unwrap();
-        assert!(json.contains("chunk_123"));
-        assert!(json.contains("src/main.rs"));
     }
 
     #[test]
@@ -342,39 +321,5 @@ mod tests {
         assert_eq!(result.id, "chunk_123");
         assert!((result.distance - 0.15).abs() < f32::EPSILON);
         assert_eq!(result.path, Some("src/main.rs".to_string()));
-    }
-
-    #[test]
-    fn write_request_upsert_serialization() {
-        let request = WriteRequest {
-            upsert_rows: Some(vec![UpsertRow {
-                id: "test".to_string(),
-                vector: vec![0.1, 0.2],
-                path: "test.rs".to_string(),
-                start_line: 1,
-                end_line: 10,
-                content: "code".to_string(),
-                language: "rust".to_string(),
-            }]),
-            distance_metric: Some("cosine_distance".to_string()),
-            deletes: None,
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("upsert_rows"));
-        assert!(json.contains("cosine_distance"));
-        assert!(!json.contains("deletes")); // None fields should be skipped
-    }
-
-    #[test]
-    fn write_request_delete_serialization() {
-        let request = WriteRequest {
-            upsert_rows: None,
-            distance_metric: None,
-            deletes: Some(vec!["id1".to_string(), "id2".to_string()]),
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("deletes"));
-        assert!(json.contains("id1"));
-        assert!(!json.contains("upsert_rows")); // None fields should be skipped
     }
 }

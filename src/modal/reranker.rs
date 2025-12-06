@@ -90,10 +90,7 @@ impl ModalReranker {
                 Ok(results) => return Ok(results),
                 Err(e) => {
                     if attempt < MAX_RETRIES {
-                        eprintln!(
-                            "Modal rerank retry {}/{}: {}",
-                            attempt, MAX_RETRIES, e
-                        );
+                        eprintln!("Modal rerank retry {}/{}: {}", attempt, MAX_RETRIES, e);
                         std::thread::sleep(Duration::from_millis(500 * attempt as u64));
                         last_err = Some(e);
                     } else {
@@ -113,7 +110,9 @@ impl ModalReranker {
             .set("Content-Type", "application/json");
 
         // Add Modal proxy auth headers if credentials are available (wk-/ws- tokens)
-        if let (Some(proxy_id), Some(proxy_secret)) = (&self.proxy_token_id, &self.proxy_token_secret) {
+        if let (Some(proxy_id), Some(proxy_secret)) =
+            (&self.proxy_token_id, &self.proxy_token_secret)
+        {
             req = req
                 .set("Modal-Key", proxy_id)
                 .set("Modal-Secret", proxy_secret);
@@ -164,7 +163,10 @@ mod tests {
         );
         assert_eq!(reranker.endpoint, "https://rerank.modal.run");
         assert_eq!(reranker.proxy_token_id, Some("wk-proxy-id".to_string()));
-        assert_eq!(reranker.proxy_token_secret, Some("ws-proxy-secret".to_string()));
+        assert_eq!(
+            reranker.proxy_token_secret,
+            Some("ws-proxy-secret".to_string())
+        );
     }
 
     #[test]
@@ -209,7 +211,10 @@ mod tests {
         let docs = vec!["doc1".to_string()];
         let result = reranker.rerank("", &docs, 10);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Query cannot be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Query cannot be empty"));
     }
 
     #[test]
@@ -218,6 +223,9 @@ mod tests {
         let docs = vec!["doc1".to_string()];
         let result = reranker.rerank("   ", &docs, 10);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Query cannot be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Query cannot be empty"));
     }
 }
