@@ -96,15 +96,29 @@ Modal requires two types of tokens:
 
 First run auto-deploys the service; subsequent runs use cached endpoints.
 
-## Turbopuffer remote storage
+## Remote storage (flattened config)
 
-Store indexes in [Turbopuffer](https://turbopuffer.com) serverless vector database for remote access.
+Choose a provider by configuring its section; optionally set `remote_provider` to disambiguate if multiple are present. Enable with `--remote` or `SGREP_REMOTE=1`.
 
+**Pinecone (example):**
+```toml
+[pinecone]
+api_key = "your-key"                       # or set PINECONE_API_KEY
+endpoint = "https://YOUR-INDEX.svc.region.pinecone.io"
+namespace = "optional-namespace"           # defaults to repo hash
+```
+
+**Turbopuffer (example):**
 ```toml
 [turbopuffer]
-api_key = "tpuf_your_key"        # or set TURBOPUFFER_API_KEY
-region = "gcp-us-central1"       # default region
-namespace_prefix = "sgrep"       # namespace prefix for indexes
+api_key = "tpuf_your_key"                  # or set TURBOPUFFER_API_KEY
+region = "gcp-us-central1"
+namespace_prefix = "sgrep"
+```
+
+**Optional selector:**
+```toml
+remote_provider = "pinecone"  # or "turbopuffer"; inferred if only one is configured
 ```
 
 ## Environment variables

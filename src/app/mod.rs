@@ -738,23 +738,30 @@ fn build_remote_store(
     remote_flag: bool,
     path: &Path,
 ) -> Result<Option<Arc<dyn RemoteVectorStore>>> {
-    let config = Config::load().unwrap_or_default();
-    let provider_set = config.remote.provider.is_some();
-    if !remote_flag && !provider_set {
+    let mut config = Config::load().unwrap_or_default();
+    let has_inferred_provider = config.pinecone.api_key.is_some()
+        && config.pinecone.endpoint.is_some()
+        || config.turbopuffer.api_key.is_some();
+
+    if !remote_flag && config.remote_provider.is_none() && !has_inferred_provider {
         return Ok(None);
     }
 
     let store = store::IndexStore::new(path)?;
     let repo_hash = store.repo_hash().to_string();
-    let chosen_provider = match (remote_flag, config.remote.provider.clone()) {
-        (_, Some(p)) if p != RemoteProviderType::None => Some(p),
-        (true, None) => Some(RemoteProviderType::Turbopuffer),
-        _ => None,
-    };
 
-    let mut cfg = config.remote.clone();
-    cfg.provider = chosen_provider;
-    RemoteFactory::build_from_config(&cfg, &repo_hash)
+    if remote_flag && config.remote_provider == Some(RemoteProviderType::None) {
+        config.remote_provider = None;
+    }
+
+    let remote = RemoteFactory::build_from_config(&config, &repo_hash)?;
+    if remote_flag && remote.is_none() {
+        return Err(anyhow!(
+            "--remote requested but no provider configured. Configure [turbopuffer] or [pinecone], or set remote_provider."
+        ));
+    }
+
+    Ok(remote)
 }
 
 fn push_remote_index(path: &Path, remote: &Arc<dyn RemoteVectorStore>) -> Result<()> {

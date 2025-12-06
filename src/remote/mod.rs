@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
-use crate::config::{RemoteConfig, RemoteProviderType};
+use crate::config::{Config, RemoteProviderType};
 
 pub mod pinecone;
 pub mod turbopuffer;
@@ -42,12 +42,29 @@ pub struct RemoteFactory;
 
 impl RemoteFactory {
     pub fn build_from_config(
-        cfg: &RemoteConfig,
+        cfg: &Config,
         repo_hash: &str,
     ) -> Result<Option<Arc<dyn RemoteVectorStore>>> {
-        let provider = match cfg.provider.clone().unwrap_or(RemoteProviderType::None) {
-            RemoteProviderType::None => return Ok(None),
-            other => other,
+        let provider = cfg
+            .remote_provider
+            .clone()
+            .unwrap_or(RemoteProviderType::None);
+
+        let inferred = if provider == RemoteProviderType::None {
+            if cfg.pinecone.api_key.is_some() && cfg.pinecone.endpoint.is_some() {
+                Some(RemoteProviderType::Pinecone)
+            } else if cfg.turbopuffer.api_key.is_some() {
+                Some(RemoteProviderType::Turbopuffer)
+            } else {
+                None
+            }
+        } else {
+            Some(provider)
+        };
+
+        let provider = match inferred {
+            Some(p) => p,
+            None => return Ok(None),
         };
 
         match provider {
@@ -105,16 +122,16 @@ mod tests {
     use std::env;
 
     #[test]
-    fn none_provider_returns_none() {
-        let cfg = RemoteConfig::default();
+    fn none_provider_returns_none_when_not_inferred() {
+        let cfg = Config::default();
         let store = RemoteFactory::build_from_config(&cfg, "hash").unwrap();
         assert!(store.is_none());
     }
 
     #[test]
     fn turbopuffer_uses_config_api_key() {
-        let mut cfg = RemoteConfig::default();
-        cfg.provider = Some(RemoteProviderType::Turbopuffer);
+        let mut cfg = Config::default();
+        cfg.remote_provider = Some(RemoteProviderType::Turbopuffer);
         cfg.turbopuffer.api_key = Some("key".to_string());
         let store = RemoteFactory::build_from_config(&cfg, "hash").unwrap();
         assert!(store.is_some());
@@ -122,24 +139,31 @@ mod tests {
     }
 
     #[test]
-    fn turbopuffer_reads_env_api_key() {
-        let mut cfg = RemoteConfig::default();
-        cfg.provider = Some(RemoteProviderType::Turbopuffer);
-        env::set_var("TURBOPUFFER_API_KEY", "envkey");
+    fn turbopuffer_infers_from_config() {
+        let mut cfg = Config::default();
+        cfg.turbopuffer.api_key = Some("key".to_string());
         let store = RemoteFactory::build_from_config(&cfg, "hash").unwrap();
-        env::remove_var("TURBOPUFFER_API_KEY");
         assert!(store.is_some());
     }
 
     #[test]
     fn pinecone_builds_with_config() {
-        let mut cfg = RemoteConfig::default();
-        cfg.provider = Some(RemoteProviderType::Pinecone);
+        let mut cfg = Config::default();
+        cfg.remote_provider = Some(RemoteProviderType::Pinecone);
         cfg.pinecone.api_key = Some("pckey".to_string());
         cfg.pinecone.endpoint = Some("https://svc.test/pinecone".to_string());
         cfg.pinecone.namespace = Some("ns".to_string());
         let store = RemoteFactory::build_from_config(&cfg, "hash").unwrap();
         assert!(store.is_some());
         assert_eq!(store.unwrap().name(), "pinecone");
+    }
+
+    #[test]
+    fn pinecone_infers_with_api_key_and_endpoint() {
+        let mut cfg = Config::default();
+        cfg.pinecone.api_key = Some("pckey".to_string());
+        cfg.pinecone.endpoint = Some("https://svc.test/pinecone".to_string());
+        let store = RemoteFactory::build_from_config(&cfg, "hash").unwrap();
+        assert!(store.is_some());
     }
 }
