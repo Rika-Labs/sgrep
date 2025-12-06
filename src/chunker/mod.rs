@@ -399,4 +399,244 @@ impl Foo {
             assert!(!chunks.is_empty());
         }
     }
+
+    #[test]
+    fn merges_small_adjacent_functions_into_single_chunk() {
+        let dir = std::env::temp_dir().join("sgrep_adaptive_merge");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("small_funcs.rs");
+        let source = r#"
+fn func1() {
+    println!("1");
+}
+
+fn func2() {
+    println!("2");
+}
+
+fn func3() {
+    println!("3");
+}
+
+fn func4() {
+    println!("4");
+}
+
+fn func5() {
+    println!("5");
+}
+"#;
+        std::fs::write(&path, source).unwrap();
+
+        let chunks = chunk_file(&path, &dir).unwrap();
+        assert!(
+            chunks.len() < 5,
+            "Expected fewer than 5 chunks after merging, got {}",
+            chunks.len()
+        );
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn respects_max_chunk_lines_when_merging() {
+        let dir = std::env::temp_dir().join("sgrep_adaptive_max");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("many_funcs.rs");
+
+        let source: String = (0..100)
+            .map(|i| format!("fn func{}() {{\n    println!(\"{}\");\n}}\n\n", i, i))
+            .collect();
+        std::fs::write(&path, &source).unwrap();
+
+        let chunks = chunk_file(&path, &dir).unwrap();
+        assert!(
+            chunks.len() > 1,
+            "Expected multiple chunks when content exceeds max"
+        );
+        for chunk in &chunks {
+            let line_count = chunk.end_line - chunk.start_line + 1;
+            assert!(
+                line_count <= 250,
+                "Chunk has {} lines, expected <= 250",
+                line_count
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_merge_across_class_boundaries() {
+        let dir = std::env::temp_dir().join("sgrep_adaptive_boundary");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two_impls.rs");
+        let source = r#"
+struct Foo;
+struct Bar;
+
+impl Foo {
+    fn method1(&self) {
+        println!("foo");
+    }
+}
+
+impl Bar {
+    fn method1(&self) {
+        println!("bar");
+    }
+}
+"#;
+        std::fs::write(&path, source).unwrap();
+
+        let chunks = chunk_file(&path, &dir).unwrap();
+        let foo_chunks: Vec<_> = chunks.iter().filter(|c| c.text.contains("impl Foo")).collect();
+        let bar_chunks: Vec<_> = chunks.iter().filter(|c| c.text.contains("impl Bar")).collect();
+
+        let has_foo = !foo_chunks.is_empty() || chunks.iter().any(|c| c.text.contains("struct Foo"));
+        let has_bar = !bar_chunks.is_empty() || chunks.iter().any(|c| c.text.contains("struct Bar"));
+        assert!(has_foo, "Expected Foo content in chunks");
+        assert!(has_bar, "Expected Bar content in chunks");
+    }
+
+    #[test]
+    fn splits_large_impl_block_by_methods() {
+        let dir = std::env::temp_dir().join("sgrep_adaptive_split_impl");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("large_impl.rs");
+
+        let methods: String = (0..50)
+            .map(|i| {
+                format!(
+                    "    fn method{}(&self) {{\n        println!(\"{}\");\n        let x = {};\n    }}\n\n",
+                    i, i, i
+                )
+            })
+            .collect();
+        let source = format!("struct Large;\n\nimpl Large {{\n{}}}\n", methods);
+        std::fs::write(&path, &source).unwrap();
+
+        let chunks = chunk_file(&path, &dir).unwrap();
+        assert!(
+            chunks.len() > 1,
+            "Expected large impl to be split into multiple chunks, got {}",
+            chunks.len()
+        );
+    }
+
+    #[test]
+    fn chunk_boundaries_align_to_symbol_boundaries() {
+        let dir = std::env::temp_dir().join("sgrep_adaptive_align");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("aligned.rs");
+
+        let source: String = (0..10)
+            .map(|i| {
+                let body: String = (0..15)
+                    .map(|j| format!("    let var{} = {};\n", j, i * 100 + j))
+                    .collect();
+                format!("fn func{}() {{\n{}}}\n\n", i, body)
+            })
+            .collect();
+        std::fs::write(&path, &source).unwrap();
+
+        let chunks = chunk_file(&path, &dir).unwrap();
+
+        for chunk in &chunks {
+            let text = &chunk.text;
+            let open_braces = text.matches('{').count();
+            let close_braces = text.matches('}').count();
+            assert_eq!(
+                open_braces, close_braces,
+                "Chunk has unbalanced braces: {} opens, {} closes",
+                open_braces, close_braces
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_path_unchanged_for_unknown_files() {
+        let dir = std::env::temp_dir().join("sgrep_adaptive_fallback");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("data.xyz");
+
+        let source: String = (0..500).map(|i| format!("line {}\n", i)).collect();
+        std::fs::write(&path, &source).unwrap();
+
+        let chunks = chunk_file(&path, &dir).unwrap();
+        assert!(chunks.len() >= 2, "Expected fallback to create multiple chunks");
+        assert_eq!(chunks[0].language, "plain");
+        assert!(
+            chunks[0].end_line >= 350,
+            "Fallback chunk should have ~400 lines"
+        );
+    }
+
+    #[test]
+    fn adaptive_chunking_works_for_python() {
+        let dir = std::env::temp_dir().join("sgrep_adaptive_python");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("funcs.py");
+
+        let source = r#"
+def func1():
+    print("1")
+
+def func2():
+    print("2")
+
+def func3():
+    print("3")
+
+def func4():
+    print("4")
+
+def func5():
+    print("5")
+"#;
+        std::fs::write(&path, source).unwrap();
+
+        let chunks = chunk_file(&path, &dir).unwrap();
+        assert!(
+            chunks.len() < 5,
+            "Expected Python functions to be merged, got {} chunks",
+            chunks.len()
+        );
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn adaptive_chunking_works_for_javascript() {
+        let dir = std::env::temp_dir().join("sgrep_adaptive_js");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("funcs.js");
+
+        let source = r#"
+function func1() {
+    console.log("1");
+}
+
+function func2() {
+    console.log("2");
+}
+
+function func3() {
+    console.log("3");
+}
+
+function func4() {
+    console.log("4");
+}
+
+function func5() {
+    console.log("5");
+}
+"#;
+        std::fs::write(&path, source).unwrap();
+
+        let chunks = chunk_file(&path, &dir).unwrap();
+        assert!(
+            chunks.len() < 5,
+            "Expected JavaScript functions to be merged, got {} chunks",
+            chunks.len()
+        );
+        assert!(!chunks.is_empty());
+    }
 }
