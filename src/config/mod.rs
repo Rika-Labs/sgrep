@@ -22,10 +22,14 @@ pub struct EmbeddingConfig {
 /// Configuration for Modal.dev offload
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModalConfig {
-    /// Modal token ID for CLI authentication (from modal.com dashboard)
+    /// Modal token ID for CLI authentication (ak-... format, from modal.com/settings)
     pub token_id: Option<String>,
-    /// Modal token secret for CLI authentication (from modal.com dashboard)
+    /// Modal token secret for CLI authentication (as-... format, from modal.com/settings)
     pub token_secret: Option<String>,
+    /// Modal proxy token ID for endpoint auth (wk-... format, from modal.com/settings)
+    pub proxy_token_id: Option<String>,
+    /// Modal proxy token secret for endpoint auth (ws-... format, from modal.com/settings)
+    pub proxy_token_secret: Option<String>,
     /// GPU tier: "budget" (T4), "balanced" (A10G), "high" (L40S)
     #[serde(default = "default_gpu_tier")]
     pub gpu_tier: String,
@@ -48,7 +52,7 @@ fn default_dimension() -> usize {
 }
 
 fn default_batch_size() -> usize {
-    32
+    128 // Optimized for GPU workloads (L40S can handle 128-256 easily)
 }
 
 /// Configuration for Turbopuffer remote storage
@@ -240,6 +244,8 @@ provider = "modal"
 [modal]
 token_id = "ak-test"
 token_secret = "as-test"
+proxy_token_id = "wk-proxy-test"
+proxy_token_secret = "ws-proxy-test"
 gpu_tier = "balanced"
 dimension = 1024
 batch_size = 64
@@ -249,6 +255,8 @@ endpoint = "https://example.modal.run"
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
         assert_eq!(config.modal.token_id, Some("ak-test".to_string()));
         assert_eq!(config.modal.token_secret, Some("as-test".to_string()));
+        assert_eq!(config.modal.proxy_token_id, Some("wk-proxy-test".to_string()));
+        assert_eq!(config.modal.proxy_token_secret, Some("ws-proxy-test".to_string()));
         assert_eq!(config.modal.gpu_tier, "balanced");
         assert_eq!(config.modal.dimension, 1024);
         assert_eq!(config.modal.batch_size, 64);
@@ -267,7 +275,7 @@ token_id = "ak-test"
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.modal.gpu_tier, "high");
         assert_eq!(config.modal.dimension, 4096);
-        assert_eq!(config.modal.batch_size, 32);
+        assert_eq!(config.modal.batch_size, 128);
         assert_eq!(config.modal.endpoint, None);
     }
 
@@ -314,6 +322,8 @@ provider = "modal"
 [modal]
 token_id = "ak-test"
 token_secret = "as-test"
+proxy_token_id = "wk-proxy"
+proxy_token_secret = "ws-proxy"
 gpu_tier = "high"
 dimension = 4096
 
@@ -324,6 +334,7 @@ region = "gcp-us-central1"
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
         assert_eq!(config.modal.token_id, Some("ak-test".to_string()));
+        assert_eq!(config.modal.proxy_token_id, Some("wk-proxy".to_string()));
         assert_eq!(config.turbopuffer.api_key, Some("tpuf-key".to_string()));
     }
 }

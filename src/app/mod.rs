@@ -279,24 +279,28 @@ fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
     );
 
     let endpoint = if let Some(endpoint) = config.modal.endpoint.clone() {
+        eprintln!("[info] Using cached endpoint: {}", endpoint);
         endpoint
     } else {
-        eprintln!("[info] Auto-deploying Modal service...");
         let deployer = ModalDeployer::new(
             gpu_tier,
             config.modal.token_id.clone(),
             config.modal.token_secret.clone(),
         );
-        let (embed_endpoint, _rerank_endpoint) = deployer.ensure_deployed()?;
-        eprintln!("[info] Modal service deployed: {}", embed_endpoint);
+        let (embed_endpoint, _rerank_endpoint, used_cache) = deployer.ensure_deployed()?;
+        if used_cache {
+            eprintln!("[info] Using cached endpoint: {}", embed_endpoint);
+        } else {
+            eprintln!("[info] Modal service deployed: {}", embed_endpoint);
+        }
         embed_endpoint
     };
 
     let embedder = ModalEmbedder::new(
         endpoint,
         dimension,
-        config.modal.token_id.clone(),
-        config.modal.token_secret.clone(),
+        config.modal.proxy_token_id.clone(),
+        config.modal.proxy_token_secret.clone(),
     )
     .with_batch_size(batch_size);
 
@@ -368,8 +372,8 @@ fn build_modal_reranker(
 
     Some(Arc::new(ModalReranker::new(
         rerank_endpoint,
-        config.modal.token_id.clone(),
-        config.modal.token_secret.clone(),
+        config.modal.proxy_token_id.clone(),
+        config.modal.proxy_token_secret.clone(),
     )))
 }
 

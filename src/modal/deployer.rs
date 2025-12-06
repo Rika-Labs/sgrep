@@ -201,27 +201,28 @@ impl ModalDeployer {
         })
     }
 
-    pub fn ensure_deployed(&self) -> Result<(String, String)> {
+    /// Returns (embed_url, rerank_url, used_cache)
+    pub fn ensure_deployed(&self) -> Result<(String, String, bool)> {
         if let Some(cache) = self.load_cache() {
             if cache.gpu_tier == self.gpu_tier {
                 if self.check_health(&cache.health_url).unwrap_or(false) {
-                    return Ok((cache.embed_url, cache.rerank_url));
+                    return Ok((cache.embed_url, cache.rerank_url, true));
                 }
             }
         }
 
         let cache = self.deploy()?;
         self.save_cache(&cache)?;
-        Ok((cache.embed_url, cache.rerank_url))
+        Ok((cache.embed_url, cache.rerank_url, false))
     }
 
     pub fn get_embed_endpoint(&self) -> Result<String> {
-        let (embed_url, _) = self.ensure_deployed()?;
+        let (embed_url, _, _) = self.ensure_deployed()?;
         Ok(embed_url)
     }
 
     pub fn get_rerank_endpoint(&self) -> Result<String> {
-        let (_, rerank_url) = self.ensure_deployed()?;
+        let (_, rerank_url, _) = self.ensure_deployed()?;
         Ok(rerank_url)
     }
 }

@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::embedding::BatchEmbedder;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
-const DEFAULT_BATCH_SIZE: usize = 32;
+const DEFAULT_BATCH_SIZE: usize = 128; // Optimized for GPU (L40S can handle 128-256)
 const MAX_RETRIES: usize = 3;
 
 #[derive(Serialize)]
@@ -28,8 +28,8 @@ struct EmbedResponse {
 pub struct ModalEmbedder {
     client: ureq::Agent,
     endpoint: String,
-    token_id: Option<String>,
-    token_secret: Option<String>,
+    proxy_token_id: Option<String>,
+    proxy_token_secret: Option<String>,
     dimension: usize,
     batch_size: usize,
 }
@@ -38,8 +38,8 @@ impl ModalEmbedder {
     pub fn new(
         endpoint: String,
         dimension: usize,
-        token_id: Option<String>,
-        token_secret: Option<String>,
+        proxy_token_id: Option<String>,
+        proxy_token_secret: Option<String>,
     ) -> Self {
         let client = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
@@ -48,8 +48,8 @@ impl ModalEmbedder {
         Self {
             client,
             endpoint,
-            token_id,
-            token_secret,
+            proxy_token_id,
+            proxy_token_secret,
             dimension,
             batch_size: DEFAULT_BATCH_SIZE,
         }
@@ -71,17 +71,17 @@ impl ModalEmbedder {
             .post(&self.endpoint)
             .set("Content-Type", "application/json");
 
-        // Add Modal proxy auth headers if credentials are available
-        if let (Some(token_id), Some(token_secret)) = (&self.token_id, &self.token_secret) {
+        // Add Modal proxy auth headers if credentials are available (wk-/ws- tokens)
+        if let (Some(proxy_id), Some(proxy_secret)) = (&self.proxy_token_id, &self.proxy_token_secret) {
             req = req
-                .set("Modal-Key", token_id)
-                .set("Modal-Secret", token_secret);
+                .set("Modal-Key", proxy_id)
+                .set("Modal-Secret", proxy_secret);
         }
 
         let response = req.send_json(&request).map_err(|e| {
             if let ureq::Error::Status(status, _) = &e {
                 match *status {
-                    401 => anyhow!("Modal authentication failed. Check your token_id and token_secret."),
+                    401 => anyhow!("Modal authentication failed. Check your proxy_token_id and proxy_token_secret."),
                     429 => anyhow!("Rate limited by Modal. Please wait and retry."),
                     500..=599 => anyhow!("Modal server error ({}). Please retry.", status),
                     _ => anyhow!("Modal request failed with status {}: {}", status, e),
@@ -154,13 +154,13 @@ mod tests {
         let embedder = ModalEmbedder::new(
             "https://embed.modal.run".to_string(),
             4096,
-            Some("token-id".to_string()),
-            Some("token-secret".to_string()),
+            Some("wk-proxy-id".to_string()),
+            Some("ws-proxy-secret".to_string()),
         );
         assert_eq!(embedder.endpoint, "https://embed.modal.run");
         assert_eq!(embedder.dimension, 4096);
-        assert_eq!(embedder.token_id, Some("token-id".to_string()));
-        assert_eq!(embedder.token_secret, Some("token-secret".to_string()));
+        assert_eq!(embedder.proxy_token_id, Some("wk-proxy-id".to_string()));
+        assert_eq!(embedder.proxy_token_secret, Some("ws-proxy-secret".to_string()));
         assert_eq!(embedder.batch_size, DEFAULT_BATCH_SIZE);
     }
 

@@ -55,8 +55,14 @@ Offload embeddings and reranking to [Modal.dev](https://modal.com) GPUs for fast
 
 ```toml
 [modal]
-token_id = "ak-..."              # Modal token ID from https://modal.com/settings
-token_secret = "as-..."          # Modal token secret from https://modal.com/settings
+# CLI authentication (for deployment)
+token_id = "ak-..."              # Modal API token ID from https://modal.com/settings
+token_secret = "as-..."          # Modal API token secret from https://modal.com/settings
+
+# Endpoint authentication (for HTTP requests)
+proxy_token_id = "wk-..."        # Modal proxy auth token ID from https://modal.com/settings
+proxy_token_secret = "ws-..."    # Modal proxy auth token secret from https://modal.com/settings
+
 gpu_tier = "high"                # budget (T4), balanced (A10G), high (L40S)
 dimension = 4096                 # embedding dimension
 batch_size = 32                  # texts per request
@@ -65,9 +71,15 @@ endpoint = "https://..."         # auto-populated after first deploy
 
 **Authentication:**
 
-Get your `token_id` and `token_secret` from [Modal Settings](https://modal.com/settings). These authenticate the CLI for deployment without requiring browser login.
+Modal requires two types of tokens:
 
-Alternatively, run `modal token new` to authenticate via browser (tokens will be stored in `~/.modal.toml`).
+1. **API tokens** (`ak-`/`as-` prefix) - Used for Modal CLI deployment
+   - Get from [Modal Settings](https://modal.com/settings) under "API Tokens"
+   - Or run `modal token new` to authenticate via browser
+
+2. **Proxy auth tokens** (`wk-`/`ws-` prefix) - Used for endpoint authentication
+   - Get from [Modal Settings](https://modal.com/settings) under "Proxy Auth Tokens"
+   - These secure your endpoints so only you can call them
 
 **GPU tiers:**
 

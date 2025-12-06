@@ -85,7 +85,14 @@ class Embedder:
         from vllm import LLM
 
         print(f"Loading embedding model: {EMBED_MODEL}")
-        self.model = LLM(model=EMBED_MODEL, task="embed", trust_remote_code=True)
+        self.model = LLM(
+            model=EMBED_MODEL,
+            task="embed",
+            trust_remote_code=True,
+            gpu_memory_utilization=0.90,  # Use more GPU memory for larger batches
+            max_model_len=2048,           # Reasonable context for code chunks
+            enforce_eager=True,           # Faster for embeddings (no CUDA graphs overhead)
+        )
         print("Embedding model loaded successfully")
 
     @modal.method()

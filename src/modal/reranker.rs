@@ -32,15 +32,15 @@ struct RerankResponse {
 pub struct ModalReranker {
     client: ureq::Agent,
     endpoint: String,
-    token_id: Option<String>,
-    token_secret: Option<String>,
+    proxy_token_id: Option<String>,
+    proxy_token_secret: Option<String>,
 }
 
 impl ModalReranker {
     pub fn new(
         endpoint: String,
-        token_id: Option<String>,
-        token_secret: Option<String>,
+        proxy_token_id: Option<String>,
+        proxy_token_secret: Option<String>,
     ) -> Self {
         let client = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
@@ -49,8 +49,8 @@ impl ModalReranker {
         Self {
             client,
             endpoint,
-            token_id,
-            token_secret,
+            proxy_token_id,
+            proxy_token_secret,
         }
     }
 
@@ -99,17 +99,17 @@ impl ModalReranker {
             .post(&self.endpoint)
             .set("Content-Type", "application/json");
 
-        // Add Modal proxy auth headers if credentials are available
-        if let (Some(token_id), Some(token_secret)) = (&self.token_id, &self.token_secret) {
+        // Add Modal proxy auth headers if credentials are available (wk-/ws- tokens)
+        if let (Some(proxy_id), Some(proxy_secret)) = (&self.proxy_token_id, &self.proxy_token_secret) {
             req = req
-                .set("Modal-Key", token_id)
-                .set("Modal-Secret", token_secret);
+                .set("Modal-Key", proxy_id)
+                .set("Modal-Secret", proxy_secret);
         }
 
         let response = req.send_json(request).map_err(|e| {
             if let ureq::Error::Status(status, _) = &e {
                 match *status {
-                    401 => anyhow!("Modal authentication failed. Check your token_id and token_secret."),
+                    401 => anyhow!("Modal authentication failed. Check your proxy_token_id and proxy_token_secret."),
                     429 => anyhow!("Rate limited by Modal. Please wait and retry."),
                     500..=599 => anyhow!("Modal server error ({}). Please retry.", status),
                     _ => anyhow!("Modal request failed with status {}: {}", status, e),
@@ -146,12 +146,12 @@ mod tests {
     fn new_reranker_has_correct_fields() {
         let reranker = ModalReranker::new(
             "https://rerank.modal.run".to_string(),
-            Some("token-id".to_string()),
-            Some("token-secret".to_string()),
+            Some("wk-proxy-id".to_string()),
+            Some("ws-proxy-secret".to_string()),
         );
         assert_eq!(reranker.endpoint, "https://rerank.modal.run");
-        assert_eq!(reranker.token_id, Some("token-id".to_string()));
-        assert_eq!(reranker.token_secret, Some("token-secret".to_string()));
+        assert_eq!(reranker.proxy_token_id, Some("wk-proxy-id".to_string()));
+        assert_eq!(reranker.proxy_token_secret, Some("ws-proxy-secret".to_string()));
     }
 
     #[test]
