@@ -20,6 +20,7 @@ use std::time::Instant;
 #[cfg(not(test))]
 use tracing::{info, warn};
 
+#[allow(dead_code)]
 pub struct WatchEventProcessor {
     pub dirty_paths: HashSet<PathBuf>,
     pub deleted_paths: HashSet<PathBuf>,
@@ -30,6 +31,7 @@ pub struct WatchEventProcessor {
     pub index_trigger_count: usize,
 }
 
+#[allow(dead_code)]
 impl WatchEventProcessor {
     pub fn new(debounce: Duration) -> Self {
         Self {

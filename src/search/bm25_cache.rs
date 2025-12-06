@@ -58,14 +58,17 @@ impl Bm25FCache {
         self.entry = None;
     }
 
+    #[allow(dead_code)]
     pub fn hit_count(&self) -> usize {
         self.hit_count
     }
 
+    #[allow(dead_code)]
     pub fn miss_count(&self) -> usize {
         self.miss_count
     }
 
+    #[allow(dead_code)]
     pub fn entry_count(&self) -> usize {
         if self.entry.is_some() {
             1

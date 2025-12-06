@@ -9,3 +9,4 @@ target/
 /.vscode/
 /indexes/
 /models/
+__pycache__/

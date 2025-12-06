@@ -6,11 +6,12 @@
 
 </div>
 
-Fast, private, local semantic code search for developers and coding agents. 
+Fast, private, local semantic code search for developers and coding agents.
 
-- Local-first: ONNX embeddings run on your machine; `--offline` blocks network calls.
-- Hybrid ranking: tree-sitter chunks plus dense vectors, BM25F keyword scoring, and optional code-graph context.
-- Agent-ready: JSON output and a background watcher keep results fresh.
+- **Local-first**: ONNX embeddings run on your machine; `--offline` blocks network calls
+- **Hybrid ranking**: tree-sitter chunks, dense vectors, BM25F keyword scoring, cross-encoder reranking
+- **Cloud-optional**: Offload to [Modal.dev](https://modal.com) GPUs or store indexes in [Turbopuffer](https://turbopuffer.com)
+- **Agent-ready**: JSON output and background watcher keep results fresh
 
 ## Three commands
 
@@ -36,13 +37,33 @@ Prefer source builds? Run `cargo install --path .` from the repo root.
 - macOS and Linux (arm64 and x86_64) via the install script.
 - Windows: use WSL or a Linux container.
 
+## Integrations
+
+| Integration | Description |
+|-------------|-------------|
+| [Claude Code Plugin](plugins/sgrep/README.md) | Automatic index management and search skill for Claude Code |
+| [OpenCode Plugin](plugins/opencode/README.md) | MCP tool for OpenCode |
+| [Modal.dev](https://modal.com) | GPU-accelerated embeddings with Qwen3-Embedding-8B (8K context, 4096 dims) |
+| [Turbopuffer](https://turbopuffer.com) | Serverless vector storage for remote indexes |
+
+### Cloud offload (optional)
+
+Run embeddings on Modal.dev GPUs instead of locally:
+
+```bash
+export SGREP_MODAL_TOKEN="your-token"
+sgrep search --offload "where do we handle auth?"
+```
+
+Auto-deploys a Modal service with Qwen3-Embedding-8B and Qwen3-Reranker-8B. See [docs/configuration.md](docs/configuration.md) for GPU tier options.
+
 ## Learn more
 
-- Quickstart: `docs/quickstart.md`
-- Flags and config: `docs/configuration.md`
-- Offline and airgapped installs: `docs/offline.md`
-- Agent integrations: `docs/agents.md`
+- [Quickstart](docs/quickstart.md)
+- [Flags and config](docs/configuration.md)
+- [Offline and airgapped installs](docs/offline.md)
+- [Agent integrations](docs/agents.md)
 
 ## License
 
-Apache License, Version 2.0. See `LICENSE`.
+Apache License, Version 2.0. See [LICENSE](LICENSE).
