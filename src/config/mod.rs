@@ -50,6 +50,7 @@ fn default_batch_size() -> usize {
 
 /// Configuration for Turbopuffer remote storage
 #[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
 pub struct TurbopufferConfig {
     /// Turbopuffer API key
     pub api_key: Option<String>,

@@ -33,11 +33,13 @@ pub struct SearchParams<'a> {
     pub offload: bool,
 }
 
+#[allow(dead_code)]
 struct ProgressLine {
     term: Term,
     enabled: bool,
 }
 
+#[allow(dead_code)]
 impl ProgressLine {
     fn stderr() -> Self {
         let term = Term::stderr();

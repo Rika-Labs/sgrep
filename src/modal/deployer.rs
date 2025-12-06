@@ -231,11 +231,13 @@ impl ModalDeployer {
         Ok((cache.embed_url, cache.rerank_url, false))
     }
 
+    #[allow(dead_code)]
     pub fn get_embed_endpoint(&self) -> Result<String> {
         let (embed_url, _, _) = self.ensure_deployed()?;
         Ok(embed_url)
     }
 
+    #[allow(dead_code)]
     pub fn get_rerank_endpoint(&self) -> Result<String> {
         let (_, rerank_url, _) = self.ensure_deployed()?;
         Ok(rerank_url)

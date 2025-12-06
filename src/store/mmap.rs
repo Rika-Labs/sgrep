@@ -83,6 +83,7 @@ impl MmapIndex {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn has_hnsw(&self) -> bool {
         self.hnsw.is_some()
     }
