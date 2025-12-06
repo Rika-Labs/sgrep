@@ -1,10 +1,12 @@
 mod binary;
 mod bm25_cache;
 pub mod config;
+mod dedup;
 mod hnsw;
 mod results;
 mod scoring;
 
+pub use dedup::{suppress_near_duplicates, DedupOptions, DEFAULT_SEMANTIC_DEDUP_THRESHOLD};
 pub use results::{DirectorySearchResult, FileSearchResult, SearchResult};
 pub use scoring::cosine_similarity;
 
@@ -67,6 +69,7 @@ pub struct SearchOptions {
     pub filters: Vec<String>,
     pub rerank: bool,
     pub oversample_factor: usize,
+    pub dedup: DedupOptions,
 }
 
 impl Default for SearchOptions {
@@ -78,6 +81,7 @@ impl Default for SearchOptions {
             filters: vec![],
             rerank: true,
             oversample_factor: RERANK_OVERSAMPLE_FACTOR,
+            dedup: DedupOptions::default(),
         }
     }
 }
@@ -298,6 +302,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, fetch_limit);
         let matches = self.maybe_rerank(query, matches, &options);
+        let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
     }
 
@@ -376,6 +381,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, fetch_limit);
         let matches = self.maybe_rerank(query, matches, &options);
+        let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
     }
 
@@ -470,6 +476,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, fetch_limit);
         let matches = self.maybe_rerank(query, matches, &options);
+        let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
     }
 
@@ -558,6 +565,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, fetch_limit);
         let matches = self.maybe_rerank(query, matches, &options);
+        let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
     }
 
@@ -655,6 +663,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, fetch_limit);
         let matches = self.maybe_rerank(query, matches, &options);
+        let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
     }
 
@@ -746,6 +755,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, fetch_limit);
         let matches = self.maybe_rerank(query, matches, &options);
+        let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
     }
 
@@ -880,6 +890,67 @@ impl SearchEngine {
             }
             Err(_) => results,
         }
+    }
+
+    fn apply_dedup(
+        &self,
+        mut results: Vec<SearchResult>,
+        index: &RepositoryIndex,
+        options: &SearchOptions,
+    ) -> Vec<SearchResult> {
+        if !options.dedup.enabled || results.len() <= 1 {
+            return results;
+        }
+
+        let chunk_id_to_idx: HashMap<uuid::Uuid, usize> = index
+            .chunks
+            .iter()
+            .enumerate()
+            .map(|(idx, chunk)| (chunk.id, idx))
+            .collect();
+
+        let vectors: Vec<Vec<f32>> = results
+            .iter()
+            .filter_map(|r| {
+                chunk_id_to_idx
+                    .get(&r.chunk.id)
+                    .and_then(|&idx| index.vectors.get(idx))
+                    .cloned()
+            })
+            .collect();
+
+        suppress_near_duplicates(&mut results, &vectors, &options.dedup);
+        results
+    }
+
+    fn apply_dedup_mmap(
+        &self,
+        mut results: Vec<SearchResult>,
+        index: &MmapIndex,
+        options: &SearchOptions,
+    ) -> Vec<SearchResult> {
+        if !options.dedup.enabled || results.len() <= 1 {
+            return results;
+        }
+
+        let chunk_id_to_idx: HashMap<uuid::Uuid, usize> = index
+            .chunks
+            .iter()
+            .enumerate()
+            .map(|(idx, chunk)| (chunk.id, idx))
+            .collect();
+
+        let vectors: Vec<Vec<f32>> = results
+            .iter()
+            .filter_map(|r| {
+                chunk_id_to_idx
+                    .get(&r.chunk.id)
+                    .map(|&idx| index.get_vector(idx).to_vec())
+            })
+            .collect();
+
+        suppress_near_duplicates(&mut results, &vectors, &options.dedup);
+        results
     }
 
     pub fn search_hybrid(
@@ -1206,6 +1277,7 @@ mod tests {
     }
 
     fn make_chunk(text: &str, language: &str, path: &str) -> CodeChunk {
+        let hash = format!("{}_{}", path, text.len());
         CodeChunk {
             id: Uuid::new_v4(),
             path: PathBuf::from(path),
@@ -1213,7 +1285,7 @@ mod tests {
             start_line: 1,
             end_line: 10,
             text: text.to_string(),
-            hash: "test_hash".to_string(),
+            hash,
             modified_at: Utc::now(),
         }
     }
@@ -1257,6 +1329,7 @@ mod tests {
                     filters: vec![],
                     rerank: false,
                     oversample_factor: 3,
+                    dedup: DedupOptions { enabled: false, ..Default::default() },
                 },
             )
             .unwrap();
@@ -1289,6 +1362,7 @@ mod tests {
                     filters: vec![],
                     rerank: false,
                     oversample_factor: 3,
+                    dedup: DedupOptions::default(),
                 },
             )
             .unwrap();
@@ -1322,6 +1396,7 @@ mod tests {
                     filters: vec!["lang=rust".to_string()],
                     rerank: false,
                     oversample_factor: 3,
+                    dedup: DedupOptions::default(),
                 },
             )
             .unwrap();
@@ -1401,6 +1476,7 @@ mod tests {
                     filters: vec![],
                     rerank: false,
                     oversample_factor: 3,
+                    dedup: DedupOptions { enabled: false, ..Default::default() },
                 },
             )
             .unwrap();
@@ -1438,6 +1514,7 @@ mod tests {
                     filters: vec![],
                     rerank: false,
                     oversample_factor: 3,
+                    dedup: DedupOptions { enabled: false, ..Default::default() },
                 },
             )
             .unwrap();
@@ -1478,6 +1555,7 @@ mod tests {
                     filters: vec![],
                     rerank: true,
                     oversample_factor: 3,
+                    dedup: DedupOptions { enabled: false, ..Default::default() },
                 },
             )
             .unwrap();
@@ -1514,6 +1592,7 @@ mod tests {
                     filters: vec![],
                     rerank: false,
                     oversample_factor: 3,
+                    dedup: DedupOptions { enabled: false, ..Default::default() },
                 },
             )
             .unwrap();
@@ -1546,6 +1625,7 @@ mod tests {
                     filters: vec![],
                     rerank: true,
                     oversample_factor: 3,
+                    dedup: DedupOptions { enabled: false, ..Default::default() },
                 },
             )
             .unwrap();
@@ -1684,6 +1764,7 @@ mod tests {
                     filters: vec!["lang=python".to_string()],
                     rerank: false,
                     oversample_factor: 3,
+                    dedup: DedupOptions::default(),
                 },
             )
             .unwrap();
@@ -1719,6 +1800,7 @@ mod tests {
                     filters: vec![],
                     rerank: false,
                     oversample_factor: 3,
+                    dedup: DedupOptions { enabled: false, ..Default::default() },
                 },
             )
             .unwrap();
@@ -1973,6 +2055,7 @@ mod tests {
                     filters: vec![],
                     rerank: false,
                     oversample_factor: 3,
+                    dedup: DedupOptions::default(),
                 },
             )
             .unwrap();
@@ -2321,6 +2404,331 @@ mod tests {
                 .search(&index2, "test", SearchOptions::default())
                 .unwrap();
             assert_eq!(engine.bm25_cache.borrow().miss_count(), 2);
+        }
+    }
+
+    mod near_duplicate_suppression_tests {
+        use super::*;
+
+        fn make_chunk_with_hash(text: &str, path: &str, hash: &str) -> CodeChunk {
+            CodeChunk {
+                id: Uuid::new_v4(),
+                path: PathBuf::from(path),
+                language: "rust".to_string(),
+                start_line: 1,
+                end_line: 10,
+                text: text.to_string(),
+                hash: hash.to_string(),
+                modified_at: Utc::now(),
+            }
+        }
+
+        #[allow(dead_code)]
+        fn make_result_with_score(chunk: CodeChunk, score: f32, vector: Vec<f32>) -> (SearchResult, Vec<f32>) {
+            (
+                SearchResult {
+                    chunk,
+                    score,
+                    semantic_score: score,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+                vector,
+            )
+        }
+
+        #[test]
+        fn suppress_identical_hash_chunks() {
+            let chunk1 = make_chunk_with_hash("fn foo() {}", "a.rs", "hash123");
+            let chunk2 = make_chunk_with_hash("fn foo() {}", "b.rs", "hash123");
+            let chunk3 = make_chunk_with_hash("fn bar() {}", "c.rs", "hash456");
+
+            let mut results = vec![
+                SearchResult {
+                    chunk: chunk1,
+                    score: 0.9,
+                    semantic_score: 0.9,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+                SearchResult {
+                    chunk: chunk2,
+                    score: 0.8,
+                    semantic_score: 0.8,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+                SearchResult {
+                    chunk: chunk3,
+                    score: 0.7,
+                    semantic_score: 0.7,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+            ];
+
+            suppress_near_duplicates(&mut results, &[], &DedupOptions::default());
+
+            assert_eq!(results.len(), 2);
+            assert!((results[0].score - 0.9).abs() < 1e-6);
+            assert_eq!(results[0].chunk.hash, "hash123");
+            assert_eq!(results[1].chunk.hash, "hash456");
+        }
+
+        #[test]
+        fn suppress_semantically_similar_chunks() {
+            let chunk1 = make_chunk_with_hash("fn authenticate() { check_password(); }", "auth.rs", "h1");
+            let chunk2 = make_chunk_with_hash("fn authenticate() { check_password(); verify(); }", "auth2.rs", "h2");
+            let chunk3 = make_chunk_with_hash("fn connect_to_database() {}", "db.rs", "h3");
+
+            let vectors = vec![
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![0.99, 0.14, 0.0, 0.0],
+                vec![0.0, 1.0, 0.0, 0.0],
+            ];
+
+            let mut results = vec![
+                SearchResult {
+                    chunk: chunk1,
+                    score: 0.9,
+                    semantic_score: 0.9,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+                SearchResult {
+                    chunk: chunk2,
+                    score: 0.85,
+                    semantic_score: 0.85,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+                SearchResult {
+                    chunk: chunk3,
+                    score: 0.7,
+                    semantic_score: 0.7,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+            ];
+
+            let options = DedupOptions {
+                semantic_threshold: 0.95,
+                ..Default::default()
+            };
+
+            suppress_near_duplicates(&mut results, &vectors, &options);
+
+            assert_eq!(results.len(), 2);
+            assert!(results[0].chunk.path.to_string_lossy().contains("auth.rs"));
+            assert!(results[1].chunk.path.to_string_lossy().contains("db.rs"));
+        }
+
+        #[test]
+        fn preserve_similar_but_distinct_chunks() {
+            let chunk1 = make_chunk_with_hash("fn process_user() {}", "a.rs", "h1");
+            let chunk2 = make_chunk_with_hash("fn process_order() {}", "b.rs", "h2");
+
+            let vectors = vec![
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![0.8, 0.6, 0.0, 0.0],
+            ];
+
+            let mut results = vec![
+                SearchResult {
+                    chunk: chunk1,
+                    score: 0.9,
+                    semantic_score: 0.9,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+                SearchResult {
+                    chunk: chunk2,
+                    score: 0.85,
+                    semantic_score: 0.85,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+            ];
+
+            let options = DedupOptions {
+                semantic_threshold: 0.95,
+                ..Default::default()
+            };
+
+            suppress_near_duplicates(&mut results, &vectors, &options);
+
+            assert_eq!(results.len(), 2);
+        }
+
+        #[test]
+        fn ordering_is_reproducible() {
+            let chunk1 = make_chunk_with_hash("fn a() {}", "a.rs", "h1");
+            let chunk2 = make_chunk_with_hash("fn b() {}", "b.rs", "h2");
+            let chunk3 = make_chunk_with_hash("fn c() {}", "c.rs", "h3");
+
+            let vectors = vec![
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![0.5, 0.5, 0.0, 0.0],
+                vec![0.0, 1.0, 0.0, 0.0],
+            ];
+
+            let create_results = || vec![
+                SearchResult {
+                    chunk: chunk1.clone(),
+                    score: 0.9,
+                    semantic_score: 0.9,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+                SearchResult {
+                    chunk: chunk2.clone(),
+                    score: 0.85,
+                    semantic_score: 0.85,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+                SearchResult {
+                    chunk: chunk3.clone(),
+                    score: 0.8,
+                    semantic_score: 0.8,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+            ];
+
+            let mut results1 = create_results();
+            let mut results2 = create_results();
+
+            suppress_near_duplicates(&mut results1, &vectors, &DedupOptions::default());
+            suppress_near_duplicates(&mut results2, &vectors, &DedupOptions::default());
+
+            assert_eq!(results1.len(), results2.len());
+            for (r1, r2) in results1.iter().zip(results2.iter()) {
+                assert_eq!(r1.chunk.id, r2.chunk.id);
+                assert!((r1.score - r2.score).abs() < 1e-6);
+            }
+        }
+
+        #[test]
+        fn dedup_options_default_values() {
+            let options = DedupOptions::default();
+            assert!((options.semantic_threshold - DEFAULT_SEMANTIC_DEDUP_THRESHOLD).abs() < 1e-6);
+            assert!(options.enabled);
+        }
+
+        #[test]
+        fn suppression_disabled_when_not_enabled() {
+            let chunk1 = make_chunk_with_hash("fn foo() {}", "a.rs", "hash123");
+            let chunk2 = make_chunk_with_hash("fn foo() {}", "b.rs", "hash123"); // Same hash
+
+            let mut results = vec![
+                SearchResult {
+                    chunk: chunk1,
+                    score: 0.9,
+                    semantic_score: 0.9,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+                SearchResult {
+                    chunk: chunk2,
+                    score: 0.8,
+                    semantic_score: 0.8,
+                    bm25_score: 0.0,
+                    show_full_context: false,
+                },
+            ];
+
+            let options = DedupOptions {
+                enabled: false,
+                ..Default::default()
+            };
+
+            suppress_near_duplicates(&mut results, &[], &options);
+
+            assert_eq!(results.len(), 2);
+        }
+
+        #[test]
+        fn empty_results_handled_gracefully() {
+            let mut results: Vec<SearchResult> = vec![];
+            suppress_near_duplicates(&mut results, &[], &DedupOptions::default());
+            assert!(results.is_empty());
+        }
+
+        #[test]
+        fn single_result_unchanged() {
+            let chunk = make_chunk_with_hash("fn foo() {}", "a.rs", "hash123");
+            let mut results = vec![SearchResult {
+                chunk,
+                score: 0.9,
+                semantic_score: 0.9,
+                bm25_score: 0.0,
+                show_full_context: false,
+            }];
+
+            let original_len = results.len();
+            suppress_near_duplicates(&mut results, &[vec![1.0, 0.0, 0.0, 0.0]], &DedupOptions::default());
+            assert_eq!(results.len(), original_len);
+        }
+
+        #[test]
+        fn search_options_includes_dedup_setting() {
+            let options = SearchOptions::default();
+            assert!(options.dedup.enabled, "Dedup should be enabled by default");
+        }
+
+        #[test]
+        fn search_applies_dedup_by_default() {
+            let embedder = Arc::new(MockEmbedder);
+            let engine = SearchEngine::new(embedder.clone());
+
+            let chunks = vec![
+                make_chunk_with_hash("fn duplicate() { same_code(); }", "a.rs", "same_hash"),
+                make_chunk_with_hash("fn duplicate() { same_code(); }", "b.rs", "same_hash"),
+                make_chunk_with_hash("fn unique() { different_code(); }", "c.rs", "diff_hash"),
+            ];
+            let vectors: Vec<Vec<f32>> = chunks
+                .iter()
+                .map(|c| embedder.embed(&c.text).unwrap())
+                .collect();
+
+            let results = engine
+                .search(
+                    &make_index(chunks, vectors),
+                    "duplicate",
+                    SearchOptions::default(),
+                )
+                .unwrap();
+
+            let same_hash_count = results.iter().filter(|r| r.chunk.hash == "same_hash").count();
+            assert_eq!(same_hash_count, 1);
+        }
+
+        #[test]
+        fn dedup_can_be_disabled_in_search_options() {
+            let embedder = Arc::new(MockEmbedder);
+            let engine = SearchEngine::new(embedder.clone());
+
+            let chunks = vec![
+                make_chunk_with_hash("fn duplicate() { same_code(); }", "a.rs", "same_hash"),
+                make_chunk_with_hash("fn duplicate() { same_code(); }", "b.rs", "same_hash"),
+            ];
+            let vectors: Vec<Vec<f32>> = chunks
+                .iter()
+                .map(|c| embedder.embed(&c.text).unwrap())
+                .collect();
+
+            let options = SearchOptions {
+                dedup: DedupOptions { enabled: false, ..Default::default() },
+                rerank: false,
+                ..Default::default()
+            };
+
+            let results = engine
+                .search(&make_index(chunks, vectors), "duplicate", options)
+                .unwrap();
+
+            assert_eq!(results.len(), 2);
         }
     }
 }
