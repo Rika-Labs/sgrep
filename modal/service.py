@@ -96,9 +96,21 @@ class Embedder:
         print("Embedding model loaded successfully")
 
     @modal.method()
-    def embed(self, texts: List[str], dimension: int = 4096) -> List[List[float]]:
+    def embed(self, texts: List[str], dimension: int = 384) -> List[List[float]]:
+        """Embed texts and truncate to requested dimension.
+
+        Args:
+            texts: List of texts to embed (max 1000 per request)
+            dimension: Output dimension (default 384 to match local embedder)
+        """
+        if not texts:
+            return []
+        if len(texts) > 1000:
+            raise ValueError(f"Too many texts: {len(texts)} > 1000 max")
+        if not 1 <= dimension <= 8192:
+            raise ValueError(f"Invalid dimension: {dimension} (must be 1-8192)")
+
         outputs = self.model.embed(texts)
-        # Truncate to requested dimension and convert to list
         return [list(out.outputs.embedding[:dimension]) for out in outputs]
 
 
@@ -143,7 +155,21 @@ class Reranker:
     def rerank(
         self, query: str, documents: List[str], top_k: int = 10
     ) -> List[Tuple[int, float]]:
+        """Rerank documents by relevance to query.
+
+        Args:
+            query: Search query
+            documents: Documents to rerank (max 500)
+            top_k: Number of top results to return
+        """
         import torch
+
+        if not documents:
+            return []
+        if len(documents) > 500:
+            raise ValueError(f"Too many documents: {len(documents)} > 500 max")
+        if not query.strip():
+            raise ValueError("Query cannot be empty")
 
         pairs = [[query, doc] for doc in documents]
         inputs = self.tokenizer(

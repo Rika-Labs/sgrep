@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::reranker::Reranker;
 
-const DEFAULT_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_TIMEOUT_SECS: u64 = 120; // Match embedder timeout
 const MAX_RETRIES: usize = 3;
 
 #[derive(Serialize)]

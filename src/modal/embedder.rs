@@ -126,7 +126,7 @@ impl BatchEmbedder for ModalEmbedder {
                             std::thread::sleep(Duration::from_millis(500 * attempt as u64));
                             last_err = Some(e);
                         } else {
-                            return Err(e);
+                            last_err = Some(e);
                         }
                     }
                 }
