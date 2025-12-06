@@ -152,7 +152,7 @@ impl ModalDeployer {
         fs::write(&service_path, MODAL_SERVICE_PY).context("Failed to write service.py")?;
 
         eprintln!(
-            "Deploying Modal service (GPU tier: {})...",
+            "[info] Deploying Modal service to modal.com (GPU: {})...",
             self.gpu_tier
         );
 
@@ -213,9 +213,16 @@ impl ModalDeployer {
     pub fn ensure_deployed(&self) -> Result<(String, String, bool)> {
         if let Some(cache) = self.load_cache() {
             if cache.gpu_tier == self.gpu_tier {
+                eprintln!("[info] Checking cached Modal endpoint health...");
                 if self.check_health(&cache.health_url).unwrap_or(false) {
                     return Ok((cache.embed_url, cache.rerank_url, true));
                 }
+                eprintln!("[info] Cached endpoint unhealthy, redeploying...");
+            } else {
+                eprintln!(
+                    "[info] GPU tier changed ({} -> {}), redeploying...",
+                    cache.gpu_tier, self.gpu_tier
+                );
             }
         }
 
