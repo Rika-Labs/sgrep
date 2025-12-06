@@ -28,12 +28,19 @@ struct EmbedResponse {
 pub struct ModalEmbedder {
     client: ureq::Agent,
     endpoint: String,
+    token_id: Option<String>,
+    token_secret: Option<String>,
     dimension: usize,
     batch_size: usize,
 }
 
 impl ModalEmbedder {
-    pub fn new(endpoint: String, dimension: usize) -> Self {
+    pub fn new(
+        endpoint: String,
+        dimension: usize,
+        token_id: Option<String>,
+        token_secret: Option<String>,
+    ) -> Self {
         let client = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .build();
@@ -41,6 +48,8 @@ impl ModalEmbedder {
         Self {
             client,
             endpoint,
+            token_id,
+            token_secret,
             dimension,
             batch_size: DEFAULT_BATCH_SIZE,
         }
@@ -57,22 +66,30 @@ impl ModalEmbedder {
             dimension: self.dimension,
         };
 
-        let response = self
+        let mut req = self
             .client
             .post(&self.endpoint)
-            .set("Content-Type", "application/json")
-            .send_json(&request)
-            .map_err(|e| {
-                if let ureq::Error::Status(status, _) = &e {
-                    match *status {
-                        429 => anyhow!("Rate limited by Modal. Please wait and retry."),
-                        500..=599 => anyhow!("Modal server error ({}). Please retry.", status),
-                        _ => anyhow!("Modal request failed with status {}: {}", status, e),
-                    }
-                } else {
-                    anyhow!("Failed to send request to Modal: {}", e)
+            .set("Content-Type", "application/json");
+
+        // Add Modal proxy auth headers if credentials are available
+        if let (Some(token_id), Some(token_secret)) = (&self.token_id, &self.token_secret) {
+            req = req
+                .set("Modal-Key", token_id)
+                .set("Modal-Secret", token_secret);
+        }
+
+        let response = req.send_json(&request).map_err(|e| {
+            if let ureq::Error::Status(status, _) = &e {
+                match *status {
+                    401 => anyhow!("Modal authentication failed. Check your token_id and token_secret."),
+                    429 => anyhow!("Rate limited by Modal. Please wait and retry."),
+                    500..=599 => anyhow!("Modal server error ({}). Please retry.", status),
+                    _ => anyhow!("Modal request failed with status {}: {}", status, e),
                 }
-            })?;
+            } else {
+                anyhow!("Failed to send request to Modal: {}", e)
+            }
+        })?;
 
         let embed_response: EmbedResponse = response
             .into_json()
@@ -134,27 +151,36 @@ mod tests {
 
     #[test]
     fn new_embedder_has_correct_fields() {
-        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 4096);
+        let embedder = ModalEmbedder::new(
+            "https://embed.modal.run".to_string(),
+            4096,
+            Some("token-id".to_string()),
+            Some("token-secret".to_string()),
+        );
         assert_eq!(embedder.endpoint, "https://embed.modal.run");
         assert_eq!(embedder.dimension, 4096);
+        assert_eq!(embedder.token_id, Some("token-id".to_string()));
+        assert_eq!(embedder.token_secret, Some("token-secret".to_string()));
         assert_eq!(embedder.batch_size, DEFAULT_BATCH_SIZE);
     }
 
     #[test]
     fn with_batch_size_sets_batch_size() {
-        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 4096).with_batch_size(64);
+        let embedder =
+            ModalEmbedder::new("https://embed.modal.run".to_string(), 4096, None, None)
+                .with_batch_size(64);
         assert_eq!(embedder.batch_size, 64);
     }
 
     #[test]
     fn dimension_returns_correct_value() {
-        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 1024);
+        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 1024, None, None);
         assert_eq!(embedder.dimension(), 1024);
     }
 
     #[test]
     fn embed_batch_returns_empty_for_empty_input() {
-        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 4096);
+        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 4096, None, None);
         let result = embedder.embed_batch(&[]);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());

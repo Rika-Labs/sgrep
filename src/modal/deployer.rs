@@ -56,7 +56,7 @@ impl ModalDeployer {
     pub fn check_modal_cli(&self) -> Result<()> {
         // Check if Modal CLI is installed
         if Command::new("modal").arg("--version").output().is_err() {
-            eprintln!("Modal CLI not found. Installing...");
+            eprintln!("[info] Modal CLI not found. Installing...");
             let pip = if Command::new("pip3").arg("--version").output().is_ok() {
                 "pip3"
             } else {
@@ -73,28 +73,15 @@ impl ModalDeployer {
                     "Failed to install Modal CLI. Install manually with: pip install modal"
                 ));
             }
-            eprintln!("Modal CLI installed.");
+            eprintln!("[info] Modal CLI installed.");
         }
 
-        // Check authentication - prefer config tokens over existing auth
-        if let (Some(token_id), Some(token_secret)) = (&self.token_id, &self.token_secret) {
-            // Verify tokens work by running a command with them set
-            let check = Command::new("modal")
-                .args(["token", "show"])
-                .env("MODAL_TOKEN_ID", token_id)
-                .env("MODAL_TOKEN_SECRET", token_secret)
-                .output();
-
-            if check.is_ok() && check.unwrap().status.success() {
-                return Ok(());
-            }
-            return Err(anyhow!(
-                "Modal authentication failed. Check your token_id and token_secret in config.\n\
-                 Get tokens from: https://modal.com/settings"
-            ));
+        // If tokens are provided in config, trust them - deploy will fail if invalid
+        if self.token_id.is_some() && self.token_secret.is_some() {
+            return Ok(());
         }
 
-        // No tokens in config - check if already authenticated
+        // No tokens in config - check if already authenticated via modal CLI
         let token_check = Command::new("modal").args(["token", "show"]).output();
 
         if token_check.is_err() || !token_check.unwrap().status.success() {

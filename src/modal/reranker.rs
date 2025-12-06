@@ -32,15 +32,26 @@ struct RerankResponse {
 pub struct ModalReranker {
     client: ureq::Agent,
     endpoint: String,
+    token_id: Option<String>,
+    token_secret: Option<String>,
 }
 
 impl ModalReranker {
-    pub fn new(endpoint: String) -> Self {
+    pub fn new(
+        endpoint: String,
+        token_id: Option<String>,
+        token_secret: Option<String>,
+    ) -> Self {
         let client = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .build();
 
-        Self { client, endpoint }
+        Self {
+            client,
+            endpoint,
+            token_id,
+            token_secret,
+        }
     }
 
     pub fn rerank(
@@ -83,22 +94,30 @@ impl ModalReranker {
     }
 
     fn do_rerank(&self, request: &RerankRequest) -> Result<Vec<(usize, f32)>> {
-        let response = self
+        let mut req = self
             .client
             .post(&self.endpoint)
-            .set("Content-Type", "application/json")
-            .send_json(request)
-            .map_err(|e| {
-                if let ureq::Error::Status(status, _) = &e {
-                    match *status {
-                        429 => anyhow!("Rate limited by Modal. Please wait and retry."),
-                        500..=599 => anyhow!("Modal server error ({}). Please retry.", status),
-                        _ => anyhow!("Modal request failed with status {}: {}", status, e),
-                    }
-                } else {
-                    anyhow!("Failed to send request to Modal: {}", e)
+            .set("Content-Type", "application/json");
+
+        // Add Modal proxy auth headers if credentials are available
+        if let (Some(token_id), Some(token_secret)) = (&self.token_id, &self.token_secret) {
+            req = req
+                .set("Modal-Key", token_id)
+                .set("Modal-Secret", token_secret);
+        }
+
+        let response = req.send_json(request).map_err(|e| {
+            if let ureq::Error::Status(status, _) = &e {
+                match *status {
+                    401 => anyhow!("Modal authentication failed. Check your token_id and token_secret."),
+                    429 => anyhow!("Rate limited by Modal. Please wait and retry."),
+                    500..=599 => anyhow!("Modal server error ({}). Please retry.", status),
+                    _ => anyhow!("Modal request failed with status {}: {}", status, e),
                 }
-            })?;
+            } else {
+                anyhow!("Failed to send request to Modal: {}", e)
+            }
+        })?;
 
         let rerank_response: RerankResponse = response
             .into_json()
@@ -125,13 +144,19 @@ mod tests {
 
     #[test]
     fn new_reranker_has_correct_fields() {
-        let reranker = ModalReranker::new("https://rerank.modal.run".to_string());
+        let reranker = ModalReranker::new(
+            "https://rerank.modal.run".to_string(),
+            Some("token-id".to_string()),
+            Some("token-secret".to_string()),
+        );
         assert_eq!(reranker.endpoint, "https://rerank.modal.run");
+        assert_eq!(reranker.token_id, Some("token-id".to_string()));
+        assert_eq!(reranker.token_secret, Some("token-secret".to_string()));
     }
 
     #[test]
     fn rerank_returns_empty_for_empty_documents() {
-        let reranker = ModalReranker::new("https://rerank.modal.run".to_string());
+        let reranker = ModalReranker::new("https://rerank.modal.run".to_string(), None, None);
         let result = reranker.rerank("query", &[], 10);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());

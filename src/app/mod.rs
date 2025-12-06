@@ -274,34 +274,31 @@ fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
     };
 
     eprintln!(
-        "{} Using Modal embedder (GPU: {}, dim: {})",
-        style("ℹ").cyan(),
-        gpu_tier,
-        dimension
+        "[info] Using Modal embedder (GPU: {}, dim: {})",
+        gpu_tier, dimension
     );
 
-    let endpoint = if let Some(endpoint) = config.modal.endpoint {
+    let endpoint = if let Some(endpoint) = config.modal.endpoint.clone() {
         endpoint
     } else {
-        eprintln!(
-            "{} Auto-deploying Modal service...",
-            style("⏳").yellow()
-        );
+        eprintln!("[info] Auto-deploying Modal service...");
         let deployer = ModalDeployer::new(
             gpu_tier,
             config.modal.token_id.clone(),
             config.modal.token_secret.clone(),
         );
         let (embed_endpoint, _rerank_endpoint) = deployer.ensure_deployed()?;
-        eprintln!(
-            "{} Modal service deployed: {}",
-            style("✔").green(),
-            embed_endpoint
-        );
+        eprintln!("[info] Modal service deployed: {}", embed_endpoint);
         embed_endpoint
     };
 
-    let embedder = ModalEmbedder::new(endpoint, dimension).with_batch_size(batch_size);
+    let embedder = ModalEmbedder::new(
+        endpoint,
+        dimension,
+        config.modal.token_id.clone(),
+        config.modal.token_secret.clone(),
+    )
+    .with_batch_size(batch_size);
 
     Ok(Arc::new(embedder))
 }
@@ -321,11 +318,7 @@ fn build_reranker_silent(
         Ok(reranker) => Some(Arc::new(reranker)),
         Err(e) => {
             if !json_mode {
-                eprintln!(
-                    "{} Reranker unavailable: {} (falling back to semantic search)",
-                    style("⚠").yellow(),
-                    e
-                );
+                eprintln!("[warn] Reranker unavailable: {} (falling back to semantic search)", e);
             }
             None
         }
@@ -342,11 +335,7 @@ fn build_modal_reranker(
         Ok(c) => c,
         Err(e) => {
             if !json_mode {
-                eprintln!(
-                    "{} Modal reranker config error: {}",
-                    style("⚠").yellow(),
-                    e
-                );
+                eprintln!("[warn] Modal reranker config error: {}", e);
             }
             return None;
         }
@@ -367,24 +356,21 @@ fn build_modal_reranker(
         Ok(endpoint) => endpoint,
         Err(e) => {
             if !json_mode {
-                eprintln!(
-                    "{} Modal reranker unavailable: {}",
-                    style("⚠").yellow(),
-                    e
-                );
+                eprintln!("[warn] Modal reranker unavailable: {}", e);
             }
             return None;
         }
     };
 
     if !json_mode {
-        eprintln!(
-            "{} Using Modal reranker (Qwen3-Reranker-8B)",
-            style("ℹ").cyan()
-        );
+        eprintln!("[info] Using Modal reranker (Qwen3-Reranker-8B)");
     }
 
-    Some(Arc::new(ModalReranker::new(rerank_endpoint)))
+    Some(Arc::new(ModalReranker::new(
+        rerank_endpoint,
+        config.modal.token_id.clone(),
+        config.modal.token_secret.clone(),
+    )))
 }
 
 #[cfg(test)]
@@ -410,27 +396,15 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
 
     if init {
         if config_path.exists() {
-            println!(
-                "{} Config already exists at {}",
-                style("ℹ").cyan(),
-                config_path.display()
-            );
+            println!("[info] Config already exists at {}", config_path.display());
         } else {
             let path = Config::create_default_config()?;
-            println!(
-                "{} Created config at {}",
-                style("✔").green(),
-                path.display()
-            );
+            println!("[ok] Created config at {}", path.display());
         }
         return Ok(());
     }
 
-    println!(
-        "{} Config path: {}",
-        style("ℹ").cyan(),
-        config_path.display()
-    );
+    println!("[info] Config path: {}", config_path.display());
 
     if config_path.exists() {
         println!(
@@ -444,10 +418,7 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
             style(format!("local ({})", embedding::MODEL_NAME)).bold()
         );
         println!();
-        println!(
-            "  Run {} to create a config file",
-            style("sgrep config --init").cyan()
-        );
+        println!("  Run 'sgrep config --init' to create a config file");
     }
 
     Ok(())
@@ -456,30 +427,21 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
 fn verify_model_files() -> Result<()> {
     let model_dir = embedding::get_fastembed_cache_dir().join(embedding::MODEL_NAME);
 
-    println!(
-        "{} Model directory: {}\n",
-        style("ℹ").cyan(),
-        model_dir.display()
-    );
+    println!("[info] Model directory: {}\n", model_dir.display());
 
     let mut all_ok = true;
     for file in embedding::MODEL_FILES {
         let exists = model_dir.join(file).exists();
-        let status = if exists {
-            style("OK").green()
-        } else {
-            all_ok = false;
-            style("MISSING").red()
-        };
+        let status = if exists { "OK" } else { all_ok = false; "MISSING" };
         println!("  [{}] {}", status, file);
     }
 
     println!();
     if all_ok {
-        println!("{} All model files present.", style("✔").green());
+        println!("[ok] All model files present.");
         Ok(())
     } else {
-        println!("{} Some model files are missing.\n", style("✖").red());
+        println!("[error] Some model files are missing.\n");
         println!("Download from: {}", embedding::MODEL_DOWNLOAD_URL);
         println!("Place files in: {}", model_dir.display());
         Err(anyhow!("Model files incomplete"))
@@ -534,8 +496,7 @@ fn handle_index(
         use crate::query_expander::QueryExpander;
         if let Err(e) = QueryExpander::new() {
             eprintln!(
-                "{} Query expander download failed: {} (search will use heuristics)",
-                style("⚠").yellow(),
+                "[warn] Query expander download failed: {} (search will use heuristics)",
                 e
             );
         }
@@ -553,8 +514,7 @@ fn handle_index(
         .context("Failed to build index")?;
 
     println!(
-        "{} Indexed {} files ({} chunks) in {}",
-        style("✔").green(),
+        "[ok] Indexed {} files ({} chunks) in {}",
         report.files_indexed,
         report.chunks_indexed,
         HumanDuration(report.duration)
@@ -614,7 +574,7 @@ fn handle_search(
 
     if let Err(e) = engine.enable_query_expander_silent() {
         if !params.json {
-            eprintln!("{} Query expander unavailable: {}", style("⚠").yellow(), e);
+            eprintln!("[warn] Query expander unavailable: {}", e);
         }
     }
 
@@ -736,8 +696,7 @@ fn rebuild_index(
     embedder: Arc<dyn embedding::BatchEmbedder>,
 ) -> Result<store::RepositoryIndex> {
     eprintln!(
-        "{} Building index for {} (this happens once per repo)",
-        style("ℹ").cyan(),
+        "[info] Building index for {} (this happens once per repo)",
         path.display()
     );
 
@@ -753,8 +712,7 @@ fn rebuild_index(
         .with_context(|| format!("Index build failed for {}", path.display()))?;
 
     eprintln!(
-        "{} Indexed {} files ({} chunks) in {}",
-        style("✔").green(),
+        "[ok] Indexed {} files ({} chunks) in {}",
         report.files_indexed,
         report.chunks_indexed,
         HumanDuration(report.duration)
@@ -801,7 +759,7 @@ fn render_results(ctx: RenderContext<'_>) -> Result<()> {
             JsonResponse::from_results(ctx.query, ctx.limit, ctx.results, ctx.index, ctx.elapsed);
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if ctx.results.is_empty() {
-        println!("{} No matches found", style("⚠").yellow());
+        println!("[warn] No matches found");
     } else {
         for (idx, result) in ctx.results.iter().enumerate() {
             let header = format!(
@@ -811,7 +769,7 @@ fn render_results(ctx: RenderContext<'_>) -> Result<()> {
                 result.chunk.start_line,
                 result.chunk.end_line,
             );
-            println!("{} {}", style("→").cyan(), style(header).bold());
+            println!("-> {}", style(header).bold());
             if ctx.debug {
                 println!(
                     "    score: {:.2} | semantic: {:.2} | bm25: {:.2}",
@@ -822,12 +780,7 @@ fn render_results(ctx: RenderContext<'_>) -> Result<()> {
             println!();
         }
         if ctx.debug {
-            println!(
-                "{} {} results in {:?}",
-                style("ℹ").cyan(),
-                ctx.results.len(),
-                ctx.elapsed
-            );
+            println!("[info] {} results in {:?}", ctx.results.len(), ctx.elapsed);
         }
     }
     Ok(())

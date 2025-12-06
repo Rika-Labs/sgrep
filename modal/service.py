@@ -96,7 +96,7 @@ class Embedder:
 
 
 @app.function(image=image)
-@modal.fastapi_endpoint(method="POST")
+@modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
 def embed(request: EmbedRequest) -> EmbedResponse:
     """Embed texts using Qwen3-Embedding-8B."""
     embedder = Embedder()
@@ -160,7 +160,7 @@ class Reranker:
 
 
 @app.function(image=image)
-@modal.fastapi_endpoint(method="POST")
+@modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
 def rerank(request: RerankRequest) -> RerankResponse:
     """Rerank documents by relevance to query using Qwen3-Reranker-8B."""
     reranker = Reranker()
