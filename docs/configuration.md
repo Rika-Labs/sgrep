@@ -64,10 +64,11 @@ proxy_token_id = "wk-..."        # Modal proxy auth token ID from https://modal.
 proxy_token_secret = "ws-..."    # Modal proxy auth token secret from https://modal.com/settings
 
 gpu_tier = "high"                # budget (T4), balanced (A10G), high (L40S)
-dimension = 384                  # embedding dimension (matches local embedder)
 batch_size = 128                 # texts per request
 endpoint = "https://..."         # auto-populated after first deploy
 ```
+
+**Note:** Embedding dimension is fixed at 384 to match the local embedder. This ensures you can switch between local and Modal embeddings seamlessly.
 
 **Authentication:**
 
@@ -90,7 +91,7 @@ Modal requires two types of tokens:
 | `high` | L40S | ~$1.10/hr | Maximum performance (default) |
 
 **Models used:**
-- Embeddings: [Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) (8K context, 4096 dimensions)
+- Embeddings: [Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) (8K context, truncated to 384 dimensions for local compatibility)
 - Reranking: [Qwen3-Reranker-8B](https://huggingface.co/Qwen/Qwen3-Reranker-8B)
 
 First run auto-deploys the service; subsequent runs use cached endpoints.

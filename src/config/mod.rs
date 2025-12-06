@@ -33,9 +33,6 @@ pub struct ModalConfig {
     /// GPU tier: "budget" (T4), "balanced" (A10G), "high" (L40S)
     #[serde(default = "default_gpu_tier")]
     pub gpu_tier: String,
-    /// Embedding dimension (default: 384 to match local embedder)
-    #[serde(default = "default_dimension")]
-    pub dimension: usize,
     /// Batch size for embedding requests
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
@@ -45,10 +42,6 @@ pub struct ModalConfig {
 
 fn default_gpu_tier() -> String {
     "high".to_string()
-}
-
-fn default_dimension() -> usize {
-    384 // Matches local embedder dimension for compatibility
 }
 
 fn default_batch_size() -> usize {
@@ -247,7 +240,6 @@ token_secret = "as-test"
 proxy_token_id = "wk-proxy-test"
 proxy_token_secret = "ws-proxy-test"
 gpu_tier = "balanced"
-dimension = 1024
 batch_size = 64
 endpoint = "https://example.modal.run"
 "#;
@@ -258,7 +250,6 @@ endpoint = "https://example.modal.run"
         assert_eq!(config.modal.proxy_token_id, Some("wk-proxy-test".to_string()));
         assert_eq!(config.modal.proxy_token_secret, Some("ws-proxy-test".to_string()));
         assert_eq!(config.modal.gpu_tier, "balanced");
-        assert_eq!(config.modal.dimension, 1024);
         assert_eq!(config.modal.batch_size, 64);
         assert_eq!(
             config.modal.endpoint,
@@ -274,7 +265,6 @@ token_id = "ak-test"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.modal.gpu_tier, "high");
-        assert_eq!(config.modal.dimension, 384);
         assert_eq!(config.modal.batch_size, 128);
         assert_eq!(config.modal.endpoint, None);
     }
@@ -283,7 +273,6 @@ token_id = "ak-test"
     fn empty_config_has_modal_defaults() {
         let config = Config::default();
         assert_eq!(config.modal.gpu_tier, "");
-        assert_eq!(config.modal.dimension, 0);
     }
 
     // Turbopuffer config tests
@@ -325,7 +314,6 @@ token_secret = "as-test"
 proxy_token_id = "wk-proxy"
 proxy_token_secret = "ws-proxy"
 gpu_tier = "high"
-dimension = 4096
 
 [turbopuffer]
 api_key = "tpuf-key"

@@ -252,6 +252,9 @@ fn build_embedder(
     Ok(embedder)
 }
 
+/// Fixed dimension for local/remote compatibility - do not change
+const MODAL_DIMENSION: usize = 384;
+
 fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
     let config = Config::load().context("Failed to load config")?;
 
@@ -259,12 +262,6 @@ fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
         "high".to_string()
     } else {
         config.modal.gpu_tier.clone()
-    };
-
-    let dimension = if config.modal.dimension == 0 {
-        384 // Match local embedder dimension for compatibility
-    } else {
-        config.modal.dimension
     };
 
     let batch_size = if config.modal.batch_size == 0 {
@@ -275,7 +272,7 @@ fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
 
     eprintln!(
         "[info] Using Modal embedder (GPU: {}, dim: {})",
-        gpu_tier, dimension
+        gpu_tier, MODAL_DIMENSION
     );
 
     let endpoint = if let Some(endpoint) = config.modal.endpoint.clone() {
@@ -298,7 +295,7 @@ fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
 
     let embedder = ModalEmbedder::new(
         endpoint,
-        dimension,
+        MODAL_DIMENSION,
         config.modal.proxy_token_id.clone(),
         config.modal.proxy_token_secret.clone(),
     )
