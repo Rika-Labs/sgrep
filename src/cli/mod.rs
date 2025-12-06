@@ -59,6 +59,12 @@ pub enum Commands {
         /// Oversample factor for reranking (default: 3, meaning fetch 3x candidates before rerank)
         #[arg(long, default_value_t = 3)]
         rerank_oversample: usize,
+        /// Offload embeddings/reranking to Modal.dev (auto-deploys if needed)
+        #[arg(long, env = "SGREP_OFFLOAD")]
+        offload: bool,
+        /// Store/query index from Turbopuffer (serverless vector DB)
+        #[arg(long, env = "SGREP_REMOTE")]
+        remote: bool,
     },
     /// Index a repository for semantic search
     Index {
@@ -85,6 +91,12 @@ pub enum Commands {
         /// Output stats as JSON (only with --stats)
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Offload embeddings to Modal.dev (auto-deploys if needed)
+        #[arg(long, env = "SGREP_OFFLOAD")]
+        offload: bool,
+        /// Store index in Turbopuffer (serverless vector DB)
+        #[arg(long, env = "SGREP_REMOTE")]
+        remote: bool,
         /// Run index in detached/background mode
         #[arg(short = 'd', long, default_value_t = false)]
         detach: bool,
@@ -105,6 +117,12 @@ pub enum Commands {
             help = "Override embedding batch size (16-2048). Also reads SGREP_BATCH_SIZE."
         )]
         batch_size: Option<usize>,
+        /// Offload embeddings to Modal.dev (auto-deploys if needed)
+        #[arg(long, env = "SGREP_OFFLOAD")]
+        offload: bool,
+        /// Store index in Turbopuffer (serverless vector DB)
+        #[arg(long, env = "SGREP_REMOTE")]
+        remote: bool,
         /// Run watch in detached/background mode
         #[arg(short = 'd', long, default_value_t = false)]
         detach: bool,
@@ -265,6 +283,111 @@ mod tests {
                 assert_eq!(rerank_oversample, 3, "Expected default oversample to be 3");
             }
             _ => panic!("Expected Search command"),
+        }
+    }
+
+    // --offload flag tests
+    #[test]
+    fn cli_parses_index_offload_flag() {
+        let cli = Cli::parse_from(["sgrep", "index", "--offload"]);
+        match cli.command {
+            Commands::Index { offload, .. } => {
+                assert!(offload, "Expected --offload flag to be true");
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[test]
+    fn cli_index_offload_default_is_false() {
+        let cli = Cli::parse_from(["sgrep", "index", "."]);
+        match cli.command {
+            Commands::Index { offload, .. } => {
+                assert!(!offload, "Expected offload to be false by default");
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_watch_offload_flag() {
+        let cli = Cli::parse_from(["sgrep", "watch", "--offload"]);
+        match cli.command {
+            Commands::Watch { offload, .. } => {
+                assert!(offload, "Expected --offload flag to be true");
+            }
+            _ => panic!("Expected Watch command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_search_offload_flag() {
+        let cli = Cli::parse_from(["sgrep", "search", "query", "--offload"]);
+        match cli.command {
+            Commands::Search { offload, .. } => {
+                assert!(offload, "Expected --offload flag to be true");
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    // --remote flag tests
+    #[test]
+    fn cli_parses_index_remote_flag() {
+        let cli = Cli::parse_from(["sgrep", "index", "--remote"]);
+        match cli.command {
+            Commands::Index { remote, .. } => {
+                assert!(remote, "Expected --remote flag to be true");
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[test]
+    fn cli_index_remote_default_is_false() {
+        let cli = Cli::parse_from(["sgrep", "index", "."]);
+        match cli.command {
+            Commands::Index { remote, .. } => {
+                assert!(!remote, "Expected remote to be false by default");
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_watch_remote_flag() {
+        let cli = Cli::parse_from(["sgrep", "watch", "--remote"]);
+        match cli.command {
+            Commands::Watch { remote, .. } => {
+                assert!(remote, "Expected --remote flag to be true");
+            }
+            _ => panic!("Expected Watch command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_search_remote_flag() {
+        let cli = Cli::parse_from(["sgrep", "search", "query", "--remote"]);
+        match cli.command {
+            Commands::Search { remote, .. } => {
+                assert!(remote, "Expected --remote flag to be true");
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    // Combined flags test
+    #[test]
+    fn cli_parses_index_offload_and_remote_flags() {
+        let cli = Cli::parse_from(["sgrep", "index", "--offload", "--remote"]);
+        match cli.command {
+            Commands::Index {
+                offload, remote, ..
+            } => {
+                assert!(offload, "Expected --offload flag to be true");
+                assert!(remote, "Expected --remote flag to be true");
+            }
+            _ => panic!("Expected Index command"),
         }
     }
 }

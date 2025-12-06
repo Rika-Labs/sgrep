@@ -6,21 +6,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
 use clap::Parser;
 use console::{style, Term};
 use indicatif::HumanDuration;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::cli::{resolve_repo_path, Cli, Commands};
-use crate::config::Config;
+use crate::config::{Config, RemoteProviderType};
 use crate::embedding::{self, Embedder, PooledEmbedder};
+use crate::modal::{ModalDeployer, ModalEmbedder};
 use crate::output::JsonResponse;
+use crate::remote::{RemoteChunk, RemoteFactory, RemoteVectorStore};
 use crate::threading::{CpuPreset, ThreadConfig};
 use crate::{indexer, search, store, watch};
 
-/// Parameters for executing a search operation.
-/// Consolidates the search-related parameters into a single struct
-/// to improve readability and reduce function parameter count (KISS principle).
 pub struct SearchParams<'a> {
     pub query: &'a str,
     pub path: &'a Path,
@@ -32,13 +33,17 @@ pub struct SearchParams<'a> {
     pub debug: bool,
     pub no_rerank: bool,
     pub rerank_oversample: usize,
+    pub offload: bool,
+    pub remote: Option<Arc<dyn RemoteVectorStore>>,
 }
 
+#[allow(dead_code)]
 struct ProgressLine {
     term: Term,
     enabled: bool,
 }
 
+#[allow(dead_code)]
 impl ProgressLine {
     fn stderr() -> Self {
         let term = Term::stderr();
@@ -66,8 +71,6 @@ impl ProgressLine {
     }
 }
 
-/// Context needed to render search results.
-/// Consolidates the 7 render-related parameters into a single struct.
 pub struct RenderContext<'a> {
     pub results: Vec<search::SearchResult>,
     pub query: &'a str,
@@ -147,7 +150,15 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    let embedder = build_embedder(cli.offline, cli.device.clone())?;
+    // Extract offload flag from command to determine embedder type
+    let offload = match &cli.command {
+        Commands::Index { offload, .. } => *offload,
+        Commands::Search { offload, .. } => *offload,
+        Commands::Watch { offload, .. } => *offload,
+        Commands::Config { .. } => false,
+    };
+
+    let embedder = build_embedder(cli.offline, cli.device.clone(), offload)?;
 
     match cli.command {
         Commands::Index {
@@ -157,12 +168,14 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             profile,
             stats,
             json,
+            offload: _offload,
+            remote,
             detach: _,
         } => {
             if stats {
                 return handle_index_stats(path, json);
             }
-            handle_index(embedder, path, force, batch_size, profile)
+            handle_index(embedder, path, force, batch_size, profile, remote)
         }
         Commands::Search {
             query,
@@ -175,27 +188,43 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             debug,
             no_rerank,
             rerank_oversample,
-        } => handle_search(
-            embedder,
-            SearchParams {
-                query: &query,
-                path: &path,
-                limit,
-                context,
-                glob,
-                filters,
-                json,
-                debug,
-                no_rerank,
-                rerank_oversample,
-            },
-        ),
+            offload,
+            remote,
+        } => {
+            let remote_store = build_remote_store(remote, &path)?;
+            handle_search(
+                embedder,
+                SearchParams {
+                    query: &query,
+                    path: &path,
+                    limit,
+                    context,
+                    glob,
+                    filters,
+                    json,
+                    debug,
+                    no_rerank,
+                    rerank_oversample,
+                    offload,
+                    remote: remote_store,
+                },
+            )
+        }
         Commands::Watch {
             path,
             debounce_ms,
             batch_size,
+            offload: _offload,
+            remote,
             detach: _,
-        } => handle_watch(embedder, path, debounce_ms, batch_size),
+        } => {
+            if remote {
+                eprintln!(
+                    "[warn] Remote indexing via watch is not yet supported; proceeding locally."
+                );
+            }
+            handle_watch(embedder, path, debounce_ms, batch_size)
+        }
         Commands::Config { .. } => unreachable!(), // Handled above
     }
 }
@@ -203,8 +232,9 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
 fn build_embedder(
     offline: bool,
     device: Option<String>,
+    offload: bool,
 ) -> Result<Arc<dyn embedding::BatchEmbedder>> {
-    let progress = ProgressLine::stderr();
+    let _progress = ProgressLine::stderr();
 
     if env::var("TOKENIZERS_PARALLELISM").is_err() {
         env::set_var("TOKENIZERS_PARALLELISM", "true");
@@ -216,6 +246,10 @@ fn build_embedder(
 
     if let Some(device) = device {
         env::set_var("SGREP_DEVICE", device);
+    }
+
+    if offload {
+        return build_modal_embedder();
     }
 
     embedding::configure_offline_env(offline)?;
@@ -233,19 +267,75 @@ fn build_embedder(
     Ok(embedder)
 }
 
+/// Fixed dimension for local/remote compatibility - do not change
+const MODAL_DIMENSION: usize = 384;
+
+fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
+    let config = Config::load().context("Failed to load config")?;
+
+    let gpu_tier = if config.modal.gpu_tier.is_empty() {
+        "high".to_string()
+    } else {
+        config.modal.gpu_tier.clone()
+    };
+
+    let batch_size = if config.modal.batch_size == 0 {
+        128 // Optimized for GPU workloads
+    } else {
+        config.modal.batch_size
+    };
+
+    eprintln!(
+        "[info] Using Modal embedder (GPU: {}, dim: {})",
+        gpu_tier, MODAL_DIMENSION
+    );
+
+    let endpoint = if let Some(endpoint) = config.modal.endpoint.clone() {
+        eprintln!("[info] Using cached endpoint: {}", endpoint);
+        endpoint
+    } else {
+        let deployer = ModalDeployer::new(
+            gpu_tier,
+            config.modal.token_id.clone(),
+            config.modal.token_secret.clone(),
+        );
+        let (embed_endpoint, _rerank_endpoint, used_cache) = deployer.ensure_deployed()?;
+        if used_cache {
+            eprintln!("[info] Using cached endpoint: {}", embed_endpoint);
+        } else {
+            eprintln!("[info] Modal service deployed: {}", embed_endpoint);
+        }
+        embed_endpoint
+    };
+
+    let embedder = ModalEmbedder::new(
+        endpoint,
+        MODAL_DIMENSION,
+        config.modal.proxy_token_id.clone(),
+        config.modal.proxy_token_secret.clone(),
+    )
+    .with_batch_size(batch_size);
+
+    Ok(Arc::new(embedder))
+}
+
 #[cfg(not(test))]
 fn build_reranker_silent(
     json_mode: bool,
+    offload: bool,
 ) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
     use crate::reranker::CrossEncoderReranker;
+
+    if offload {
+        return build_modal_reranker(json_mode);
+    }
 
     match CrossEncoderReranker::new(!json_mode) {
         Ok(reranker) => Some(Arc::new(reranker)),
         Err(e) => {
             if !json_mode {
                 eprintln!(
-                    "{} Reranker unavailable: {} (falling back to semantic search)",
-                    style("⚠").yellow(),
+                    "[warn] Reranker unavailable: {} (falling back to semantic search)",
                     e
                 );
             }
@@ -254,9 +344,58 @@ fn build_reranker_silent(
     }
 }
 
+#[cfg(not(test))]
+fn build_modal_reranker(
+    json_mode: bool,
+) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
+    use crate::modal::reranker::ModalReranker;
+
+    let config = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            if !json_mode {
+                eprintln!("[warn] Modal reranker config error: {}", e);
+            }
+            return None;
+        }
+    };
+
+    let gpu_tier = if config.modal.gpu_tier.is_empty() {
+        "high".to_string()
+    } else {
+        config.modal.gpu_tier.clone()
+    };
+
+    let deployer = ModalDeployer::new(
+        gpu_tier,
+        config.modal.token_id.clone(),
+        config.modal.token_secret.clone(),
+    );
+    let rerank_endpoint = match deployer.get_rerank_endpoint() {
+        Ok(endpoint) => endpoint,
+        Err(e) => {
+            if !json_mode {
+                eprintln!("[warn] Modal reranker unavailable: {}", e);
+            }
+            return None;
+        }
+    };
+
+    if !json_mode {
+        eprintln!("[info] Using Modal reranker (Qwen3-Reranker-8B)");
+    }
+
+    Some(Arc::new(ModalReranker::new(
+        rerank_endpoint,
+        config.modal.proxy_token_id.clone(),
+        config.modal.proxy_token_secret.clone(),
+    )))
+}
+
 #[cfg(test)]
 fn build_reranker_silent(
     _json_mode: bool,
+    _offload: bool,
 ) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
     None
 }
@@ -276,27 +415,15 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
 
     if init {
         if config_path.exists() {
-            println!(
-                "{} Config already exists at {}",
-                style("ℹ").cyan(),
-                config_path.display()
-            );
+            println!("[info] Config already exists at {}", config_path.display());
         } else {
             let path = Config::create_default_config()?;
-            println!(
-                "{} Created config at {}",
-                style("✔").green(),
-                path.display()
-            );
+            println!("[ok] Created config at {}", path.display());
         }
         return Ok(());
     }
 
-    println!(
-        "{} Config path: {}",
-        style("ℹ").cyan(),
-        config_path.display()
-    );
+    println!("[info] Config path: {}", config_path.display());
 
     if config_path.exists() {
         println!(
@@ -310,10 +437,7 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
             style(format!("local ({})", embedding::MODEL_NAME)).bold()
         );
         println!();
-        println!(
-            "  Run {} to create a config file",
-            style("sgrep config --init").cyan()
-        );
+        println!("  Run 'sgrep config --init' to create a config file");
     }
 
     Ok(())
@@ -322,30 +446,26 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
 fn verify_model_files() -> Result<()> {
     let model_dir = embedding::get_fastembed_cache_dir().join(embedding::MODEL_NAME);
 
-    println!(
-        "{} Model directory: {}\n",
-        style("ℹ").cyan(),
-        model_dir.display()
-    );
+    println!("[info] Model directory: {}\n", model_dir.display());
 
     let mut all_ok = true;
     for file in embedding::MODEL_FILES {
         let exists = model_dir.join(file).exists();
         let status = if exists {
-            style("OK").green()
+            "OK"
         } else {
             all_ok = false;
-            style("MISSING").red()
+            "MISSING"
         };
         println!("  [{}] {}", status, file);
     }
 
     println!();
     if all_ok {
-        println!("{} All model files present.", style("✔").green());
+        println!("[ok] All model files present.");
         Ok(())
     } else {
-        println!("{} Some model files are missing.\n", style("✖").red());
+        println!("[error] Some model files are missing.\n");
         println!("Download from: {}", embedding::MODEL_DOWNLOAD_URL);
         println!("Place files in: {}", model_dir.display());
         Err(anyhow!("Model files incomplete"))
@@ -393,6 +513,7 @@ fn handle_index(
     force: bool,
     batch_size: Option<usize>,
     profile: bool,
+    remote_flag: bool,
 ) -> Result<()> {
     let path = resolve_repo_path(path)?;
 
@@ -400,12 +521,13 @@ fn handle_index(
         use crate::query_expander::QueryExpander;
         if let Err(e) = QueryExpander::new() {
             eprintln!(
-                "{} Query expander download failed: {} (search will use heuristics)",
-                style("⚠").yellow(),
+                "[warn] Query expander download failed: {} (search will use heuristics)",
                 e
             );
         }
     }
+
+    let remote_store = build_remote_store(remote_flag, &path)?;
 
     let indexer = indexer::Indexer::new(embedder.clone());
     let report = indexer
@@ -418,9 +540,13 @@ fn handle_index(
         })
         .context("Failed to build index")?;
 
+    if let Some(remote) = remote_store {
+        push_remote_index(&path, &remote)?;
+        eprintln!("[ok] Remote index pushed to {}", remote.name());
+    }
+
     println!(
-        "{} Indexed {} files ({} chunks) in {}",
-        style("✔").green(),
+        "[ok] Indexed {} files ({} chunks) in {}",
         report.files_indexed,
         report.chunks_indexed,
         HumanDuration(report.duration)
@@ -467,10 +593,14 @@ fn handle_search(
 ) -> Result<()> {
     let start = Instant::now();
 
+    if let Some(remote) = params.remote.clone() {
+        return handle_remote_search(embedder, params, remote, start);
+    }
+
     let reranker = if params.no_rerank {
         None
     } else {
-        build_reranker_silent(params.json)
+        build_reranker_silent(params.json, params.offload)
     };
 
     let mut engine = match &reranker {
@@ -480,7 +610,7 @@ fn handle_search(
 
     if let Err(e) = engine.enable_query_expander_silent() {
         if !params.json {
-            eprintln!("{} Query expander unavailable: {}", style("⚠").yellow(), e);
+            eprintln!("[warn] Query expander unavailable: {}", e);
         }
     }
 
@@ -548,6 +678,119 @@ fn handle_search(
     })
 }
 
+fn handle_remote_search(
+    embedder: Arc<dyn embedding::BatchEmbedder>,
+    params: SearchParams<'_>,
+    remote: Arc<dyn RemoteVectorStore>,
+    start: Instant,
+) -> Result<()> {
+    let query_vec = embedder.embed(params.query)?;
+    let hits = remote.query(&query_vec, params.limit)?;
+
+    let results: Vec<search::SearchResult> = hits
+        .into_iter()
+        .map(|h| {
+            let chunk = crate::chunker::CodeChunk {
+                id: Uuid::new_v4(),
+                path: Path::new(&h.path).to_path_buf(),
+                language: h.language,
+                start_line: h.start_line,
+                end_line: h.end_line,
+                text: h.content,
+                hash: h.id.clone(),
+                modified_at: Utc::now(),
+            };
+            search::SearchResult {
+                chunk,
+                score: h.score,
+                semantic_score: h.score,
+                bm25_score: 0.0,
+                show_full_context: params.context,
+            }
+        })
+        .collect();
+
+    let elapsed = start.elapsed();
+    let store = store::IndexStore::new(params.path)?;
+    let metadata = store::IndexMetadata {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        repo_path: params.path.to_path_buf(),
+        repo_hash: store.repo_hash().to_string(),
+        vector_dim: embedder.dimension(),
+        indexed_at: Utc::now(),
+        total_files: 0,
+        total_chunks: results.len(),
+    };
+    let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
+
+    render_results(RenderContext {
+        results,
+        query: params.query,
+        limit: params.limit,
+        index: &index,
+        elapsed,
+        json: params.json,
+        debug: params.debug,
+    })
+}
+
+fn build_remote_store(
+    remote_flag: bool,
+    path: &Path,
+) -> Result<Option<Arc<dyn RemoteVectorStore>>> {
+    let mut config = Config::load().unwrap_or_default();
+    let has_inferred_provider = config.pinecone.api_key.is_some()
+        && config.pinecone.endpoint.is_some()
+        || config.turbopuffer.api_key.is_some();
+
+    if !remote_flag && config.remote_provider.is_none() && !has_inferred_provider {
+        return Ok(None);
+    }
+
+    let store = store::IndexStore::new(path)?;
+    let repo_hash = store.repo_hash().to_string();
+
+    if remote_flag && config.remote_provider == Some(RemoteProviderType::None) {
+        config.remote_provider = None;
+    }
+
+    let remote = RemoteFactory::build_from_config(&config, &repo_hash)?;
+    if remote_flag && remote.is_none() {
+        return Err(anyhow!(
+            "--remote requested but no provider configured. Configure [turbopuffer] or [pinecone], or set remote_provider."
+        ));
+    }
+
+    Ok(remote)
+}
+
+fn push_remote_index(path: &Path, remote: &Arc<dyn RemoteVectorStore>) -> Result<()> {
+    let store = store::IndexStore::new(path)?;
+    let Some(index) = store.load()? else {
+        return Err(anyhow!(
+            "Remote push requested but no local index found for {}",
+            path.display()
+        ));
+    };
+
+    let chunks: Vec<RemoteChunk> = index
+        .chunks
+        .iter()
+        .zip(index.vectors.iter())
+        .map(|(chunk, vec)| RemoteChunk {
+            id: chunk.hash.clone(),
+            vector: vec.clone(),
+            path: chunk.path.display().to_string(),
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            content: chunk.text.clone(),
+            language: chunk.language.clone(),
+        })
+        .collect();
+
+    remote.upsert(&chunks)
+}
+
 fn handle_watch(
     embedder: Arc<dyn embedding::BatchEmbedder>,
     path: Option<std::path::PathBuf>,
@@ -602,8 +845,7 @@ fn rebuild_index(
     embedder: Arc<dyn embedding::BatchEmbedder>,
 ) -> Result<store::RepositoryIndex> {
     eprintln!(
-        "{} Building index for {} (this happens once per repo)",
-        style("ℹ").cyan(),
+        "[info] Building index for {} (this happens once per repo)",
         path.display()
     );
 
@@ -619,8 +861,7 @@ fn rebuild_index(
         .with_context(|| format!("Index build failed for {}", path.display()))?;
 
     eprintln!(
-        "{} Indexed {} files ({} chunks) in {}",
-        style("✔").green(),
+        "[ok] Indexed {} files ({} chunks) in {}",
         report.files_indexed,
         report.chunks_indexed,
         HumanDuration(report.duration)
@@ -667,7 +908,7 @@ fn render_results(ctx: RenderContext<'_>) -> Result<()> {
             JsonResponse::from_results(ctx.query, ctx.limit, ctx.results, ctx.index, ctx.elapsed);
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if ctx.results.is_empty() {
-        println!("{} No matches found", style("⚠").yellow());
+        println!("[warn] No matches found");
     } else {
         for (idx, result) in ctx.results.iter().enumerate() {
             let header = format!(
@@ -677,7 +918,7 @@ fn render_results(ctx: RenderContext<'_>) -> Result<()> {
                 result.chunk.start_line,
                 result.chunk.end_line,
             );
-            println!("{} {}", style("→").cyan(), style(header).bold());
+            println!("-> {}", style(header).bold());
             if ctx.debug {
                 println!(
                     "    score: {:.2} | semantic: {:.2} | bm25: {:.2}",
@@ -688,12 +929,7 @@ fn render_results(ctx: RenderContext<'_>) -> Result<()> {
             println!();
         }
         if ctx.debug {
-            println!(
-                "{} {} results in {:?}",
-                style("ℹ").cyan(),
-                ctx.results.len(),
-                ctx.elapsed
-            );
+            println!("[info] {} results in {:?}", ctx.results.len(), ctx.elapsed);
         }
     }
     Ok(())
@@ -712,7 +948,6 @@ mod tests {
     use super::*;
     use crate::chunker::CodeChunk;
     use crate::store::{IndexMetadata, RepositoryIndex};
-    use chrono::Utc;
     use serial_test::serial;
     use std::any::type_name_of_val;
     use std::ffi::OsString;
@@ -762,6 +997,8 @@ mod tests {
                 profile: false,
                 stats,
                 json: false,
+                offload: false,
+                remote: false,
                 detach,
             },
         }
@@ -833,7 +1070,7 @@ mod tests {
         env::remove_var("SGREP_DEVICE");
         // Use non-existent config to force local provider
         env::set_var("SGREP_CONFIG", "/nonexistent/config.toml");
-        let _ = build_embedder(true, Some("cpu".into())).unwrap();
+        let _ = build_embedder(true, Some("cpu".into()), false).unwrap();
         assert_eq!(env::var("TOKENIZERS_PARALLELISM").unwrap(), "true");
         assert_eq!(env::var("SGREP_OFFLINE").unwrap(), "1");
         assert_eq!(env::var("SGREP_DEVICE").unwrap(), "cpu");
@@ -877,7 +1114,7 @@ mod tests {
     #[test]
     fn build_embedder_respects_use_pooled_flag() {
         env::set_var("SGREP_USE_POOLED_EMBEDDER", "false");
-        let embedder = build_embedder(false, None).unwrap();
+        let embedder = build_embedder(false, None, false).unwrap();
         let ty = type_name_of_val(embedder.as_ref());
         assert!(
             ty.contains("Embedder"),
@@ -893,7 +1130,7 @@ mod tests {
         let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
-        handle_index(embedder, Some(repo.clone()), true, Some(32), true)
+        handle_index(embedder, Some(repo.clone()), true, Some(32), true, false)
             .expect("indexing should succeed");
         std::fs::remove_dir_all(&repo).ok();
     }
@@ -907,7 +1144,7 @@ mod tests {
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
 
         // No files means cache_hits + cache_misses = 0, exercising the zero-hit-rate branch.
-        handle_index(embedder, Some(repo.clone()), true, None, true).unwrap();
+        handle_index(embedder, Some(repo.clone()), true, None, true, false).unwrap();
 
         std::fs::remove_dir_all(&repo).ok();
     }
@@ -919,9 +1156,17 @@ mod tests {
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
 
-        handle_index(embedder.clone(), Some(repo.clone()), true, None, true).unwrap();
+        handle_index(
+            embedder.clone(),
+            Some(repo.clone()),
+            true,
+            None,
+            true,
+            false,
+        )
+        .unwrap();
         // second run should see cache hits > 0 and exercise hit-rate branch
-        handle_index(embedder, Some(repo.clone()), false, None, true).unwrap();
+        handle_index(embedder, Some(repo.clone()), false, None, true, false).unwrap();
 
         std::fs::remove_dir_all(&repo).ok();
     }
@@ -1082,6 +1327,9 @@ mod tests {
                 profile: false,
                 stats: false,
                 json: false,
+                offload: false,
+                remote: false,
+                detach: false,
             },
         };
         run_with_cli(cli).unwrap();
@@ -1102,6 +1350,9 @@ mod tests {
                 path: Some(repo.clone()),
                 debounce_ms: 50,
                 batch_size: Some(16),
+                offload: false,
+                remote: false,
+                detach: false,
             },
         };
         run_with_cli(cli).unwrap();
@@ -1142,6 +1393,8 @@ mod tests {
                 debug: false,
                 no_rerank: false,
                 rerank_oversample: 3,
+                offload: false,
+                remote: false,
             },
         };
         run_with_cli(cli).unwrap();
@@ -1243,6 +1496,8 @@ mod tests {
             debug: true,
             no_rerank: false,
             rerank_oversample: 3,
+            offload: false,
+            remote: None,
         };
 
         assert_eq!(params.query, "test query");
@@ -1255,6 +1510,7 @@ mod tests {
         assert!(params.debug);
         assert!(!params.no_rerank);
         assert_eq!(params.rerank_oversample, 3);
+        assert!(!params.offload);
     }
 
     #[test]

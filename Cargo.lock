@@ -3150,6 +3150,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "simsimd",
+ "tempfile",
  "thiserror 1.0.69",
  "toml",
  "tracing",

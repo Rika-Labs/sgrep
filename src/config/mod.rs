@@ -9,6 +9,7 @@ use serde::Deserialize;
 pub enum EmbeddingProviderType {
     #[default]
     Local,
+    Modal,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -18,11 +19,98 @@ pub struct EmbeddingConfig {
     pub provider: EmbeddingProviderType,
 }
 
+/// Configuration for Modal.dev offload
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModalConfig {
+    /// Modal token ID for CLI authentication (ak-... format, from modal.com/settings)
+    pub token_id: Option<String>,
+    /// Modal token secret for CLI authentication (as-... format, from modal.com/settings)
+    pub token_secret: Option<String>,
+    /// Modal proxy token ID for endpoint auth (wk-... format, from modal.com/settings)
+    pub proxy_token_id: Option<String>,
+    /// Modal proxy token secret for endpoint auth (ws-... format, from modal.com/settings)
+    pub proxy_token_secret: Option<String>,
+    /// GPU tier: "budget" (T4), "balanced" (A10G), "high" (L40S)
+    #[serde(default = "default_gpu_tier")]
+    pub gpu_tier: String,
+    /// Batch size for embedding requests
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// Cached endpoint URL (auto-populated after first deploy)
+    pub endpoint: Option<String>,
+}
+
+fn default_gpu_tier() -> String {
+    "high".to_string()
+}
+
+fn default_batch_size() -> usize {
+    128 // Optimized for GPU workloads (L40S can handle 128-256 easily)
+}
+
+/// Configuration for Turbopuffer remote storage
+#[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code)]
+pub struct TurbopufferConfig {
+    /// Turbopuffer API key
+    pub api_key: Option<String>,
+    /// Region (default: gcp-us-central1)
+    #[serde(default = "default_region")]
+    pub region: String,
+    /// Custom namespace prefix (default: "sgrep")
+    #[serde(default = "default_namespace_prefix")]
+    pub namespace_prefix: String,
+    /// Optional request timeout seconds
+    #[serde(default = "default_remote_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_region() -> String {
+    "gcp-us-central1".to_string()
+}
+
+fn default_namespace_prefix() -> String {
+    "sgrep".to_string()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteProviderType {
+    Turbopuffer,
+    Pinecone,
+    #[default]
+    None,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PineconeConfig {
+    pub api_key: Option<String>,
+    /// Fully qualified endpoint, e.g. https://YOUR-INDEX-XXXX.svc.us-east1-gcp.pinecone.io
+    pub endpoint: Option<String>,
+    /// Optional namespace override (defaults to repo hash)
+    pub namespace: Option<String>,
+    /// Optional request timeout seconds
+    #[serde(default = "default_remote_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_remote_timeout_secs() -> u64 {
+    120
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
 pub struct Config {
     #[serde(default)]
     pub embedding: EmbeddingConfig,
+    #[serde(default)]
+    pub modal: ModalConfig,
+    #[serde(default)]
+    pub turbopuffer: TurbopufferConfig,
+    #[serde(default)]
+    pub pinecone: PineconeConfig,
+    /// Optional explicit remote provider; if unset we infer from configured provider sections.
+    pub remote_provider: Option<RemoteProviderType>,
 }
 
 #[allow(dead_code)]
@@ -170,5 +258,132 @@ provider = "local"
 
         env::remove_var("SGREP_CONFIG");
         std::fs::remove_dir_all(&temp).ok();
+    }
+
+    // Modal config tests
+    #[test]
+    fn parse_modal_config() {
+        let toml = r#"
+[embedding]
+provider = "modal"
+
+[modal]
+token_id = "ak-test"
+token_secret = "as-test"
+proxy_token_id = "wk-proxy-test"
+proxy_token_secret = "ws-proxy-test"
+gpu_tier = "balanced"
+batch_size = 64
+endpoint = "https://example.modal.run"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
+        assert_eq!(config.modal.token_id, Some("ak-test".to_string()));
+        assert_eq!(config.modal.token_secret, Some("as-test".to_string()));
+        assert_eq!(
+            config.modal.proxy_token_id,
+            Some("wk-proxy-test".to_string())
+        );
+        assert_eq!(
+            config.modal.proxy_token_secret,
+            Some("ws-proxy-test".to_string())
+        );
+        assert_eq!(config.modal.gpu_tier, "balanced");
+        assert_eq!(config.modal.batch_size, 64);
+        assert_eq!(
+            config.modal.endpoint,
+            Some("https://example.modal.run".to_string())
+        );
+    }
+
+    #[test]
+    fn modal_config_defaults() {
+        let toml = r#"
+[modal]
+token_id = "ak-test"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.modal.gpu_tier, "high");
+        assert_eq!(config.modal.batch_size, 128);
+        assert_eq!(config.modal.endpoint, None);
+    }
+
+    #[test]
+    fn empty_config_has_modal_defaults() {
+        let config = Config::default();
+        assert_eq!(config.modal.gpu_tier, "");
+    }
+
+    // Turbopuffer config tests
+    #[test]
+    fn parse_turbopuffer_config() {
+        let toml = r#"
+[turbopuffer]
+api_key = "tpuf_test_key"
+region = "aws-us-east-1"
+namespace_prefix = "myproject"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.turbopuffer.api_key,
+            Some("tpuf_test_key".to_string())
+        );
+        assert_eq!(config.turbopuffer.region, "aws-us-east-1");
+        assert_eq!(config.turbopuffer.namespace_prefix, "myproject");
+    }
+
+    #[test]
+    fn turbopuffer_config_defaults() {
+        let toml = r#"
+[turbopuffer]
+api_key = "tpuf_test_key"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.turbopuffer.region, "gcp-us-central1");
+        assert_eq!(config.turbopuffer.namespace_prefix, "sgrep");
+    }
+
+    // Combined config test
+    #[test]
+    fn parse_full_config() {
+        let toml = r#"
+[embedding]
+provider = "modal"
+
+[modal]
+token_id = "ak-test"
+token_secret = "as-test"
+proxy_token_id = "wk-proxy"
+proxy_token_secret = "ws-proxy"
+gpu_tier = "high"
+
+[turbopuffer]
+api_key = "tpuf-key"
+region = "gcp-us-central1"
+namespace_prefix = "acme"
+
+[pinecone]
+api_key = "pc-key"
+endpoint = "https://idx.svc.test.pinecone.io"
+namespace = "ns"
+
+remote_provider = "turbopuffer"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
+        assert_eq!(config.modal.token_id, Some("ak-test".to_string()));
+        assert_eq!(config.modal.proxy_token_id, Some("wk-proxy".to_string()));
+        assert_eq!(config.turbopuffer.api_key, Some("tpuf-key".to_string()));
+        assert_eq!(config.turbopuffer.namespace_prefix, "acme");
+        assert_eq!(config.pinecone.api_key, Some("pc-key".to_string()));
+        assert_eq!(
+            config.pinecone.endpoint,
+            Some("https://idx.svc.test.pinecone.io".to_string())
+        );
+        assert_eq!(config.pinecone.namespace, Some("ns".to_string()));
+        assert_eq!(
+            config.remote_provider,
+            Some(RemoteProviderType::Turbopuffer)
+        );
     }
 }

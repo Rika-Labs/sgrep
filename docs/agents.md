@@ -9,7 +9,7 @@ sgrep is built for programmatic use: every command supports JSON output (`--json
 /plugin install sgrep
 ```
 
-The plugin manages `sgrep watch` and surfaces search results to the agent. Details: `plugins/sgrep/README.md`.
+The plugin manages `sgrep watch` and surfaces search results to the agent. Details: [plugins/sgrep/README.md](../plugins/sgrep/README.md).
 
 ## Factory skill
 
@@ -17,7 +17,7 @@ The plugin manages `sgrep watch` and surfaces search results to the agent. Detai
 curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-skill.sh | sh
 ```
 
-Installs to `~/.factory/skills/sgrep/`. Restart Factory after install. Details: `.factory/skills/sgrep/SKILL.md`.
+Installs to `~/.factory/skills/sgrep/`. Restart Factory after install. Details: [.factory/skills/sgrep/SKILL.md](../.factory/skills/sgrep/SKILL.md).
 
 ## OpenCode plugin
 
@@ -29,7 +29,22 @@ Add to your OpenCode configuration:
 }
 ```
 
-Details: `plugins/opencode/README.md`.
+Details: [plugins/opencode/README.md](../plugins/opencode/README.md).
+
+## Cloud offload for agents
+
+For cloud-based agents or when local GPU isn't available, use [Modal.dev](https://modal.com) for GPU-accelerated embeddings:
+
+```bash
+export SGREP_MODAL_TOKEN="your-token"
+sgrep search --offload --json "find authentication logic"
+```
+
+This auto-deploys a Modal service with:
+- **Qwen3-Embedding-8B**: 8K context window, 4096-dimensional embeddings
+- **Qwen3-Reranker-8B**: Cross-encoder reranking for improved accuracy
+
+See [configuration.md](configuration.md) for GPU tier options and full configuration.
 
 ## Roll your own
 
@@ -37,3 +52,4 @@ Details: `plugins/opencode/README.md`.
 - Start a watcher for the repo you care about: `sgrep watch`.
 - Query with JSON output: `sgrep search --json "find the auth middleware"`.
 - Add `--context` when the full chunk text is needed.
+- Add `--offload` to use Modal.dev GPUs instead of local embeddings.

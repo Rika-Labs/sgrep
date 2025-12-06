@@ -335,11 +335,7 @@ impl Indexer {
             pb.set_position(total_files as u64);
             pb.finish_with_message("all cached");
         } else {
-            pb.set_message("loading AI model...");
-            let _ = self.embedder.embed(&pending_chunks[0].1);
-
             let total_pending = pending_chunks.len();
-            let chunks_done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
             pb.set_style(
                 ProgressStyle::with_template(
@@ -351,21 +347,20 @@ impl Indexer {
             pb.set_position(0);
             pb.set_message("embedding...");
 
-            let embedder = &self.embedder;
-            let chunks_done_ref = &chunks_done;
-            let pb_ref = &pb;
-            let results: Vec<Result<(usize, Vec<f32>)>> = pending_chunks
-                .par_iter()
-                .map(|(idx, text)| {
-                    let vec = embedder.embed(text)?;
-                    let done = chunks_done_ref.fetch_add(1, Ordering::Relaxed) + 1;
-                    pb_ref.set_position(done as u64);
-                    Ok((*idx, vec))
-                })
+            // Collect all texts for batch embedding (much faster for remote embedders like Modal)
+            let texts: Vec<String> = pending_chunks
+                .iter()
+                .map(|(_, text)| text.clone())
                 .collect();
+            let indices: Vec<usize> = pending_chunks.iter().map(|(idx, _)| *idx).collect();
 
-            for result in results {
-                let (idx, vec) = result?;
+            // Embed in batches using embed_batch for efficiency
+            let all_embeddings = self.embedder.embed_batch(&texts)?;
+
+            pb.set_position(total_pending as u64);
+
+            for (i, vec) in all_embeddings.into_iter().enumerate() {
+                let idx = indices[i];
                 vectors[idx] = Some(vec);
                 embedded_chunks.insert(idx);
             }
@@ -909,6 +904,13 @@ mod tests {
         assert!(report.duration.as_secs() < 60);
 
         fs::remove_dir_all(&test_repo).ok();
+    }
+
+    #[test]
+    fn warmup_executes() {
+        let embedder = Arc::new(DeterministicEmbedder::default());
+        let indexer = Indexer::new_concrete(embedder);
+        assert!(indexer.warmup().is_ok());
     }
 
     #[test]
