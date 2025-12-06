@@ -101,14 +101,14 @@ class Embedder:
 
         Args:
             texts: List of texts to embed (max 1000 per request)
-            dimension: Output dimension (default 384 to match local embedder)
+            dimension: Must be 384 to match local embedder for compatibility
         """
         if not texts:
             return []
         if len(texts) > 1000:
             raise ValueError(f"Too many texts: {len(texts)} > 1000 max")
-        if not 1 <= dimension <= 8192:
-            raise ValueError(f"Invalid dimension: {dimension} (must be 1-8192)")
+        if dimension != 384:
+            raise ValueError(f"Dimension must be 384 for local/remote compatibility, got {dimension}")
 
         outputs = self.model.embed(texts)
         return [list(out.outputs.embedding[:dimension]) for out in outputs]

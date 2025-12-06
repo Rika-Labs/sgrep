@@ -8,6 +8,7 @@ use crate::reranker::Reranker;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120; // Match embedder timeout
 const MAX_RETRIES: usize = 3;
+const MAX_DOCUMENTS: usize = 500;
 
 #[derive(Serialize)]
 struct RerankRequest {
@@ -62,6 +63,18 @@ impl ModalReranker {
     ) -> Result<Vec<(usize, f32)>> {
         if documents.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // Validate inputs to match Python service constraints
+        if documents.len() > MAX_DOCUMENTS {
+            return Err(anyhow!(
+                "Too many documents: {} > {} max",
+                documents.len(),
+                MAX_DOCUMENTS
+            ));
+        }
+        if query.trim().is_empty() {
+            return Err(anyhow!("Query cannot be empty"));
         }
 
         let request = RerankRequest {
@@ -188,5 +201,23 @@ mod tests {
         assert_eq!(response.results.len(), 2);
         assert_eq!(response.results[0].index, 1);
         assert!((response.results[0].score - 0.95).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn rerank_rejects_empty_query() {
+        let reranker = ModalReranker::new("https://rerank.modal.run".to_string(), None, None);
+        let docs = vec!["doc1".to_string()];
+        let result = reranker.rerank("", &docs, 10);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Query cannot be empty"));
+    }
+
+    #[test]
+    fn rerank_rejects_whitespace_only_query() {
+        let reranker = ModalReranker::new("https://rerank.modal.run".to_string(), None, None);
+        let docs = vec!["doc1".to_string()];
+        let result = reranker.rerank("   ", &docs, 10);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Query cannot be empty"));
     }
 }

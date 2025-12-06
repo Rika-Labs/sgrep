@@ -82,9 +82,13 @@ impl ModalDeployer {
         }
 
         // No tokens in config - check if already authenticated via modal CLI
-        let token_check = Command::new("modal").args(["token", "show"]).output();
+        let is_authenticated = Command::new("modal")
+            .args(["token", "show"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
 
-        if token_check.is_err() || !token_check.unwrap().status.success() {
+        if !is_authenticated {
             return Err(anyhow!(
                 "Modal CLI not authenticated.\n\
                  Either:\n\
@@ -152,8 +156,12 @@ impl ModalDeployer {
             self.gpu_tier
         );
 
+        let service_path_str = service_path
+            .to_str()
+            .ok_or_else(|| anyhow!("Service path contains invalid UTF-8"))?;
+
         let output = self
-            .modal_command(&["deploy", service_path.to_str().unwrap()])
+            .modal_command(&["deploy", service_path_str])
             .env("GPU_TIER", &self.gpu_tier)
             .output()
             .context("Failed to run modal deploy")?;

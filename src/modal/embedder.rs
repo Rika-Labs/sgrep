@@ -34,6 +34,9 @@ pub struct ModalEmbedder {
     batch_size: usize,
 }
 
+const MAX_TEXTS_PER_REQUEST: usize = 1000;
+const REQUIRED_DIMENSION: usize = 384; // Must match local embedder for compatibility
+
 impl ModalEmbedder {
     pub fn new(
         endpoint: String,
@@ -105,6 +108,22 @@ impl BatchEmbedder for ModalEmbedder {
             return Ok(Vec::new());
         }
 
+        // Validate inputs to match Python service constraints
+        if texts.len() > MAX_TEXTS_PER_REQUEST {
+            return Err(anyhow!(
+                "Too many texts: {} > {} max",
+                texts.len(),
+                MAX_TEXTS_PER_REQUEST
+            ));
+        }
+        if self.dimension != REQUIRED_DIMENSION {
+            return Err(anyhow!(
+                "Dimension must be {} for local/remote compatibility, got {}",
+                REQUIRED_DIMENSION,
+                self.dimension
+            ));
+        }
+
         let mut all_embeddings = Vec::with_capacity(texts.len());
 
         for chunk in texts.chunks(self.batch_size) {
@@ -153,12 +172,12 @@ mod tests {
     fn new_embedder_has_correct_fields() {
         let embedder = ModalEmbedder::new(
             "https://embed.modal.run".to_string(),
-            4096,
+            384,
             Some("wk-proxy-id".to_string()),
             Some("ws-proxy-secret".to_string()),
         );
         assert_eq!(embedder.endpoint, "https://embed.modal.run");
-        assert_eq!(embedder.dimension, 4096);
+        assert_eq!(embedder.dimension, 384);
         assert_eq!(embedder.proxy_token_id, Some("wk-proxy-id".to_string()));
         assert_eq!(embedder.proxy_token_secret, Some("ws-proxy-secret".to_string()));
         assert_eq!(embedder.batch_size, DEFAULT_BATCH_SIZE);
@@ -167,20 +186,20 @@ mod tests {
     #[test]
     fn with_batch_size_sets_batch_size() {
         let embedder =
-            ModalEmbedder::new("https://embed.modal.run".to_string(), 4096, None, None)
+            ModalEmbedder::new("https://embed.modal.run".to_string(), 384, None, None)
                 .with_batch_size(64);
         assert_eq!(embedder.batch_size, 64);
     }
 
     #[test]
     fn dimension_returns_correct_value() {
-        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 1024, None, None);
-        assert_eq!(embedder.dimension(), 1024);
+        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 384, None, None);
+        assert_eq!(embedder.dimension(), 384);
     }
 
     #[test]
     fn embed_batch_returns_empty_for_empty_input() {
-        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 4096, None, None);
+        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 384, None, None);
         let result = embedder.embed_batch(&[]);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
@@ -190,11 +209,11 @@ mod tests {
     fn embed_request_serialization() {
         let request = EmbedRequest {
             texts: vec!["hello".to_string(), "world".to_string()],
-            dimension: 4096,
+            dimension: 384,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("hello"));
-        assert!(json.contains("4096"));
+        assert!(json.contains("384"));
     }
 
     #[test]
@@ -207,5 +226,24 @@ mod tests {
         let response: EmbedResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.embeddings.len(), 2);
         assert_eq!(response.embeddings[0], vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn embed_batch_rejects_wrong_dimension() {
+        // Must be exactly 384 for local/remote compatibility
+        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 4096, None, None);
+        let result = embedder.embed_batch(&["test".to_string()]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Dimension must be 384"));
+        assert!(err.contains("got 4096"));
+    }
+
+    #[test]
+    fn embed_batch_rejects_dimension_zero() {
+        let embedder = ModalEmbedder::new("https://embed.modal.run".to_string(), 0, None, None);
+        let result = embedder.embed_batch(&["test".to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Dimension must be 384"));
     }
 }
