@@ -1,69 +1,56 @@
 <div align="center">
 
   <h1>sgrep</h1>
-  <p><em>Fast, private, local semantic code search.</em></p>
+  <p><em>Semantic code search that works your way.</em></p>
   <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a>
 
 </div>
 
-Fast, private, local semantic code search for developers and coding agents.
+AI-powered code search with flexible deployment—from fully private local processing to cloud-scale GPU offloading.
 
-- **Local-first**: ONNX embeddings run on your machine; `--offline` blocks network calls
-- **Hybrid ranking**: tree-sitter chunks, dense vectors, BM25F keyword scoring, cross-encoder reranking
-- **Cloud-optional**: Offload to [Modal.dev](https://modal.com) GPUs or store indexes in [Turbopuffer](https://turbopuffer.com)
-- **Agent-ready**: JSON output and background watcher keep results fresh
-
-## Three commands
+## Quick Start
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install.sh | sh
 sgrep index
-sgrep watch
 sgrep search "where do we handle authentication?"
 ```
 
-Run `sgrep index` from the repo you want searched; it writes the index to your sgrep data dir.
+## Deploy Your Way
 
-Prefer source builds? Run `cargo install --path .` from the repo root.
+sgrep adapts to your privacy, performance, and scale needs:
 
-## What happens on first run
+```
+┌─────────────────┬───────────────────┬───────────────────────┐
+│                 │   Store Locally   │   Store Remotely      │
+│                 │   (default)       │   (Pinecone/Turbo)    │
+├─────────────────┼───────────────────┼───────────────────────┤
+│ Process Locally │ ✓ Fully Private   │ ✓ Scale Storage       │
+│ (default)       │   Zero Cloud      │   Private Embeddings  │
+├─────────────────┼───────────────────┼───────────────────────┤
+│ Offload to GPU  │ ✓ Fast Indexing   │ ✓ Full Cloud Scale    │
+│ (Modal.dev)     │   Data Stays Local│   Maximum Speed       │
+└─────────────────┴───────────────────┴───────────────────────┘
+```
 
-- Downloads `jina-embeddings-v2-base-code` once to the fastembed cache (honors `HTTP(S)_PROXY`).
-- Indexes the repo you run it in into `SGREP_HOME` (default: OS data dir such as `~/.local/share/sgrep` or `~/.sgrep`).
-- `--offline` or `SGREP_OFFLINE=1` forbids network access and fails fast if the model is missing.
+Start local and private. Scale up when you need to. [Learn more →](docs/deployment.md)
 
-## Platforms
+## Documentation
 
-- macOS and Linux (arm64 and x86_64) via the install script.
-- Windows: use WSL or a Linux container.
+| Guide | Description |
+|-------|-------------|
+| [Quick Start](docs/quickstart.md) | Get searching in 2 minutes |
+| [Deployment Options](docs/deployment.md) | Local, remote, and hybrid setups |
+| [Configuration](docs/configuration.md) | Flags, env vars, and config files |
+| [Agent Integrations](docs/agents.md) | Claude Code, Factory, OpenCode |
+| [Offline Mode](docs/offline.md) | Airgapped and proxy environments |
 
 ## Integrations
 
-| Integration | Description |
-|-------------|-------------|
-| [Claude Code Plugin](plugins/sgrep/README.md) | Automatic index management and search skill for Claude Code |
-| [OpenCode Plugin](plugins/opencode/README.md) | MCP tool for OpenCode |
-| [Modal.dev](https://modal.com) | GPU-accelerated embeddings with Qwen3-Embedding-8B (outputs truncated to 384 dims for local compatibility) |
-| [Turbopuffer](https://turbopuffer.com) | Serverless vector storage for remote indexes (Pinecone also supported via config) |
-
-### Cloud offload (optional)
-
-Run embeddings on Modal.dev GPUs instead of locally (authenticate via `modal token new` or set `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`):
-
-```bash
-export MODAL_TOKEN_ID="ak-..."
-export MODAL_TOKEN_SECRET="as-..."
-sgrep search --offload "where do we handle auth?"
-```
-
-Auto-deploys a Modal service with Qwen3-Embedding-8B (384-dim outputs) and Qwen3-Reranker-8B. See [docs/configuration.md](docs/configuration.md) for GPU tier options.
-
-## Learn more
-
-- [Quickstart](docs/quickstart.md)
-- [Flags and config](docs/configuration.md)
-- [Offline and airgapped installs](docs/offline.md)
-- [Agent integrations](docs/agents.md)
+- **[Claude Code Plugin](plugins/sgrep/README.md)** — Automatic index management and search skill
+- **[OpenCode Plugin](plugins/opencode/README.md)** — MCP tool integration
+- **[Modal.dev](https://modal.com)** — GPU-accelerated embeddings (Qwen3-Embedding-8B)
+- **[Turbopuffer](https://turbopuffer.com) / [Pinecone](https://pinecone.io)** — Serverless vector storage
 
 ## License
 

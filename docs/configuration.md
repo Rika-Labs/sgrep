@@ -135,14 +135,143 @@ remote_provider = "pinecone"  # or "turbopuffer"; inferred if only one is config
 
 ## Environment variables
 
-- `SGREP_HOME` to relocate indexes and config (default OS data dir such as `~/.local/share/sgrep`)
-- `FASTEMBED_CACHE_DIR` to relocate the embedding cache (default OS cache dir such as `~/.local/share/sgrep/cache/fastembed`)
-- `SGREP_INIT_TIMEOUT_SECS` to extend model startup (default `120`)
-- `SGREP_DEVICE`, `SGREP_OFFLINE`, `SGREP_MAX_THREADS`, `SGREP_CPU_PRESET` for the matching global flags
-- `MODAL_TOKEN_ID` for Modal CLI authentication (token ID from modal.com/settings)
-- `MODAL_TOKEN_SECRET` for Modal CLI authentication (token secret from modal.com/settings)
-- `SGREP_OFFLOAD` to enable Modal.dev offload (`1` or `true`)
-- `SGREP_REMOTE` to enable remote vector storage (Pinecone or Turbopuffer) when the command supports it
-- `HTTP_PROXY` / `HTTPS_PROXY` for model downloads
-- `RUST_LOG` for tracing (e.g., `sgrep=debug`)
-- `RAYON_NUM_THREADS` to hard-cap the Rayon pool
+### Core Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SGREP_HOME` | `~/.sgrep` | Index and config directory |
+| `SGREP_CONFIG` | `$SGREP_HOME/config.toml` | Config file path override |
+| `FASTEMBED_CACHE_DIR` | `$SGREP_HOME/cache/fastembed` | Model weights cache |
+
+### Runtime Flags
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SGREP_DEVICE` | `cpu` | Inference device: `cpu`, `cuda`, `coreml` |
+| `SGREP_OFFLINE` | `0` | Block network calls (`1` or `true`) |
+| `SGREP_OFFLOAD` | `0` | Enable Modal.dev GPU offload |
+| `SGREP_REMOTE` | `0` | Enable remote vector storage |
+| `SGREP_BATCH_SIZE` | auto | Embedding batch size |
+| `SGREP_INIT_TIMEOUT_SECS` | `120` | Model initialization timeout |
+
+### Threading
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SGREP_MAX_THREADS` | all cores | Maximum total threads |
+| `SGREP_CPU_PRESET` | `auto` | Preset: `auto`, `background`, `low`, `medium`, `high` |
+| `RAYON_NUM_THREADS` | auto | Rayon parallel pool size |
+
+### ONNX Runtime (Advanced)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORT_INTRA_OP_NUM_THREADS` | 4 | Threads within operators |
+| `ORT_INTER_OP_NUM_THREADS` | auto | Threads between operators |
+| `ORT_NUM_THREADS` | auto | Legacy thread setting |
+
+### BLAS Backends (Advanced)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OMP_NUM_THREADS` | auto | OpenMP threads |
+| `MKL_NUM_THREADS` | auto | Intel MKL threads |
+| `OPENBLAS_NUM_THREADS` | auto | OpenBLAS threads |
+| `VECLIB_MAXIMUM_THREADS` | auto | macOS Veclib threads |
+
+### Authentication
+
+| Variable | Description |
+|----------|-------------|
+| `MODAL_TOKEN_ID` | Modal CLI token ID (`ak-...`) |
+| `MODAL_TOKEN_SECRET` | Modal CLI token secret (`as-...`) |
+| `PINECONE_API_KEY` | Pinecone API key |
+| `TURBOPUFFER_API_KEY` | Turbopuffer API key |
+
+### Network
+
+| Variable | Description |
+|----------|-------------|
+| `HTTP_PROXY` | HTTP proxy for model downloads |
+| `HTTPS_PROXY` | HTTPS proxy for model downloads |
+
+### Debugging
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `RUST_LOG` | `sgrep=debug` | Log level (trace, debug, info, warn, error) |
+
+---
+
+## JSON Output Schema
+
+Use `--json` for machine-readable output.
+
+### Search Results
+
+```bash
+sgrep search --json "your query"
+```
+
+**Response:**
+
+```json
+{
+  "query": "your query",
+  "elapsed_ms": 123,
+  "index_metadata": {
+    "total_chunks": 1000,
+    "total_files": 50,
+    "embedding_dim": 384,
+    "has_graph": true
+  },
+  "matches": [
+    {
+      "path": "src/auth/handler.rs",
+      "start_line": 10,
+      "end_line": 25,
+      "content": "fn authenticate(user: &User) -> Result<Token> {...}",
+      "score": 0.85
+    }
+  ]
+}
+```
+
+**With `--debug`:**
+
+```json
+{
+  "matches": [
+    {
+      "path": "src/auth/handler.rs",
+      "start_line": 10,
+      "end_line": 25,
+      "content": "...",
+      "score": 0.85,
+      "semantic_score": 0.82,
+      "bm25_score": 0.88
+    }
+  ]
+}
+```
+
+### Index Statistics
+
+```bash
+sgrep index --stats --json
+```
+
+**Response:**
+
+```json
+{
+  "path": "/path/to/repo",
+  "total_chunks": 1234,
+  "total_files": 56,
+  "total_directories": 12,
+  "embedding_dim": 384,
+  "graph_symbols": 789,
+  "graph_edges": 456,
+  "index_size_bytes": 12345678
+}
+```
