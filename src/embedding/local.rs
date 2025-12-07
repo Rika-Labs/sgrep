@@ -176,7 +176,7 @@ impl Embedder {
                 callback(super::EmbedProgress {
                     completed: i + 1,
                     total,
-                    message: Some(format!("{}/{}", i + 1, total)),
+                    message: None,
                 });
             }
         }

@@ -339,17 +339,11 @@ impl Indexer {
             let total_pending = pending_chunks.len();
 
             pb.set_style(
-                ProgressStyle::with_template(
-                    "{spinner:.green} Embedding chunks ({pos}/{len}) • {msg}",
-                )
-                .unwrap_or_else(|_| ProgressStyle::default_bar()),
+                ProgressStyle::with_template("{spinner:.green} Embedding chunks ({pos}/{len})")
+                    .unwrap_or_else(|_| ProgressStyle::default_bar()),
             );
             pb.set_length(total_pending as u64);
             pb.set_position(0);
-            pb.set_message(format!(
-                "{} pending across {} batches; {} cached",
-                total_pending, pending_batches, cache_hits
-            ));
 
             let texts: Vec<String> = pending_chunks
                 .iter()
@@ -360,15 +354,11 @@ impl Indexer {
             let pb_clone = pb.clone();
             let progress_callback: ProgressCallback = Box::new(move |progress: EmbedProgress| {
                 pb_clone.set_position(progress.completed as u64);
-                if let Some(msg) = &progress.message {
-                    pb_clone.set_message(format!("embedding: {}", msg));
-                }
             });
 
             let all_embeddings = self.embedder.embed_batch_with_progress(&texts, Some(&progress_callback))?;
 
             pb.set_position(total_pending as u64);
-            pb.set_message("embedding: received all vectors");
 
             for (i, vec) in all_embeddings.into_iter().enumerate() {
                 let idx = indices[i];
