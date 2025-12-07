@@ -156,6 +156,61 @@ impl Embedder {
         Ok(results)
     }
 
+    pub fn embed_batch_with_progress(
+        &self,
+        texts: &[String],
+        on_progress: Option<&super::ProgressCallback>,
+    ) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let total = texts.len();
+        let sub_batch_size = 32; // Process 32 at a time for progress granularity
+        let mut all_results = Vec::with_capacity(total);
+        let num_batches = (total + sub_batch_size - 1) / sub_batch_size;
+
+        for (batch_idx, chunk) in texts.chunks(sub_batch_size).enumerate() {
+            let mut batch_results = vec![Vec::new(); chunk.len()];
+            let mut uncached = Vec::new();
+            let mut uncached_indices = Vec::new();
+
+            for (i, text) in chunk.iter().enumerate() {
+                if let Some(cached) = self.cache.get(text) {
+                    batch_results[i] = cached.as_ref().clone();
+                } else {
+                    uncached.push(text.as_str());
+                    uncached_indices.push(i);
+                }
+            }
+
+            if !uncached.is_empty() {
+                let mut model = self.model.lock().unwrap();
+                let embeddings = model.embed(uncached.clone(), None)?;
+
+                for (embedding, &idx) in embeddings.iter().zip(&uncached_indices) {
+                    let mut truncated = embedding.clone();
+                    truncated.truncate(DEFAULT_VECTOR_DIM);
+                    batch_results[idx] = truncated.clone();
+                    self.cache.insert(chunk[idx].clone(), Arc::new(truncated));
+                }
+            }
+
+            all_results.extend(batch_results);
+
+            if let Some(callback) = on_progress {
+                let completed = all_results.len();
+                callback(super::EmbedProgress {
+                    completed,
+                    total,
+                    message: Some(format!("batch {}/{}", batch_idx + 1, num_batches)),
+                });
+            }
+        }
+
+        Ok(all_results)
+    }
+
     pub fn dimension(&self) -> usize {
         DEFAULT_VECTOR_DIM
     }
@@ -165,6 +220,14 @@ impl Embedder {
 impl BatchEmbedder for Embedder {
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         Embedder::embed_batch(self, texts)
+    }
+
+    fn embed_batch_with_progress(
+        &self,
+        texts: &[String],
+        on_progress: Option<&super::ProgressCallback>,
+    ) -> Result<Vec<Vec<f32>>> {
+        Embedder::embed_batch_with_progress(self, texts, on_progress)
     }
 
     fn dimension(&self) -> usize {
@@ -262,6 +325,14 @@ impl BatchEmbedder for PooledEmbedder {
 
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         self.get_embedder().embed_batch(texts)
+    }
+
+    fn embed_batch_with_progress(
+        &self,
+        texts: &[String],
+        on_progress: Option<&super::ProgressCallback>,
+    ) -> Result<Vec<Vec<f32>>> {
+        self.get_embedder().embed_batch_with_progress(texts, on_progress)
     }
 
     fn dimension(&self) -> usize {
