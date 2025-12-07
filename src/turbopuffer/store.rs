@@ -80,6 +80,10 @@ impl TurbopufferStore {
         }
     }
 
+    fn should_ignore_delete_status(status: u16) -> bool {
+        status == 404
+    }
+
     fn base_url(&self) -> String {
         format!(
             "https://api.turbopuffer.com/v2/namespaces/{}",
@@ -223,6 +227,12 @@ impl RemoteVectorStore for TurbopufferStore {
                 .call()
             {
                 Ok(_) => return Ok(()),
+                Err(ureq::Error::Status(status, response))
+                    if Self::should_ignore_delete_status(status) =>
+                {
+                    let _ = response.into_string();
+                    return Ok(());
+                }
                 Err(e) => {
                     if attempt < MAX_RETRIES {
                         eprintln!(
@@ -321,5 +331,11 @@ mod tests {
         assert_eq!(result.id, "chunk_123");
         assert!((result.distance - 0.15).abs() < f32::EPSILON);
         assert_eq!(result.path, Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn delete_not_found_status_is_ignored() {
+        assert!(TurbopufferStore::should_ignore_delete_status(404));
+        assert!(!TurbopufferStore::should_ignore_delete_status(500));
     }
 }

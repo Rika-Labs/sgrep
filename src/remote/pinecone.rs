@@ -34,6 +34,10 @@ impl PineconeStore {
             suffix.trim_start_matches('/')
         )
     }
+
+    fn should_ignore_delete_status(status: u16) -> bool {
+        status == 404
+    }
 }
 
 impl RemoteVectorStore for PineconeStore {
@@ -203,7 +207,36 @@ impl RemoteVectorStore for PineconeStore {
 
         match res {
             Ok(_) => Ok(()),
+            Err(ureq::Error::Status(status, response))
+                if Self::should_ignore_delete_status(status) =>
+            {
+                let _ = response.into_string();
+                Ok(())
+            }
+            Err(ureq::Error::Status(status, response)) => {
+                let body = response.into_string().unwrap_or_default();
+                if body.is_empty() {
+                    Err(anyhow!("Pinecone delete failed with status {}", status))
+                } else {
+                    Err(anyhow!(
+                        "Pinecone delete failed with status {}: {}",
+                        status,
+                        body
+                    ))
+                }
+            }
             Err(e) => Err(anyhow!("Pinecone delete failed: {}", e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PineconeStore;
+
+    #[test]
+    fn delete_not_found_status_is_ignored() {
+        assert!(PineconeStore::should_ignore_delete_status(404));
+        assert!(!PineconeStore::should_ignore_delete_status(500));
     }
 }
