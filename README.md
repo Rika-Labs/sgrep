@@ -6,7 +6,7 @@
 
 </div>
 
-AI-powered code search with flexible deployment—from fully private local processing to cloud-scale GPU offloading.
+Semantic powered code search with flexible deployment—from fully private local processing to cloud-scale GPU offloading.
 
 ## Quick Start
 
