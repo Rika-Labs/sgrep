@@ -10,3 +10,4 @@ target/
 /indexes/
 /models/
 __pycache__/
+.npmrc
