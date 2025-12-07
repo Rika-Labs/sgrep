@@ -33,15 +33,16 @@ Details: [plugins/opencode/README.md](../plugins/opencode/README.md).
 
 ## Cloud offload for agents
 
-For cloud-based agents or when local GPU isn't available, use [Modal.dev](https://modal.com) for GPU-accelerated embeddings:
+For cloud-based agents or when local GPU isn't available, use [Modal.dev](https://modal.com) for GPU-accelerated embeddings (authenticate via `modal token new` or set `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`):
 
 ```bash
-export SGREP_MODAL_TOKEN="your-token"
+export MODAL_TOKEN_ID="ak-..."
+export MODAL_TOKEN_SECRET="as-..."
 sgrep search --offload --json "find authentication logic"
 ```
 
 This auto-deploys a Modal service with:
-- **Qwen3-Embedding-8B**: 8K context window, 4096-dimensional embeddings
+- **Qwen3-Embedding-8B**: 8K context window, outputs truncated to 384 dimensions for local compatibility
 - **Qwen3-Reranker-8B**: Cross-encoder reranking for improved accuracy
 
 See [configuration.md](configuration.md) for GPU tier options and full configuration.

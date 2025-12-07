@@ -43,19 +43,20 @@ Prefer source builds? Run `cargo install --path .` from the repo root.
 |-------------|-------------|
 | [Claude Code Plugin](plugins/sgrep/README.md) | Automatic index management and search skill for Claude Code |
 | [OpenCode Plugin](plugins/opencode/README.md) | MCP tool for OpenCode |
-| [Modal.dev](https://modal.com) | GPU-accelerated embeddings with Qwen3-Embedding-8B (8K context, 4096 dims) |
-| [Turbopuffer](https://turbopuffer.com) | Serverless vector storage for remote indexes |
+| [Modal.dev](https://modal.com) | GPU-accelerated embeddings with Qwen3-Embedding-8B (outputs truncated to 384 dims for local compatibility) |
+| [Turbopuffer](https://turbopuffer.com) | Serverless vector storage for remote indexes (Pinecone also supported via config) |
 
 ### Cloud offload (optional)
 
-Run embeddings on Modal.dev GPUs instead of locally:
+Run embeddings on Modal.dev GPUs instead of locally (authenticate via `modal token new` or set `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`):
 
 ```bash
-export SGREP_MODAL_TOKEN="your-token"
+export MODAL_TOKEN_ID="ak-..."
+export MODAL_TOKEN_SECRET="as-..."
 sgrep search --offload "where do we handle auth?"
 ```
 
-Auto-deploys a Modal service with Qwen3-Embedding-8B and Qwen3-Reranker-8B. See [docs/configuration.md](docs/configuration.md) for GPU tier options.
+Auto-deploys a Modal service with Qwen3-Embedding-8B (384-dim outputs) and Qwen3-Reranker-8B. See [docs/configuration.md](docs/configuration.md) for GPU tier options.
 
 ## Learn more
 

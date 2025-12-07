@@ -6,8 +6,8 @@
 - `--offline` (or `SGREP_OFFLINE=1`) to forbid downloads and fail fast if the model is missing
 - `--threads <n>` (or `SGREP_MAX_THREADS`) to bound parallelism
 - `--cpu-preset <auto|low|medium|high|background>` (or `SGREP_CPU_PRESET`)
-- `--offload` (or `SGREP_OFFLOAD=1`) to use [Modal.dev](https://modal.com) for GPU-accelerated embeddings
-- `--remote` (or `SGREP_REMOTE=1`) to use [Turbopuffer](https://turbopuffer.com) for remote vector storage
+  
+Command-specific flags (offload, remote, rerank controls, detach) are listed per subcommand below.
 
 ## Commands
 
@@ -20,12 +20,21 @@
 - `--filters key=value` (repeatable) for metadata filters like `lang=rust`
 - `--json` for structured output
 - `--debug` to surface scores and timings
+- `--no-rerank` to skip cross-encoder reranking
+- `--rerank-oversample <n>` (default `3`) to control candidate pooling before rerank
+- `--offload` (or `SGREP_OFFLOAD=1`) to use [Modal.dev](https://modal.com) for embeddings/reranking
+- `--remote` (or `SGREP_REMOTE=1`) to query a configured remote vector store (Pinecone/Turbopuffer)
 
 ### index
 
 - `--force` for a full rebuild
 - `--batch-size` (or `SGREP_BATCH_SIZE`) to override embedder batch size
 - `--profile` to print per-phase timings
+- `--stats` to print index statistics without rebuilding
+- `--json` to emit stats as JSON (only with `--stats`)
+- `--offload` (or `SGREP_OFFLOAD=1`) to embed via Modal.dev GPUs
+- `--remote` (or `SGREP_REMOTE=1`) to write to a configured remote vector store
+- `--detach` to run indexing in the background (not compatible with `--stats`)
 - `path` argument optional; defaults to the current directory
 
 ### watch
@@ -33,6 +42,9 @@
 - `path` argument optional; defaults to the current directory
 - `--debounce-ms` (default `500`)
 - `--batch-size` (or `SGREP_BATCH_SIZE`)
+- `--offload` (or `SGREP_OFFLOAD=1`) to embed updates via Modal.dev GPUs
+- `--remote` (or `SGREP_REMOTE=1`) is accepted but currently runs locally (remote watch not yet supported)
+- `--detach` to run watch in the background
 
 ### config
 
@@ -126,10 +138,11 @@ remote_provider = "pinecone"  # or "turbopuffer"; inferred if only one is config
 - `SGREP_HOME` to relocate indexes and config (default OS data dir such as `~/.local/share/sgrep`)
 - `FASTEMBED_CACHE_DIR` to relocate the embedding cache (default OS cache dir such as `~/.local/share/sgrep/cache/fastembed`)
 - `SGREP_INIT_TIMEOUT_SECS` to extend model startup (default `120`)
+- `SGREP_DEVICE`, `SGREP_OFFLINE`, `SGREP_MAX_THREADS`, `SGREP_CPU_PRESET` for the matching global flags
 - `MODAL_TOKEN_ID` for Modal CLI authentication (token ID from modal.com/settings)
 - `MODAL_TOKEN_SECRET` for Modal CLI authentication (token secret from modal.com/settings)
 - `SGREP_OFFLOAD` to enable Modal.dev offload (`1` or `true`)
-- `SGREP_REMOTE` to enable Turbopuffer remote storage (`1` or `true`)
+- `SGREP_REMOTE` to enable remote vector storage (Pinecone or Turbopuffer) when the command supports it
 - `HTTP_PROXY` / `HTTPS_PROXY` for model downloads
 - `RUST_LOG` for tracing (e.g., `sgrep=debug`)
 - `RAYON_NUM_THREADS` to hard-cap the Rayon pool

@@ -10,7 +10,7 @@ A Claude Code plugin that integrates [sgrep](https://github.com/rika-labs/sgrep)
 - **Session Lifecycle Management**: Automatically starts watch on session start and stops it on session end
 - **Agent-Ready Output**: Uses `sgrep search --json` so Claude receives structured results (scores, lines, paths, snippets)
 - **Cloud Offload**: Optional GPU acceleration via [Modal.dev](https://modal.com) for faster embeddings
-- **Remote Storage**: Optional serverless vector storage via [Turbopuffer](https://turbopuffer.com)
+- **Remote Storage**: Optional remote vector storage (Pinecone or Turbopuffer) for search/index; watch runs locally
 
 ## Prerequisites
 
@@ -102,8 +102,9 @@ provider = "local"
 - `SGREP_MAX_THREADS`: Maximum threads for parallel operations
 - `SGREP_CPU_PRESET`: CPU usage preset (auto|low|medium|high|background)
 - `SGREP_OFFLOAD`: Enable Modal.dev GPU offload (`true`/`false`)
-- `SGREP_REMOTE`: Enable Turbopuffer remote storage (`true`/`false`)
-- `SGREP_MODAL_TOKEN`: API token for Modal.dev authentication
+- `SGREP_REMOTE`: Enable remote vector storage (`true`/`false`)
+- `MODAL_TOKEN_ID`: Modal CLI token ID (ak-...)
+- `MODAL_TOKEN_SECRET`: Modal CLI token secret (as-...)
 - `HTTP_PROXY` / `HTTPS_PROXY`: Proxy for model downloads
 
 ### Cloud Offload (Modal.dev)
@@ -111,7 +112,8 @@ provider = "local"
 For GPU-accelerated embeddings using [Modal.dev](https://modal.com):
 
 ```bash
-export SGREP_MODAL_TOKEN="your-modal-token"
+export MODAL_TOKEN_ID="ak-..."
+export MODAL_TOKEN_SECRET="as-..."
 export SGREP_OFFLOAD=true
 ```
 
@@ -119,19 +121,31 @@ Or add to `~/.sgrep/config.toml`:
 
 ```toml
 [modal]
-api_token = "your-modal-token"
-gpu_tier = "high"      # budget (T4), balanced (A10G), or high (L40S)
-dimension = 4096       # embedding dimension (default: 4096)
+token_id = "ak-..."            # Modal API token ID (or authenticate via `modal token new`)
+token_secret = "as-..."        # Modal API token secret
+proxy_token_id = "wk-..."     # Optional proxy auth token for endpoint access
+proxy_token_secret = "ws-..." # Optional proxy auth secret for endpoint access
+gpu_tier = "high"             # budget (T4), balanced (A10G), or high (L40S)
+batch_size = 128               # texts per request
 ```
 
 This auto-deploys a Modal service with:
-- **Embeddings**: Qwen3-Embedding-8B (8K context, 4096 dimensions)
+- **Embeddings**: Qwen3-Embedding-8B (8K context, outputs truncated to 384 dimensions for local compatibility)
 - **Reranking**: Qwen3-Reranker-8B for improved result quality
 
-### Remote Storage (Turbopuffer)
+### Remote Storage (Pinecone or Turbopuffer)
 
-For serverless vector storage using [Turbopuffer](https://turbopuffer.com):
+Enable `SGREP_REMOTE=true` (or pass `--remote` to sgrep) and configure one provider:
 
+**Pinecone example:**
+```toml
+[pinecone]
+api_key = "your-key"                       # or set PINECONE_API_KEY
+endpoint = "https://YOUR-INDEX.svc.region.pinecone.io"
+namespace = "optional-namespace"           # defaults to repo hash
+```
+
+**Turbopuffer example:**
 ```toml
 [turbopuffer]
 api_key = "tpuf_your_key"
