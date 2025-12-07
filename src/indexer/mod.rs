@@ -76,16 +76,30 @@ pub struct IndexTimings {
 #[derive(Clone)]
 pub struct Indexer {
     embedder: Arc<dyn BatchEmbedder>,
+    remote_embedding: bool,
 }
 
 impl Indexer {
     pub fn new(embedder: Arc<dyn BatchEmbedder>) -> Self {
-        Self { embedder }
+        Self {
+            embedder,
+            remote_embedding: false,
+        }
     }
 
     #[allow(dead_code)]
     pub fn new_concrete<E: BatchEmbedder + 'static>(embedder: Arc<E>) -> Self {
-        Self { embedder }
+        Self {
+            embedder,
+            remote_embedding: false,
+        }
+    }
+
+    pub fn with_remote_embedding(embedder: Arc<dyn BatchEmbedder>, remote_embedding: bool) -> Self {
+        Self {
+            embedder,
+            remote_embedding,
+        }
     }
 
     pub fn warmup(&self) -> Result<()> {
@@ -324,18 +338,16 @@ impl Indexer {
             pb.set_message(format!("indexed {} (cached)", files_completed));
         }
 
-        let mut pending_chunks: Vec<(usize, String)> = Vec::new();
-        for batch in batches.into_iter() {
-            for (idx, text) in batch.indices.into_iter().zip(batch.texts.into_iter()) {
-                pending_chunks.push((idx, text));
-            }
-        }
+        let mut pending_batches: Vec<Batch> = batches;
 
-        if pending_chunks.is_empty() {
+        if pending_batches.is_empty() {
             pb.set_position(total_files as u64);
             pb.finish_with_message("all cached");
         } else {
-            let total_pending = pending_chunks.len();
+            let total_pending = pending_batches
+                .iter()
+                .map(|b| b.indices.len())
+                .sum::<usize>();
 
             pb.set_style(
                 ProgressStyle::with_template("{spinner:.green} Embedding chunks ({pos}/{len})")
@@ -344,27 +356,48 @@ impl Indexer {
             pb.set_length(total_pending as u64);
             pb.set_position(0);
 
-            let texts: Vec<String> = pending_chunks
-                .iter()
-                .map(|(_, text)| text.clone())
-                .collect();
-            let indices: Vec<usize> = pending_chunks.iter().map(|(idx, _)| *idx).collect();
+            let progress_callback = {
+                let pb_clone = pb.clone();
+                Box::new(move |progress: EmbedProgress| {
+                    pb_clone.set_position(progress.completed as u64);
+                }) as ProgressCallback
+            };
 
-            let pb_clone = pb.clone();
-            let progress_callback: ProgressCallback = Box::new(move |progress: EmbedProgress| {
-                pb_clone.set_position(progress.completed as u64);
-            });
+            if self.remote_embedding {
+                let mut processed = 0usize;
+                for batch in pending_batches.drain(..) {
+                    let embeddings = self
+                        .embedder
+                        .embed_batch_with_progress(&batch.texts, Some(&progress_callback))?;
 
-            let all_embeddings = self
-                .embedder
-                .embed_batch_with_progress(&texts, Some(&progress_callback))?;
+                    for (i, vec) in embeddings.into_iter().enumerate() {
+                        let idx = batch.indices[i];
+                        vectors[idx] = Some(vec);
+                        embedded_chunks.insert(idx);
+                    }
 
-            pb.set_position(total_pending as u64);
+                    processed += batch.indices.len();
+                    pb.set_position(processed as u64);
+                }
+            } else {
+                let texts: Vec<String> = pending_batches
+                    .iter()
+                    .flat_map(|b| b.texts.iter().cloned())
+                    .collect();
+                let indices: Vec<usize> = pending_batches
+                    .iter()
+                    .flat_map(|b| b.indices.iter().copied())
+                    .collect();
 
-            for (i, vec) in all_embeddings.into_iter().enumerate() {
-                let idx = indices[i];
-                vectors[idx] = Some(vec);
-                embedded_chunks.insert(idx);
+                let all_embeddings = self
+                    .embedder
+                    .embed_batch_with_progress(&texts, Some(&progress_callback))?;
+
+                for (i, vec) in all_embeddings.into_iter().enumerate() {
+                    let idx = indices[i];
+                    vectors[idx] = Some(vec);
+                    embedded_chunks.insert(idx);
+                }
             }
 
             for (file_path, chunk_indices) in &file_to_chunks {
@@ -373,6 +406,7 @@ impl Indexer {
                     files_completed += 1;
                 }
             }
+
             pb.set_position(total_pending as u64);
         }
 

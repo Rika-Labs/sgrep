@@ -1,8 +1,10 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 
 use crate::config::{Config, RemoteProviderType};
+use crate::store::IndexStore;
 
 pub mod pinecone;
 pub mod turbopuffer;
@@ -114,6 +116,41 @@ impl RemoteFactory {
             RemoteProviderType::None => Ok(None),
         }
     }
+}
+
+pub fn push_remote_index(
+    path: &Path,
+    remote: &Arc<dyn RemoteVectorStore>,
+    reset_namespace: bool,
+) -> Result<()> {
+    let store = IndexStore::new(path)?;
+    let Some(index) = store.load()? else {
+        return Err(anyhow!(
+            "Remote push requested but no local index found for {}",
+            path.display()
+        ));
+    };
+
+    if reset_namespace {
+        remote.delete_namespace()?;
+    }
+
+    let chunks: Vec<RemoteChunk> = index
+        .chunks
+        .iter()
+        .zip(index.vectors.iter())
+        .map(|(chunk, vec)| RemoteChunk {
+            id: chunk.hash.clone(),
+            vector: vec.clone(),
+            path: chunk.path.display().to_string(),
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            content: chunk.text.clone(),
+            language: chunk.language.clone(),
+        })
+        .collect();
+
+    remote.upsert(&chunks)
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@
 - `--threads <n>` (or `SGREP_MAX_THREADS`) to bound parallelism
 - `--cpu-preset <auto|low|medium|high|background>` (or `SGREP_CPU_PRESET`)
   
-Command-specific flags (offload, remote, rerank controls, detach) are listed per subcommand below.
+Command-specific flags (offload, remote, rerank controls, detach) are listed per subcommand below. If `--offload` is omitted, the default comes from `[embedding].provider` in the config (default `local`).
 
 ## Commands
 
@@ -22,7 +22,7 @@ Command-specific flags (offload, remote, rerank controls, detach) are listed per
 - `--debug` to surface scores and timings
 - `--no-rerank` to skip cross-encoder reranking
 - `--rerank-oversample <n>` (default `3`) to control candidate pooling before rerank
-- `--offload` (or `SGREP_OFFLOAD=1`) to use [Modal.dev](https://modal.com) for embeddings/reranking
+- `--offload` (or `SGREP_OFFLOAD`) to use [Modal.dev](https://modal.com) for embeddings/reranking; omit to follow config, pass `--offload=false` to force local
 - `--remote` (or `SGREP_REMOTE=1`) to query a configured remote vector store (Pinecone/Turbopuffer)
 
 ### index
@@ -32,7 +32,7 @@ Command-specific flags (offload, remote, rerank controls, detach) are listed per
 - `--profile` to print per-phase timings
 - `--stats` to print index statistics without rebuilding
 - `--json` to emit stats as JSON (only with `--stats`)
-- `--offload` (or `SGREP_OFFLOAD=1`) to embed via Modal.dev GPUs
+- `--offload` (or `SGREP_OFFLOAD`) to embed via Modal.dev GPUs; omit to follow config, pass `--offload=false` to force local
 - `--remote` (or `SGREP_REMOTE=1`) to write to a configured remote vector store
 - `--detach` to run indexing in the background (not compatible with `--stats`)
 - `path` argument optional; defaults to the current directory
@@ -42,8 +42,8 @@ Command-specific flags (offload, remote, rerank controls, detach) are listed per
 - `path` argument optional; defaults to the current directory
 - `--debounce-ms` (default `500`)
 - `--batch-size` (or `SGREP_BATCH_SIZE`)
-- `--offload` (or `SGREP_OFFLOAD=1`) to embed updates via Modal.dev GPUs
-- `--remote` (or `SGREP_REMOTE=1`) is accepted but currently runs locally (remote watch not yet supported)
+- `--offload` (or `SGREP_OFFLOAD`) to embed updates via Modal.dev GPUs; omit to follow config, pass `--offload=false` to force local
+- `--remote` (or `SGREP_REMOTE=1`) to mirror index updates to a configured remote store (supported for watch)
 - `--detach` to run watch in the background
 
 ### config
@@ -58,7 +58,8 @@ Command-specific flags (offload, remote, rerank controls, detach) are listed per
 
 ```toml
 [embedding]
-provider = "local"
+# Default provider for embeddings/reranking when --offload is not set
+provider = "local" # or "modal"
 ```
 
 ## Modal.dev offload

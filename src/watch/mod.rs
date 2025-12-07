@@ -6,7 +6,7 @@ use anyhow::Result;
 use notify::EventKind;
 
 use crate::indexer::{DirtySet, IndexRequest, Indexer};
-#[cfg(not(test))]
+use crate::remote::{push_remote_index, RemoteVectorStore};
 use crate::store::IndexStore;
 #[cfg(not(test))]
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
@@ -102,20 +102,47 @@ pub struct WatchService {
     indexer: Indexer,
     debounce: Duration,
     batch_size: Option<usize>,
+    remote: Option<Arc<dyn RemoteVectorStore>>,
 }
 
 impl WatchService {
-    pub fn new(indexer: Indexer, debounce: Duration, batch_size: Option<usize>) -> Self {
+    pub fn new(
+        indexer: Indexer,
+        debounce: Duration,
+        batch_size: Option<usize>,
+        remote: Option<Arc<dyn RemoteVectorStore>>,
+    ) -> Self {
         Self {
             indexer,
             debounce,
             batch_size,
+            remote,
         }
     }
 
-    #[cfg(test)]
-    pub fn run(&mut self, _path: &Path) -> Result<()> {
+    fn sync_remote(&self, path: &Path, reset_namespace: bool) -> Result<()> {
+        if let Some(remote) = &self.remote {
+            push_remote_index(path, remote, reset_namespace)?;
+        }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn run(&mut self, path: &Path) -> Result<()> {
+        self.indexer.warmup()?;
+
+        let store = IndexStore::new(path)?;
+        if store.load()?.is_none() {
+            self.indexer.build_index(IndexRequest {
+                path: path.to_path_buf(),
+                force: false,
+                batch_size: self.batch_size,
+                profile: false,
+                dirty: None,
+            })?;
+        }
+
+        self.sync_remote(path, true)
     }
 
     #[cfg(not(test))]
@@ -123,7 +150,9 @@ impl WatchService {
         self.indexer.warmup()?;
 
         let store = IndexStore::new(path)?;
-        if store.load()?.is_none() {
+        let mut has_index = store.load()?.is_some();
+
+        if !has_index {
             info!("Creating initial index: {}", path.display());
             let result = self.indexer.build_index(crate::indexer::IndexRequest {
                 path: path.to_path_buf(),
@@ -145,11 +174,16 @@ impl WatchService {
                     warn!("error" = %e, "msg" = "failed to create initial index, will retry on first change");
                 }
             }
+            has_index = store.load()?.is_some();
         } else {
             info!(
                 "Using existing index for incremental updates: {}",
                 path.display()
             );
+        }
+
+        if has_index {
+            self.sync_remote(path, true)?;
         }
 
         let (tx, rx) = channel();
@@ -229,19 +263,28 @@ impl WatchService {
                 let shutdown_clone = shutdown.clone();
                 let done_tx = index_done_tx.clone();
                 let batch_size = self.batch_size;
+                let remote = self.remote.clone();
                 let dirty_set = DirtySet {
                     touched: dirty_paths.drain().collect(),
                     deleted: deleted_paths.drain().collect(),
                 };
 
                 indexing_thread = Some(thread::spawn(move || {
-                    let result = indexer.build_index(IndexRequest {
-                        path,
-                        force: false,
-                        batch_size,
-                        profile: false,
-                        dirty: Some(dirty_set),
-                    });
+                    let result = indexer
+                        .build_index(IndexRequest {
+                            path: path.clone(),
+                            force: false,
+                            batch_size,
+                            profile: false,
+                            dirty: Some(dirty_set),
+                        })
+                        .and_then(|_| {
+                            if let Some(remote) = remote {
+                                push_remote_index(&path, &remote, true)
+                            } else {
+                                Ok(())
+                            }
+                        });
                     if shutdown_clone.load(Ordering::Relaxed) {
                         warn!("msg" = "indexing cancelled");
                         let _ = done_tx.send(Ok(()));
@@ -304,6 +347,7 @@ mod tests {
     use super::*;
     use notify::event::{CreateKind, ModifyKind, RemoveKind};
     use notify::Event;
+    use serial_test::serial;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -392,11 +436,19 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn watch_service_new_and_run_noop_in_tests() {
+        let repo = std::env::temp_dir().join(format!("sgrep_watch_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("lib.rs"), "fn main() {}\n").unwrap();
+        std::env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+
         let indexer = Indexer::new(Arc::new(crate::embedding::Embedder::default()));
-        let mut svc = WatchService::new(indexer, Duration::from_millis(200), Some(32));
-        let root = Path::new(".");
-        svc.run(root).expect("test run should be a no-op");
+        let mut svc = WatchService::new(indexer, Duration::from_millis(200), Some(32), None);
+        svc.run(&repo).expect("test run should be a no-op");
+
+        std::fs::remove_dir_all(&repo).ok();
+        std::env::remove_var("SGREP_HOME");
     }
 
     mod integration_tests {

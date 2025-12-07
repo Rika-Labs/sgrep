@@ -1,3 +1,4 @@
+use once_cell::sync::OnceCell;
 use std::env;
 use std::ffi::OsString;
 use std::path::Path;
@@ -14,11 +15,11 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::cli::{resolve_repo_path, Cli, Commands};
-use crate::config::{Config, RemoteProviderType};
+use crate::config::{Config, EmbeddingProviderType, RemoteProviderType};
 use crate::embedding::{self, Embedder, PooledEmbedder};
 use crate::modal::{ModalDeployer, ModalEmbedder};
 use crate::output::JsonResponse;
-use crate::remote::{RemoteChunk, RemoteFactory, RemoteVectorStore};
+use crate::remote::{push_remote_index, RemoteFactory, RemoteVectorStore};
 use crate::threading::{CpuPreset, ThreadConfig};
 use crate::{indexer, search, store, watch};
 
@@ -125,6 +126,18 @@ fn maybe_detach(cli: &Cli) -> Result<Option<(&'static str, u32)>> {
     Ok(None)
 }
 
+fn resolve_embedding_provider(
+    offload_flag: Option<bool>,
+) -> Result<(Config, EmbeddingProviderType)> {
+    let config = Config::load().unwrap_or_default();
+    let provider = match offload_flag {
+        Some(true) => EmbeddingProviderType::Modal,
+        Some(false) => EmbeddingProviderType::Local,
+        None => config.embedding.provider.clone(),
+    };
+    Ok((config, provider))
+}
+
 pub fn run() -> Result<()> {
     setup_tracing();
     let cli = parse_cli();
@@ -150,15 +163,18 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    // Extract offload flag from command to determine embedder type
-    let offload = match &cli.command {
+    // Extract offload flag (optional) from command to determine embedder type
+    let offload_flag = match &cli.command {
         Commands::Index { offload, .. } => *offload,
         Commands::Search { offload, .. } => *offload,
         Commands::Watch { offload, .. } => *offload,
-        Commands::Config { .. } => false,
+        Commands::Config { .. } => None,
     };
 
-    let embedder = build_embedder(cli.offline, cli.device.clone(), offload)?;
+    let (config, provider) = resolve_embedding_provider(offload_flag)?;
+    let offload = matches!(provider, EmbeddingProviderType::Modal);
+
+    let embedder = build_embedder(cli.offline, cli.device.clone(), provider.clone(), &config)?;
 
     match cli.command {
         Commands::Index {
@@ -175,7 +191,9 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             if stats {
                 return handle_index_stats(path, json);
             }
-            handle_index(embedder, path, force, batch_size, profile, remote, None)
+            handle_index(
+                embedder, path, force, batch_size, profile, remote, None, offload,
+            )
         }
         Commands::Search {
             query,
@@ -188,7 +206,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             debug,
             no_rerank,
             rerank_oversample,
-            offload,
+            offload: _offload,
             remote,
         } => {
             let remote_store = build_remote_store(remote, &path)?;
@@ -217,14 +235,15 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             offload: _offload,
             remote,
             detach: _,
-        } => {
-            if remote {
-                eprintln!(
-                    "[warn] Remote indexing via watch is not yet supported; proceeding locally."
-                );
-            }
-            handle_watch(embedder, path, debounce_ms, batch_size)
-        }
+        } => handle_watch(
+            embedder,
+            path,
+            debounce_ms,
+            batch_size,
+            remote,
+            None,
+            offload,
+        ),
         Commands::Config { .. } => unreachable!(), // Handled above
     }
 }
@@ -232,7 +251,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
 fn build_embedder(
     offline: bool,
     device: Option<String>,
-    offload: bool,
+    provider: EmbeddingProviderType,
+    config: &Config,
 ) -> Result<Arc<dyn embedding::BatchEmbedder>> {
     let _progress = ProgressLine::stderr();
 
@@ -248,8 +268,8 @@ fn build_embedder(
         env::set_var("SGREP_DEVICE", device);
     }
 
-    if offload {
-        return build_modal_embedder();
+    if matches!(provider, EmbeddingProviderType::Modal) {
+        return build_modal_embedder(config);
     }
 
     embedding::configure_offline_env(offline)?;
@@ -270,8 +290,12 @@ fn build_embedder(
 /// Fixed dimension for local/remote compatibility - do not change
 const MODAL_DIMENSION: usize = 384;
 
-fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
-    let config = Config::load().context("Failed to load config")?;
+static MODAL_ENDPOINTS: OnceCell<(String, String, bool)> = OnceCell::new();
+
+fn resolve_modal_endpoints(config: &Config, json_mode: bool) -> Result<(String, String, bool)> {
+    if let Some(existing) = MODAL_ENDPOINTS.get() {
+        return Ok(existing.clone());
+    }
 
     let gpu_tier = if config.modal.gpu_tier.is_empty() {
         "high".to_string()
@@ -279,32 +303,45 @@ fn build_modal_embedder() -> Result<Arc<dyn embedding::BatchEmbedder>> {
         config.modal.gpu_tier.clone()
     };
 
+    let deployer = ModalDeployer::new(
+        gpu_tier,
+        config.modal.token_id.clone(),
+        config.modal.token_secret.clone(),
+    );
+
+    let (embed_url, rerank_url, cached) = deployer.ensure_deployed()?;
+
+    if !json_mode {
+        if cached {
+            eprintln!("[info] Using cached Modal endpoints");
+        } else {
+            eprintln!("[info] Deployed Modal endpoints");
+        }
+    }
+
+    let _ = MODAL_ENDPOINTS.set((embed_url.clone(), rerank_url.clone(), cached));
+    Ok((embed_url, rerank_url, cached))
+}
+
+fn build_modal_embedder(config: &Config) -> Result<Arc<dyn embedding::BatchEmbedder>> {
     let batch_size = if config.modal.batch_size == 0 {
         128 // Optimized for GPU workloads
     } else {
         config.modal.batch_size
     };
 
+    let (embed_endpoint, _rerank_endpoint, _cached) =
+        resolve_modal_endpoints(config, false).context("Modal embedder unavailable")?;
+
     eprintln!(
         "[info] Using Modal embedder (GPU: {}, dim: {})",
-        gpu_tier, MODAL_DIMENSION
+        config.modal.gpu_tier, MODAL_DIMENSION
     );
 
     let endpoint = if let Some(endpoint) = config.modal.endpoint.clone() {
         eprintln!("[info] Using cached endpoint: {}", endpoint);
         endpoint
     } else {
-        let deployer = ModalDeployer::new(
-            gpu_tier,
-            config.modal.token_id.clone(),
-            config.modal.token_secret.clone(),
-        );
-        let (embed_endpoint, _rerank_endpoint, used_cache) = deployer.ensure_deployed()?;
-        if used_cache {
-            eprintln!("[info] Using cached endpoint: {}", embed_endpoint);
-        } else {
-            eprintln!("[info] Modal service deployed: {}", embed_endpoint);
-        }
         embed_endpoint
     };
 
@@ -350,36 +387,9 @@ fn build_modal_reranker(
 ) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
     use crate::modal::reranker::ModalReranker;
 
-    let config = match Config::load() {
-        Ok(c) => c,
-        Err(e) => {
-            if !json_mode {
-                eprintln!("[warn] Modal reranker config error: {}", e);
-            }
-            return None;
-        }
-    };
+    let config = Config::load().ok()?;
 
-    let gpu_tier = if config.modal.gpu_tier.is_empty() {
-        "high".to_string()
-    } else {
-        config.modal.gpu_tier.clone()
-    };
-
-    let deployer = ModalDeployer::new(
-        gpu_tier,
-        config.modal.token_id.clone(),
-        config.modal.token_secret.clone(),
-    );
-    let rerank_endpoint = match deployer.get_rerank_endpoint() {
-        Ok(endpoint) => endpoint,
-        Err(e) => {
-            if !json_mode {
-                eprintln!("[warn] Modal reranker unavailable: {}", e);
-            }
-            return None;
-        }
-    };
+    let (_, rerank_endpoint, _cached) = resolve_modal_endpoints(&config, json_mode).ok()?;
 
     if !json_mode {
         eprintln!("[info] Using Modal reranker (Qwen3-Reranker-8B)");
@@ -397,7 +407,24 @@ fn build_reranker_silent(
     _json_mode: bool,
     _offload: bool,
 ) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
-    None
+    Some(Arc::new(TestReranker::default()))
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestReranker;
+
+#[cfg(test)]
+impl crate::reranker::Reranker for TestReranker {
+    fn rerank(&self, _query: &str, docs: &[&str]) -> anyhow::Result<Vec<(usize, f32)>> {
+        let mut scored: Vec<(usize, f32)> = docs
+            .iter()
+            .enumerate()
+            .map(|(idx, doc)| (idx, doc.len() as f32))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(scored)
+    }
 }
 
 fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result<()> {
@@ -507,6 +534,7 @@ fn handle_index_stats(path: Option<std::path::PathBuf>, json: bool) -> Result<()
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_index(
     embedder: Arc<dyn embedding::BatchEmbedder>,
     path: Option<std::path::PathBuf>,
@@ -515,6 +543,7 @@ fn handle_index(
     profile: bool,
     remote_flag: bool,
     remote_override: Option<Arc<dyn RemoteVectorStore>>,
+    remote_embedding: bool,
 ) -> Result<()> {
     let path = resolve_repo_path(path)?;
 
@@ -538,7 +567,11 @@ fn handle_index(
         None
     };
 
-    let indexer = indexer::Indexer::new(embedder.clone());
+    let indexer = if remote_embedding {
+        indexer::Indexer::with_remote_embedding(embedder.clone(), true)
+    } else {
+        indexer::Indexer::new(embedder.clone())
+    };
     let report = indexer
         .build_index(indexer::IndexRequest {
             path: path.clone(),
@@ -550,7 +583,7 @@ fn handle_index(
         .context("Failed to build index")?;
 
     if let Some(remote) = remote_store {
-        push_remote_index(&path, &remote)?;
+        push_remote_index(&path, &remote, true)?;
         eprintln!("[ok] Remote index pushed to {}", remote.name());
     }
 
@@ -602,15 +635,22 @@ fn handle_search(
 ) -> Result<()> {
     let start = Instant::now();
 
-    if let Some(remote) = params.remote.clone() {
-        return handle_remote_search(embedder, params, remote, start);
-    }
-
     let reranker = if params.no_rerank {
         None
     } else {
-        build_reranker_silent(params.json, params.offload)
+        match build_reranker_silent(params.json, params.offload) {
+            Some(r) => Some(r),
+            None => {
+                return Err(anyhow!(
+                    "Reranker unavailable. Use --no-rerank to disable reranking explicitly."
+                ))
+            }
+        }
     };
+
+    if let Some(remote) = params.remote.clone() {
+        return handle_remote_search(embedder, params, remote, reranker, start);
+    }
 
     let mut engine = match &reranker {
         Some(r) => search::SearchEngine::with_reranker(embedder.clone(), r.clone()),
@@ -693,12 +733,21 @@ fn handle_remote_search(
     embedder: Arc<dyn embedding::BatchEmbedder>,
     params: SearchParams<'_>,
     remote: Arc<dyn RemoteVectorStore>,
+    reranker: Option<Arc<dyn crate::reranker::Reranker + Send + Sync>>,
     start: Instant,
 ) -> Result<()> {
-    let query_vec = embedder.embed(params.query)?;
-    let hits = remote.query(&query_vec, params.limit)?;
+    let limit = params.limit.max(1);
+    let oversample = if reranker.is_some() {
+        params.rerank_oversample.max(1)
+    } else {
+        1
+    };
+    let fetch_limit = limit.saturating_mul(oversample);
 
-    let results: Vec<search::SearchResult> = hits
+    let query_vec = embedder.embed(params.query)?;
+    let hits = remote.query(&query_vec, fetch_limit)?;
+
+    let mut results: Vec<search::SearchResult> = hits
         .into_iter()
         .map(|h| {
             let chunk = crate::chunker::CodeChunk {
@@ -721,6 +770,54 @@ fn handle_remote_search(
         })
         .collect();
 
+    if let Some(reranker) = reranker {
+        if results.len() > 1 {
+            let docs: Vec<&str> = results.iter().map(|r| r.chunk.text.as_str()).collect();
+            if let Ok(reranked) = reranker.rerank(params.query, &docs) {
+                let mut reordered: Vec<search::SearchResult> = reranked
+                    .into_iter()
+                    .filter_map(|(idx, rerank_score)| {
+                        results.get(idx).map(|base| {
+                            let mut result = base.clone();
+                            let rerank_boost = rerank_score * 0.4;
+                            result.score += rerank_boost;
+                            result
+                        })
+                    })
+                    .collect();
+
+                reordered.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                reordered.truncate(limit);
+                results = reordered;
+            }
+        }
+    }
+
+    if results.len() > limit {
+        results.truncate(limit);
+    }
+
+    let vectors = embedder
+        .embed_batch(
+            &results
+                .iter()
+                .map(|r| r.chunk.text.clone())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default();
+
+    let mut deduped = results;
+    search::suppress_near_duplicates(&mut deduped, &vectors, &search::DedupOptions::default());
+
+    if deduped.len() > limit {
+        deduped.truncate(limit);
+    }
+
     let elapsed = start.elapsed();
     let store = store::IndexStore::new(params.path)?;
     let metadata = store::IndexMetadata {
@@ -730,12 +827,12 @@ fn handle_remote_search(
         vector_dim: embedder.dimension(),
         indexed_at: Utc::now(),
         total_files: 0,
-        total_chunks: results.len(),
+        total_chunks: deduped.len(),
     };
     let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
 
     render_results(RenderContext {
-        results,
+        results: deduped,
         query: params.query,
         limit: params.limit,
         index: &index,
@@ -772,43 +869,36 @@ fn build_remote_store(
     Ok(remote)
 }
 
-fn push_remote_index(path: &Path, remote: &Arc<dyn RemoteVectorStore>) -> Result<()> {
-    let store = store::IndexStore::new(path)?;
-    let Some(index) = store.load()? else {
-        return Err(anyhow!(
-            "Remote push requested but no local index found for {}",
-            path.display()
-        ));
-    };
-
-    let chunks: Vec<RemoteChunk> = index
-        .chunks
-        .iter()
-        .zip(index.vectors.iter())
-        .map(|(chunk, vec)| RemoteChunk {
-            id: chunk.hash.clone(),
-            vector: vec.clone(),
-            path: chunk.path.display().to_string(),
-            start_line: chunk.start_line,
-            end_line: chunk.end_line,
-            content: chunk.text.clone(),
-            language: chunk.language.clone(),
-        })
-        .collect();
-
-    remote.upsert(&chunks)
-}
-
 fn handle_watch(
     embedder: Arc<dyn embedding::BatchEmbedder>,
     path: Option<std::path::PathBuf>,
     debounce_ms: u64,
     batch_size: Option<usize>,
+    remote_flag: bool,
+    remote_override: Option<Arc<dyn RemoteVectorStore>>,
+    remote_embedding: bool,
 ) -> Result<()> {
     let path = resolve_repo_path(path)?;
-    let indexer = indexer::Indexer::new(embedder.clone());
-    let mut watcher =
-        watch::WatchService::new(indexer, Duration::from_millis(debounce_ms), batch_size);
+    let remote_store = if remote_flag {
+        if let Some(store) = remote_override {
+            Some(store)
+        } else {
+            build_remote_store(true, &path)?
+        }
+    } else {
+        remote_override
+    };
+    let indexer = if remote_embedding {
+        indexer::Indexer::with_remote_embedding(embedder.clone(), true)
+    } else {
+        indexer::Indexer::new(embedder.clone())
+    };
+    let mut watcher = watch::WatchService::new(
+        indexer,
+        Duration::from_millis(debounce_ms),
+        batch_size,
+        remote_store,
+    );
     watcher.run(&path)
 }
 
@@ -955,7 +1045,7 @@ fn setup_tracing() {
 mod tests {
     use super::*;
     use crate::chunker::CodeChunk;
-    use crate::remote::RemoteSearchHit;
+    use crate::remote::{RemoteChunk, RemoteSearchHit};
     use crate::store::{IndexMetadata, RepositoryIndex};
     use serial_test::serial;
     use std::any::type_name_of_val;
@@ -1006,7 +1096,7 @@ mod tests {
                 profile: false,
                 stats,
                 json: false,
-                offload: false,
+                offload: Some(false),
                 remote: false,
                 detach,
             },
@@ -1094,6 +1184,10 @@ mod tests {
         fn query_called(&self) -> bool {
             !self.queries.lock().unwrap().is_empty()
         }
+
+        fn last_query_top_k(&self) -> Option<usize> {
+            self.queries.lock().unwrap().last().map(|(_, k)| *k)
+        }
     }
 
     impl RemoteVectorStore for MockRemoteStore {
@@ -1129,7 +1223,13 @@ mod tests {
         env::remove_var("SGREP_DEVICE");
         // Use non-existent config to force local provider
         env::set_var("SGREP_CONFIG", "/nonexistent/config.toml");
-        let _ = build_embedder(true, Some("cpu".into()), false).unwrap();
+        let _ = build_embedder(
+            true,
+            Some("cpu".into()),
+            EmbeddingProviderType::Local,
+            &Config::default(),
+        )
+        .unwrap();
         assert_eq!(env::var("TOKENIZERS_PARALLELISM").unwrap(), "true");
         assert_eq!(env::var("SGREP_OFFLINE").unwrap(), "1");
         assert_eq!(env::var("SGREP_DEVICE").unwrap(), "cpu");
@@ -1173,7 +1273,13 @@ mod tests {
     #[test]
     fn build_embedder_respects_use_pooled_flag() {
         env::set_var("SGREP_USE_POOLED_EMBEDDER", "false");
-        let embedder = build_embedder(false, None, false).unwrap();
+        let embedder = build_embedder(
+            false,
+            None,
+            EmbeddingProviderType::Local,
+            &Config::default(),
+        )
+        .unwrap();
         let ty = type_name_of_val(embedder.as_ref());
         assert!(
             ty.contains("Embedder"),
@@ -1197,6 +1303,7 @@ mod tests {
             true,
             false,
             None,
+            false,
         )
         .expect("indexing should succeed");
         std::fs::remove_dir_all(&repo).ok();
@@ -1211,7 +1318,17 @@ mod tests {
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
 
         // No files means cache_hits + cache_misses = 0, exercising the zero-hit-rate branch.
-        handle_index(embedder, Some(repo.clone()), true, None, true, false, None).unwrap();
+        handle_index(
+            embedder,
+            Some(repo.clone()),
+            true,
+            None,
+            true,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
 
         std::fs::remove_dir_all(&repo).ok();
     }
@@ -1231,10 +1348,21 @@ mod tests {
             true,
             false,
             None,
+            false,
         )
         .unwrap();
         // second run should see cache hits > 0 and exercise hit-rate branch
-        handle_index(embedder, Some(repo.clone()), false, None, true, false, None).unwrap();
+        handle_index(
+            embedder,
+            Some(repo.clone()),
+            false,
+            None,
+            true,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
 
         std::fs::remove_dir_all(&repo).ok();
     }
@@ -1277,6 +1405,103 @@ mod tests {
 
         assert!(remote.query_called());
         std::fs::remove_dir_all(&repo).ok();
+        env::remove_var("SGREP_HOME");
+    }
+
+    #[test]
+    #[serial]
+    fn remote_search_reranks_and_oversamples_by_default() {
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+
+        let remote = Arc::new(MockRemoteStore::with_hits(vec![
+            RemoteSearchHit {
+                id: "short".into(),
+                score: 0.8,
+                path: repo.join("lib.rs").display().to_string(),
+                start_line: 1,
+                end_line: 1,
+                content: "hi".into(),
+                language: "rust".into(),
+            },
+            RemoteSearchHit {
+                id: "long".into(),
+                score: 0.5,
+                path: repo.join("lib.rs").display().to_string(),
+                start_line: 1,
+                end_line: 2,
+                content: "pub fn longer() {}".into(),
+                language: "rust".into(),
+            },
+        ]));
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+
+        let limit = 1;
+        let oversample = 2;
+
+        handle_search(
+            embedder,
+            SearchParams {
+                query: "hi",
+                path: repo.as_path(),
+                limit,
+                context: false,
+                glob: vec![],
+                filters: vec![],
+                json: true,
+                debug: false,
+                no_rerank: false,
+                rerank_oversample: oversample,
+                offload: false,
+                remote: Some(remote.clone()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(remote.last_query_top_k(), Some(limit * oversample));
+        std::fs::remove_dir_all(&repo).ok();
+        env::remove_var("SGREP_HOME");
+    }
+
+    #[test]
+    #[serial]
+    fn remote_search_respects_no_rerank_limit() {
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+
+        let remote = Arc::new(MockRemoteStore::with_hits(vec![RemoteSearchHit {
+            id: "hit1".into(),
+            score: 0.9,
+            path: repo.join("lib.rs").display().to_string(),
+            start_line: 1,
+            end_line: 1,
+            content: "pub fn hi() {}".into(),
+            language: "rust".into(),
+        }]));
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+
+        handle_search(
+            embedder,
+            SearchParams {
+                query: "hi",
+                path: repo.as_path(),
+                limit: 2,
+                context: false,
+                glob: vec![],
+                filters: vec![],
+                json: true,
+                debug: false,
+                no_rerank: true,
+                rerank_oversample: 5,
+                offload: false,
+                remote: Some(remote.clone()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(remote.last_query_top_k(), Some(2));
+        std::fs::remove_dir_all(&repo).ok();
+        env::remove_var("SGREP_HOME");
     }
 
     #[test]
@@ -1337,6 +1562,7 @@ mod tests {
             false,
             true,
             Some(remote.clone()),
+            false,
         )
         .unwrap();
 
@@ -1361,6 +1587,7 @@ mod tests {
             false,
             false,
             Some(remote.clone()),
+            false,
         )
         .unwrap();
 
@@ -1489,7 +1716,39 @@ mod tests {
         let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
-        handle_watch(embedder, Some(repo.clone()), 100, Some(8)).unwrap();
+        handle_watch(
+            embedder,
+            Some(repo.clone()),
+            100,
+            Some(8),
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn handle_watch_pushes_remote_index() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let remote = Arc::new(MockRemoteStore::default());
+
+        handle_watch(
+            embedder,
+            Some(repo.clone()),
+            50,
+            Some(4),
+            true,
+            Some(remote.clone()),
+            false,
+        )
+        .unwrap();
+
+        assert!(remote.upsert_called());
         std::fs::remove_dir_all(&repo).ok();
     }
 
@@ -1526,7 +1785,7 @@ mod tests {
                 profile: false,
                 stats: false,
                 json: false,
-                offload: false,
+                offload: Some(false),
                 remote: false,
                 detach: false,
             },
@@ -1549,7 +1808,7 @@ mod tests {
                 path: Some(repo.clone()),
                 debounce_ms: 50,
                 batch_size: Some(16),
-                offload: false,
+                offload: Some(false),
                 remote: false,
                 detach: false,
             },
@@ -1592,7 +1851,7 @@ mod tests {
                 debug: false,
                 no_rerank: false,
                 rerank_oversample: 3,
-                offload: false,
+                offload: Some(false),
                 remote: false,
             },
         };

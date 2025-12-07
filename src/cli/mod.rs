@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::search::config::RERANK_OVERSAMPLE_FACTOR;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueHint};
 
@@ -57,11 +58,16 @@ pub enum Commands {
         #[arg(long)]
         no_rerank: bool,
         /// Oversample factor for reranking (default: 3, meaning fetch 3x candidates before rerank)
-        #[arg(long, default_value_t = 3)]
+        #[arg(long, default_value_t = RERANK_OVERSAMPLE_FACTOR)]
         rerank_oversample: usize,
         /// Offload embeddings/reranking to Modal.dev (auto-deploys if needed)
-        #[arg(long, env = "SGREP_OFFLOAD")]
-        offload: bool,
+        #[arg(
+            long,
+            env = "SGREP_OFFLOAD",
+            num_args = 0..=1,
+            default_missing_value = "true"
+        )]
+        offload: Option<bool>,
         /// Store/query index from Turbopuffer (serverless vector DB)
         #[arg(long, env = "SGREP_REMOTE")]
         remote: bool,
@@ -92,8 +98,13 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
         /// Offload embeddings to Modal.dev (auto-deploys if needed)
-        #[arg(long, env = "SGREP_OFFLOAD")]
-        offload: bool,
+        #[arg(
+            long,
+            env = "SGREP_OFFLOAD",
+            num_args = 0..=1,
+            default_missing_value = "true"
+        )]
+        offload: Option<bool>,
         /// Store index in Turbopuffer (serverless vector DB)
         #[arg(long, env = "SGREP_REMOTE")]
         remote: bool,
@@ -118,8 +129,13 @@ pub enum Commands {
         )]
         batch_size: Option<usize>,
         /// Offload embeddings to Modal.dev (auto-deploys if needed)
-        #[arg(long, env = "SGREP_OFFLOAD")]
-        offload: bool,
+        #[arg(
+            long,
+            env = "SGREP_OFFLOAD",
+            num_args = 0..=1,
+            default_missing_value = "true"
+        )]
+        offload: Option<bool>,
         /// Store index in Turbopuffer (serverless vector DB)
         #[arg(long, env = "SGREP_REMOTE")]
         remote: bool,
@@ -292,7 +308,11 @@ mod tests {
         let cli = Cli::parse_from(["sgrep", "index", "--offload"]);
         match cli.command {
             Commands::Index { offload, .. } => {
-                assert!(offload, "Expected --offload flag to be true");
+                assert_eq!(
+                    offload,
+                    Some(true),
+                    "Expected --offload flag to be Some(true)"
+                );
             }
             _ => panic!("Expected Index command"),
         }
@@ -303,7 +323,7 @@ mod tests {
         let cli = Cli::parse_from(["sgrep", "index", "."]);
         match cli.command {
             Commands::Index { offload, .. } => {
-                assert!(!offload, "Expected offload to be false by default");
+                assert!(offload.is_none(), "Expected offload to be None by default");
             }
             _ => panic!("Expected Index command"),
         }
@@ -314,7 +334,11 @@ mod tests {
         let cli = Cli::parse_from(["sgrep", "watch", "--offload"]);
         match cli.command {
             Commands::Watch { offload, .. } => {
-                assert!(offload, "Expected --offload flag to be true");
+                assert_eq!(
+                    offload,
+                    Some(true),
+                    "Expected --offload flag to be Some(true)"
+                );
             }
             _ => panic!("Expected Watch command"),
         }
@@ -325,7 +349,11 @@ mod tests {
         let cli = Cli::parse_from(["sgrep", "search", "query", "--offload"]);
         match cli.command {
             Commands::Search { offload, .. } => {
-                assert!(offload, "Expected --offload flag to be true");
+                assert_eq!(
+                    offload,
+                    Some(true),
+                    "Expected --offload flag to be Some(true)"
+                );
             }
             _ => panic!("Expected Search command"),
         }
@@ -384,7 +412,11 @@ mod tests {
             Commands::Index {
                 offload, remote, ..
             } => {
-                assert!(offload, "Expected --offload flag to be true");
+                assert_eq!(
+                    offload,
+                    Some(true),
+                    "Expected --offload flag to be Some(true)"
+                );
                 assert!(remote, "Expected --remote flag to be true");
             }
             _ => panic!("Expected Index command"),
