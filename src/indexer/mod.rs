@@ -29,7 +29,7 @@ use rayon::prelude::*;
 use tracing::{debug, warn};
 
 use crate::chunker::{self, CodeChunk};
-use crate::embedding::BatchEmbedder;
+use crate::embedding::{BatchEmbedder, EmbedProgress, ProgressCallback};
 use crate::graph::{CodeGraph, SymbolExtractor};
 use crate::store::{IndexMetadata, IndexStore, RepositoryIndex};
 
@@ -339,31 +339,26 @@ impl Indexer {
             let total_pending = pending_chunks.len();
 
             pb.set_style(
-                ProgressStyle::with_template(
-                    "{spinner:.green} Embedding chunks ({pos}/{len}) • {msg}",
-                )
-                .unwrap_or_else(|_| ProgressStyle::default_bar()),
+                ProgressStyle::with_template("{spinner:.green} Embedding chunks ({pos}/{len})")
+                    .unwrap_or_else(|_| ProgressStyle::default_bar()),
             );
             pb.set_length(total_pending as u64);
             pb.set_position(0);
-            pb.set_message(format!(
-                "{} pending across {} batches; {} cached",
-                total_pending, pending_batches, cache_hits
-            ));
 
-            // Collect all texts for batch embedding (much faster for remote embedders like Modal)
             let texts: Vec<String> = pending_chunks
                 .iter()
                 .map(|(_, text)| text.clone())
                 .collect();
             let indices: Vec<usize> = pending_chunks.iter().map(|(idx, _)| *idx).collect();
 
-            // Embed in batches using embed_batch for efficiency
-            pb.set_message("embedding: waiting on embedder response");
-            let all_embeddings = self.embedder.embed_batch(&texts)?;
+            let pb_clone = pb.clone();
+            let progress_callback: ProgressCallback = Box::new(move |progress: EmbedProgress| {
+                pb_clone.set_position(progress.completed as u64);
+            });
+
+            let all_embeddings = self.embedder.embed_batch_with_progress(&texts, Some(&progress_callback))?;
 
             pb.set_position(total_pending as u64);
-            pb.set_message("embedding: received vectors");
 
             for (i, vec) in all_embeddings.into_iter().enumerate() {
                 let idx = indices[i];

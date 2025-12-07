@@ -21,6 +21,15 @@ pub const MODEL_FILES: &[&str] = &[
 pub const DEFAULT_INIT_TIMEOUT_SECS: u64 = 120;
 pub const DEFAULT_VECTOR_DIM: usize = 384;
 
+#[derive(Debug, Clone)]
+pub struct EmbedProgress {
+    pub completed: usize,
+    pub total: usize,
+    pub message: Option<String>,
+}
+
+pub type ProgressCallback = Box<dyn Fn(EmbedProgress) + Send + Sync>;
+
 pub trait BatchEmbedder: Send + Sync {
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let results = self.embed_batch(&[text.to_string()])?;
@@ -30,6 +39,25 @@ pub trait BatchEmbedder: Send + Sync {
             .ok_or_else(|| anyhow::anyhow!("No embedding generated"))
     }
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+
+    /// Embed texts with progress reporting.
+    /// Default implementation calls embed_batch and reports completion at end.
+    fn embed_batch_with_progress(
+        &self,
+        texts: &[String],
+        on_progress: Option<&ProgressCallback>,
+    ) -> Result<Vec<Vec<f32>>> {
+        let result = self.embed_batch(texts)?;
+        if let Some(callback) = on_progress {
+            callback(EmbedProgress {
+                completed: texts.len(),
+                total: texts.len(),
+                message: Some("complete".to_string()),
+            });
+        }
+        Ok(result)
+    }
+
     fn dimension(&self) -> usize;
 }
 

@@ -106,6 +106,14 @@ impl ModalEmbedder {
 
 impl BatchEmbedder for ModalEmbedder {
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.embed_batch_with_progress(texts, None)
+    }
+
+    fn embed_batch_with_progress(
+        &self,
+        texts: &[String],
+        on_progress: Option<&crate::embedding::ProgressCallback>,
+    ) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -126,9 +134,19 @@ impl BatchEmbedder for ModalEmbedder {
             ));
         }
 
-        let mut all_embeddings = Vec::with_capacity(texts.len());
+        let total = texts.len();
+        let mut all_embeddings = Vec::with_capacity(total);
+        let num_batches = (total + self.batch_size - 1) / self.batch_size;
 
-        for chunk in texts.chunks(self.batch_size) {
+        for (batch_idx, chunk) in texts.chunks(self.batch_size).enumerate() {
+            if let Some(callback) = on_progress {
+                callback(crate::embedding::EmbedProgress {
+                    completed: all_embeddings.len(),
+                    total,
+                    message: Some(format!("sending batch {}/{}", batch_idx + 1, num_batches)),
+                });
+            }
+
             let mut last_err = None;
 
             for attempt in 1..=MAX_RETRIES {
@@ -152,6 +170,14 @@ impl BatchEmbedder for ModalEmbedder {
 
             if let Some(e) = last_err {
                 return Err(e);
+            }
+
+            if let Some(callback) = on_progress {
+                callback(crate::embedding::EmbedProgress {
+                    completed: all_embeddings.len(),
+                    total,
+                    message: Some(format!("received batch {}/{}", batch_idx + 1, num_batches)),
+                });
             }
         }
 

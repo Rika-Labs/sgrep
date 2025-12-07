@@ -156,6 +156,34 @@ impl Embedder {
         Ok(results)
     }
 
+    pub fn embed_batch_with_progress(
+        &self,
+        texts: &[String],
+        on_progress: Option<&super::ProgressCallback>,
+    ) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let total = texts.len();
+        let mut results = Vec::with_capacity(total);
+
+        for (i, text) in texts.iter().enumerate() {
+            let vec = self.embed(text)?;
+            results.push(vec);
+
+            if let Some(callback) = on_progress {
+                callback(super::EmbedProgress {
+                    completed: i + 1,
+                    total,
+                    message: None,
+                });
+            }
+        }
+
+        Ok(results)
+    }
+
     pub fn dimension(&self) -> usize {
         DEFAULT_VECTOR_DIM
     }
@@ -165,6 +193,14 @@ impl Embedder {
 impl BatchEmbedder for Embedder {
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         Embedder::embed_batch(self, texts)
+    }
+
+    fn embed_batch_with_progress(
+        &self,
+        texts: &[String],
+        on_progress: Option<&super::ProgressCallback>,
+    ) -> Result<Vec<Vec<f32>>> {
+        Embedder::embed_batch_with_progress(self, texts, on_progress)
     }
 
     fn dimension(&self) -> usize {
@@ -179,6 +215,29 @@ impl BatchEmbedder for Embedder {
             .iter()
             .map(|t| vec![t.len() as f32; DEFAULT_VECTOR_DIM])
             .collect())
+    }
+
+    fn embed_batch_with_progress(
+        &self,
+        texts: &[String],
+        on_progress: Option<&super::ProgressCallback>,
+    ) -> Result<Vec<Vec<f32>>> {
+        let total = texts.len();
+        let mut results = Vec::with_capacity(total);
+
+        for (i, text) in texts.iter().enumerate() {
+            results.push(vec![text.len() as f32; DEFAULT_VECTOR_DIM]);
+
+            if let Some(callback) = on_progress {
+                callback(super::EmbedProgress {
+                    completed: i + 1,
+                    total,
+                    message: Some(format!("{}/{}", i + 1, total)),
+                });
+            }
+        }
+
+        Ok(results)
     }
 
     fn dimension(&self) -> usize {
@@ -262,6 +321,14 @@ impl BatchEmbedder for PooledEmbedder {
 
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         self.get_embedder().embed_batch(texts)
+    }
+
+    fn embed_batch_with_progress(
+        &self,
+        texts: &[String],
+        on_progress: Option<&super::ProgressCallback>,
+    ) -> Result<Vec<Vec<f32>>> {
+        self.get_embedder().embed_batch_with_progress(texts, on_progress)
     }
 
     fn dimension(&self) -> usize {
@@ -468,5 +535,24 @@ mod tests {
         let embedder = PooledEmbedder::default();
         let vec = embedder.embed("hello").unwrap();
         assert_eq!(vec.len(), DEFAULT_VECTOR_DIM);
+    }
+
+    #[test]
+    fn embed_batch_with_progress_reports_one_at_a_time() {
+        let embedder = Embedder::default();
+        let texts: Vec<String> = (0..5).map(|i| format!("text {}", i)).collect();
+
+        let progress_values = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress_clone = progress_values.clone();
+
+        let callback: super::super::ProgressCallback = Box::new(move |p| {
+            progress_clone.lock().unwrap().push(p.completed);
+        });
+
+        let result = embedder.embed_batch_with_progress(&texts, Some(&callback));
+        assert!(result.is_ok());
+
+        let values = progress_values.lock().unwrap();
+        assert_eq!(*values, vec![1, 2, 3, 4, 5]);
     }
 }
