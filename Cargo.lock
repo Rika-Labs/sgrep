@@ -3135,6 +3135,7 @@ dependencies = [
  "dashmap",
  "encoding_rs",
  "fastembed",
+ "flate2",
  "globset",
  "ignore",
  "indicatif",

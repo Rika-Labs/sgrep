@@ -289,6 +289,7 @@ fn build_embedder(
 
 /// Fixed dimension for local/remote compatibility - do not change
 const MODAL_DIMENSION: usize = 384;
+const MODAL_MAX_TEXTS_PER_REQUEST: usize = 1000;
 
 static MODAL_ENDPOINTS: OnceCell<(String, String, bool)> = OnceCell::new();
 
@@ -324,18 +325,22 @@ fn resolve_modal_endpoints(config: &Config, json_mode: bool) -> Result<(String, 
 }
 
 fn build_modal_embedder(config: &Config) -> Result<Arc<dyn embedding::BatchEmbedder>> {
-    let batch_size = if config.modal.batch_size == 0 {
-        128 // Optimized for GPU workloads
-    } else {
-        config.modal.batch_size
-    };
+    let batch_size = resolve_modal_batch_size(config);
+    let concurrency = resolve_modal_concurrency(config);
+    let use_gzip = env::var("SGREP_MODAL_GZIP")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     let (embed_endpoint, _rerank_endpoint, _cached) =
         resolve_modal_endpoints(config, false).context("Modal embedder unavailable")?;
 
     eprintln!(
-        "[info] Using Modal embedder (GPU: {}, dim: {})",
-        config.modal.gpu_tier, MODAL_DIMENSION
+        "[info] Using Modal embedder (GPU: {}, dim: {}, batch: {}, concurrency: {})",
+        effective_gpu_tier(&config.modal.gpu_tier),
+        MODAL_DIMENSION,
+        batch_size,
+        concurrency
     );
 
     let endpoint = if let Some(endpoint) = config.modal.endpoint.clone() {
@@ -351,9 +356,58 @@ fn build_modal_embedder(config: &Config) -> Result<Arc<dyn embedding::BatchEmbed
         config.modal.proxy_token_id.clone(),
         config.modal.proxy_token_secret.clone(),
     )
-    .with_batch_size(batch_size);
+    .with_batch_size(batch_size)
+    .with_concurrency(concurrency)
+    .with_gzip(use_gzip);
 
     Ok(Arc::new(embedder))
+}
+
+fn resolve_modal_batch_size(config: &Config) -> usize {
+    let env_override = env::var("SGREP_MODAL_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+
+    let tier_default = match effective_gpu_tier(&config.modal.gpu_tier).as_str() {
+        "high" => 256,
+        "balanced" => 192,
+        "budget" => 96,
+        _ => 128,
+    };
+
+    let configured = if config.modal.batch_size == 0 {
+        None
+    } else {
+        Some(config.modal.batch_size)
+    };
+
+    let batch_size = env_override.or(configured).unwrap_or(tier_default);
+    batch_size.clamp(16, MODAL_MAX_TEXTS_PER_REQUEST)
+}
+
+fn resolve_modal_concurrency(config: &Config) -> usize {
+    let env_override = env::var("SGREP_MODAL_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+
+    let default = default_modal_concurrency();
+    let value = env_override.or(config.modal.concurrency).unwrap_or(default);
+
+    value.clamp(1, 64)
+}
+
+fn default_modal_concurrency() -> usize {
+    let half = num_cpus::get().saturating_div(2).max(1);
+    half.clamp(2, 8)
+}
+
+fn effective_gpu_tier(tier: &str) -> String {
+    let trimmed = tier.trim();
+    if trimmed.is_empty() {
+        "high".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[cfg(not(test))]
@@ -1133,6 +1187,56 @@ mod tests {
         let result = maybe_detach(&cli).unwrap();
         env::remove_var("SGREP_DETACH_TEST");
         assert_eq!(result, Some(("index", 0)));
+    }
+
+    #[test]
+    #[serial]
+    fn modal_batch_size_defaults_by_tier_and_env_override() {
+        env::remove_var("SGREP_MODAL_BATCH_SIZE");
+
+        let mut config = Config::default();
+        config.modal.gpu_tier = "high".into();
+        config.modal.batch_size = 0;
+        assert_eq!(resolve_modal_batch_size(&config), 256);
+
+        config.modal.gpu_tier = "balanced".into();
+        assert_eq!(resolve_modal_batch_size(&config), 192);
+
+        config.modal.gpu_tier = "budget".into();
+        assert_eq!(resolve_modal_batch_size(&config), 96);
+
+        config.modal.batch_size = 2000;
+        config.modal.gpu_tier = "high".into();
+        assert_eq!(
+            resolve_modal_batch_size(&config),
+            MODAL_MAX_TEXTS_PER_REQUEST
+        );
+
+        env::set_var("SGREP_MODAL_BATCH_SIZE", "32");
+        config.modal.batch_size = 0;
+        config.modal.gpu_tier = "".into();
+        assert_eq!(resolve_modal_batch_size(&config), 32);
+        env::remove_var("SGREP_MODAL_BATCH_SIZE");
+    }
+
+    #[test]
+    #[serial]
+    fn modal_concurrency_prefers_env_and_clamps() {
+        env::remove_var("SGREP_MODAL_CONCURRENCY");
+
+        let mut config = Config::default();
+        config.modal.concurrency = Some(100);
+        assert_eq!(resolve_modal_concurrency(&config), 64);
+
+        config.modal.concurrency = Some(4);
+        assert_eq!(resolve_modal_concurrency(&config), 4);
+
+        env::set_var("SGREP_MODAL_CONCURRENCY", "1");
+        assert_eq!(resolve_modal_concurrency(&config), 1);
+
+        env::set_var("SGREP_MODAL_CONCURRENCY", "100");
+        assert_eq!(resolve_modal_concurrency(&config), 64);
+        env::remove_var("SGREP_MODAL_CONCURRENCY");
     }
 
     fn sample_index(root: &Path) -> RepositoryIndex {

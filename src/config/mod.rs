@@ -36,6 +36,8 @@ pub struct ModalConfig {
     /// Batch size for embedding requests
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
+    /// Optional concurrency override for Modal embedder
+    pub concurrency: Option<usize>,
     /// Cached endpoint URL (auto-populated after first deploy)
     pub endpoint: Option<String>,
 }
@@ -45,7 +47,7 @@ fn default_gpu_tier() -> String {
 }
 
 fn default_batch_size() -> usize {
-    128 // Optimized for GPU workloads (L40S can handle 128-256 easily)
+    0 // Calculated based on GPU tier at runtime
 }
 
 /// Configuration for Turbopuffer remote storage
@@ -274,6 +276,7 @@ proxy_token_id = "wk-proxy-test"
 proxy_token_secret = "ws-proxy-test"
 gpu_tier = "balanced"
 batch_size = 64
+concurrency = 6
 endpoint = "https://example.modal.run"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
@@ -290,6 +293,7 @@ endpoint = "https://example.modal.run"
         );
         assert_eq!(config.modal.gpu_tier, "balanced");
         assert_eq!(config.modal.batch_size, 64);
+        assert_eq!(config.modal.concurrency, Some(6));
         assert_eq!(
             config.modal.endpoint,
             Some("https://example.modal.run".to_string())
@@ -304,7 +308,8 @@ token_id = "ak-test"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.modal.gpu_tier, "high");
-        assert_eq!(config.modal.batch_size, 128);
+        assert_eq!(config.modal.batch_size, 0);
+        assert_eq!(config.modal.concurrency, None);
         assert_eq!(config.modal.endpoint, None);
     }
 
@@ -312,6 +317,7 @@ token_id = "ak-test"
     fn empty_config_has_modal_defaults() {
         let config = Config::default();
         assert_eq!(config.modal.gpu_tier, "");
+        assert_eq!(config.modal.concurrency, None);
     }
 
     // Turbopuffer config tests
