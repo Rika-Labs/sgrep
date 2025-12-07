@@ -166,49 +166,22 @@ impl Embedder {
         }
 
         let total = texts.len();
-        let sub_batch_size = 32; // Process 32 at a time for progress granularity
-        let mut all_results = Vec::with_capacity(total);
-        let num_batches = (total + sub_batch_size - 1) / sub_batch_size;
+        let mut results = Vec::with_capacity(total);
 
-        for (batch_idx, chunk) in texts.chunks(sub_batch_size).enumerate() {
-            let mut batch_results = vec![Vec::new(); chunk.len()];
-            let mut uncached = Vec::new();
-            let mut uncached_indices = Vec::new();
-
-            for (i, text) in chunk.iter().enumerate() {
-                if let Some(cached) = self.cache.get(text) {
-                    batch_results[i] = cached.as_ref().clone();
-                } else {
-                    uncached.push(text.as_str());
-                    uncached_indices.push(i);
-                }
-            }
-
-            if !uncached.is_empty() {
-                let mut model = self.model.lock().unwrap();
-                let embeddings = model.embed(uncached.clone(), None)?;
-
-                for (embedding, &idx) in embeddings.iter().zip(&uncached_indices) {
-                    let mut truncated = embedding.clone();
-                    truncated.truncate(DEFAULT_VECTOR_DIM);
-                    batch_results[idx] = truncated.clone();
-                    self.cache.insert(chunk[idx].clone(), Arc::new(truncated));
-                }
-            }
-
-            all_results.extend(batch_results);
+        for (i, text) in texts.iter().enumerate() {
+            let vec = self.embed(text)?;
+            results.push(vec);
 
             if let Some(callback) = on_progress {
-                let completed = all_results.len();
                 callback(super::EmbedProgress {
-                    completed,
+                    completed: i + 1,
                     total,
-                    message: Some(format!("batch {}/{}", batch_idx + 1, num_batches)),
+                    message: Some(format!("{}/{}", i + 1, total)),
                 });
             }
         }
 
-        Ok(all_results)
+        Ok(results)
     }
 
     pub fn dimension(&self) -> usize {
@@ -242,6 +215,29 @@ impl BatchEmbedder for Embedder {
             .iter()
             .map(|t| vec![t.len() as f32; DEFAULT_VECTOR_DIM])
             .collect())
+    }
+
+    fn embed_batch_with_progress(
+        &self,
+        texts: &[String],
+        on_progress: Option<&super::ProgressCallback>,
+    ) -> Result<Vec<Vec<f32>>> {
+        let total = texts.len();
+        let mut results = Vec::with_capacity(total);
+
+        for (i, text) in texts.iter().enumerate() {
+            results.push(vec![text.len() as f32; DEFAULT_VECTOR_DIM]);
+
+            if let Some(callback) = on_progress {
+                callback(super::EmbedProgress {
+                    completed: i + 1,
+                    total,
+                    message: Some(format!("{}/{}", i + 1, total)),
+                });
+            }
+        }
+
+        Ok(results)
     }
 
     fn dimension(&self) -> usize {
@@ -539,5 +535,24 @@ mod tests {
         let embedder = PooledEmbedder::default();
         let vec = embedder.embed("hello").unwrap();
         assert_eq!(vec.len(), DEFAULT_VECTOR_DIM);
+    }
+
+    #[test]
+    fn embed_batch_with_progress_reports_one_at_a_time() {
+        let embedder = Embedder::default();
+        let texts: Vec<String> = (0..5).map(|i| format!("text {}", i)).collect();
+
+        let progress_values = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let progress_clone = progress_values.clone();
+
+        let callback: super::super::ProgressCallback = Box::new(move |p| {
+            progress_clone.lock().unwrap().push(p.completed);
+        });
+
+        let result = embedder.embed_batch_with_progress(&texts, Some(&callback));
+        assert!(result.is_ok());
+
+        let values = progress_values.lock().unwrap();
+        assert_eq!(*values, vec![1, 2, 3, 4, 5]);
     }
 }
