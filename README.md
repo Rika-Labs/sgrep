@@ -1,7 +1,7 @@
 <div align="center">
 
   <h1>sgrep</h1>
-  <p><em>Semantic code search with flexible deployment—from fully private local processing to cloud-scale GPU offloading</em></p>
+  <p><em>Semantic code search that scales from private local processing to cloud-scale GPU acceleration</em></p>
   <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a>
 
 </div>
