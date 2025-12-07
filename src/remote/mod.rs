@@ -119,7 +119,6 @@ impl RemoteFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     #[test]
     fn none_provider_returns_none_when_not_inferred() {

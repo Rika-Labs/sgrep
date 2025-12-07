@@ -24,7 +24,9 @@ pub const DEFAULT_VECTOR_DIM: usize = 384;
 #[derive(Debug, Clone)]
 pub struct EmbedProgress {
     pub completed: usize,
+    #[allow(dead_code)]
     pub total: usize,
+    #[allow(dead_code)]
     pub message: Option<String>,
 }
 

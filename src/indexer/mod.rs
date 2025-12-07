@@ -324,7 +324,6 @@ impl Indexer {
             pb.set_message(format!("indexed {} (cached)", files_completed));
         }
 
-        let pending_batches = batches.len();
         let mut pending_chunks: Vec<(usize, String)> = Vec::new();
         for batch in batches.into_iter() {
             for (idx, text) in batch.indices.into_iter().zip(batch.texts.into_iter()) {
@@ -356,7 +355,9 @@ impl Indexer {
                 pb_clone.set_position(progress.completed as u64);
             });
 
-            let all_embeddings = self.embedder.embed_batch_with_progress(&texts, Some(&progress_callback))?;
+            let all_embeddings = self
+                .embedder
+                .embed_batch_with_progress(&texts, Some(&progress_callback))?;
 
             pb.set_position(total_pending as u64);
 
