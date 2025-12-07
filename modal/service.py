@@ -29,6 +29,7 @@ GPU_CONFIG = GPU_TIERS.get(GPU_TIER, "L40S")
 
 EMBED_MODEL = os.environ.get("SGREP_EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
 RERANK_MODEL = os.environ.get("SGREP_RERANK_MODEL", "Qwen/Qwen3-Reranker-8B")
+MAX_MODEL_LEN = int(os.environ.get("SGREP_MODAL_MAX_MODEL_LEN", "2048"))
 
 MINUTES = 60
 
@@ -90,9 +91,18 @@ class Embedder:
             task="embed",
             trust_remote_code=True,
             gpu_memory_utilization=0.90,  # Use more GPU memory for larger batches
-            max_model_len=2048,           # Reasonable context for code chunks
+            max_model_len=MAX_MODEL_LEN,  # Guarded below with tokenizer truncation
             enforce_eager=True,           # Faster for embeddings (no CUDA graphs overhead)
         )
+        try:
+            self.tokenizer = self.model.get_tokenizer()
+        except Exception:
+            from transformers import AutoTokenizer
+
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                EMBED_MODEL, trust_remote_code=True
+            )
+        self.max_tokens = max(1, MAX_MODEL_LEN - 8)
         print("Embedding model loaded successfully")
 
     @modal.method()
@@ -110,7 +120,15 @@ class Embedder:
         if dimension != 384:
             raise ValueError(f"Dimension must be 384 for local/remote compatibility, got {dimension}")
 
-        outputs = self.model.embed(texts)
+        truncated = []
+        for text in texts:
+            tokens = self.tokenizer.encode(text, add_special_tokens=False)
+            if len(tokens) > self.max_tokens:
+                tokens = tokens[: self.max_tokens]
+                text = self.tokenizer.decode(tokens, skip_special_tokens=False)
+            truncated.append(text)
+
+        outputs = self.model.embed(truncated)
         return [list(out.outputs.embedding[:dimension]) for out in outputs]
 
 
