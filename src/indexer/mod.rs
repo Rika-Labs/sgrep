@@ -73,6 +73,21 @@ pub struct IndexTimings {
     pub write: Duration,
 }
 
+fn make_progress_callback(pb: ProgressBar, offset: usize, total: usize) -> ProgressCallback {
+    Box::new(move |progress: EmbedProgress| {
+        let mut position = offset.saturating_add(progress.completed);
+        if position > total {
+            position = total;
+        }
+
+        pb.set_position(position as u64);
+
+        if let Some(msg) = &progress.message {
+            pb.set_message(msg.clone());
+        }
+    })
+}
+
 #[derive(Clone)]
 pub struct Indexer {
     embedder: Arc<dyn BatchEmbedder>,
@@ -356,16 +371,12 @@ impl Indexer {
             pb.set_length(total_pending as u64);
             pb.set_position(0);
 
-            let progress_callback = {
-                let pb_clone = pb.clone();
-                Box::new(move |progress: EmbedProgress| {
-                    pb_clone.set_position(progress.completed as u64);
-                }) as ProgressCallback
-            };
-
             if self.remote_embedding {
                 let mut processed = 0usize;
                 for batch in pending_batches.drain(..) {
+                    let progress_callback =
+                        make_progress_callback(pb.clone(), processed, total_pending);
+
                     let embeddings = self
                         .embedder
                         .embed_batch_with_progress(&batch.texts, Some(&progress_callback))?;
@@ -388,6 +399,8 @@ impl Indexer {
                     .iter()
                     .flat_map(|b| b.indices.iter().copied())
                     .collect();
+
+                let progress_callback = make_progress_callback(pb.clone(), 0, total_pending);
 
                 let all_embeddings = self
                     .embedder
@@ -871,6 +884,7 @@ impl Indexer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indicatif::ProgressBar;
     use serial_test::serial;
     use std::fs;
     use std::sync::atomic::AtomicUsize;
@@ -947,6 +961,28 @@ mod tests {
         let embedder = Arc::new(DeterministicEmbedder::default());
         let indexer = Indexer::new_concrete(embedder);
         assert!(indexer.warmup().is_ok());
+    }
+
+    #[test]
+    fn progress_callback_applies_offset() {
+        let pb = ProgressBar::hidden();
+        pb.set_length(10);
+
+        let callback = make_progress_callback(pb.clone(), 4, 10);
+
+        callback(EmbedProgress {
+            completed: 3,
+            total: 10,
+            message: None,
+        });
+        assert_eq!(pb.position(), 7);
+
+        callback(EmbedProgress {
+            completed: 20,
+            total: 10,
+            message: None,
+        });
+        assert_eq!(pb.position(), 10);
     }
 
     #[test]
