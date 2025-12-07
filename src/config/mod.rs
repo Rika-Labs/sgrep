@@ -347,6 +347,8 @@ api_key = "tpuf_test_key"
     #[test]
     fn parse_full_config() {
         let toml = r#"
+remote_provider = "turbopuffer"
+
 [embedding]
 provider = "modal"
 
@@ -366,8 +368,6 @@ namespace_prefix = "acme"
 api_key = "pc-key"
 endpoint = "https://idx.svc.test.pinecone.io"
 namespace = "ns"
-
-remote_provider = "turbopuffer"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);

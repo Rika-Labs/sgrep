@@ -6,7 +6,7 @@ mod hnsw;
 mod results;
 mod scoring;
 
-pub use dedup::{suppress_near_duplicates, DedupOptions, DEFAULT_SEMANTIC_DEDUP_THRESHOLD};
+pub use dedup::{suppress_near_duplicates, DedupOptions};
 pub use results::{DirectorySearchResult, FileSearchResult, SearchResult};
 pub use scoring::cosine_similarity;
 
@@ -1255,6 +1255,7 @@ impl SearchEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::dedup::DEFAULT_SEMANTIC_DEDUP_THRESHOLD;
     use crate::store::IndexMetadata;
     use chrono::Utc;
     use std::path::PathBuf;

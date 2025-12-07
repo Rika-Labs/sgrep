@@ -328,7 +328,8 @@ impl BatchEmbedder for PooledEmbedder {
         texts: &[String],
         on_progress: Option<&super::ProgressCallback>,
     ) -> Result<Vec<Vec<f32>>> {
-        self.get_embedder().embed_batch_with_progress(texts, on_progress)
+        self.get_embedder()
+            .embed_batch_with_progress(texts, on_progress)
     }
 
     fn dimension(&self) -> usize {

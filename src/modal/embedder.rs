@@ -136,7 +136,7 @@ impl BatchEmbedder for ModalEmbedder {
 
         let total = texts.len();
         let mut all_embeddings = Vec::with_capacity(total);
-        let num_batches = (total + self.batch_size - 1) / self.batch_size;
+        let num_batches = total.div_ceil(self.batch_size);
 
         for (batch_idx, chunk) in texts.chunks(self.batch_size).enumerate() {
             if let Some(callback) = on_progress {

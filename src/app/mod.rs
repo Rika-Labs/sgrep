@@ -175,7 +175,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             if stats {
                 return handle_index_stats(path, json);
             }
-            handle_index(embedder, path, force, batch_size, profile, remote)
+            handle_index(embedder, path, force, batch_size, profile, remote, None)
         }
         Commands::Search {
             query,
@@ -514,6 +514,7 @@ fn handle_index(
     batch_size: Option<usize>,
     profile: bool,
     remote_flag: bool,
+    remote_override: Option<Arc<dyn RemoteVectorStore>>,
 ) -> Result<()> {
     let path = resolve_repo_path(path)?;
 
@@ -527,7 +528,15 @@ fn handle_index(
         }
     }
 
-    let remote_store = build_remote_store(remote_flag, &path)?;
+    let remote_store = if remote_flag {
+        if let Some(store) = remote_override {
+            Some(store)
+        } else {
+            build_remote_store(true, &path)?
+        }
+    } else {
+        None
+    };
 
     let indexer = indexer::Indexer::new(embedder.clone());
     let report = indexer
@@ -946,12 +955,13 @@ fn setup_tracing() {
 mod tests {
     use super::*;
     use crate::chunker::CodeChunk;
+    use crate::remote::RemoteSearchHit;
     use crate::store::{IndexMetadata, RepositoryIndex};
     use serial_test::serial;
     use std::any::type_name_of_val;
     use std::ffi::OsString;
     use std::path::PathBuf;
-    use std::sync::Once;
+    use std::sync::{Mutex, Once};
     use uuid::Uuid;
 
     #[derive(Clone, Default)]
@@ -1058,6 +1068,56 @@ mod tests {
         RepositoryIndex::new(meta, vec![chunk], vec![vec![1.0, 2.0, 3.0]])
     }
 
+    #[derive(Default)]
+    struct MockRemoteStore {
+        upserts: Mutex<Vec<Vec<RemoteChunk>>>,
+        queries: Mutex<Vec<(Vec<f32>, usize)>>,
+        query_hits: Mutex<Vec<RemoteSearchHit>>,
+    }
+
+    impl MockRemoteStore {
+        fn with_hits(hits: Vec<RemoteSearchHit>) -> Self {
+            Self {
+                query_hits: Mutex::new(hits),
+                ..Default::default()
+            }
+        }
+
+        fn upsert_called(&self) -> bool {
+            !self.upserts.lock().unwrap().is_empty()
+        }
+
+        fn last_upsert_count(&self) -> Option<usize> {
+            self.upserts.lock().unwrap().last().map(|c| c.len())
+        }
+
+        fn query_called(&self) -> bool {
+            !self.queries.lock().unwrap().is_empty()
+        }
+    }
+
+    impl RemoteVectorStore for MockRemoteStore {
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+
+        fn upsert(&self, chunks: &[RemoteChunk]) -> Result<()> {
+            self.upserts.lock().unwrap().push(chunks.to_vec());
+            Ok(())
+        }
+
+        fn query(&self, vector: &[f32], top_k: usize) -> Result<Vec<RemoteSearchHit>> {
+            self.queries.lock().unwrap().push((vector.to_vec(), top_k));
+
+            let hits = self.query_hits.lock().unwrap().clone();
+            Ok(hits.into_iter().take(top_k).collect())
+        }
+
+        fn delete_namespace(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn build_embedder_sets_env_flags() {
         let prev_token = env::var("TOKENIZERS_PARALLELISM").ok();
@@ -1129,8 +1189,16 @@ mod tests {
         let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
-        handle_index(embedder, Some(repo.clone()), true, Some(32), true, false)
-            .expect("indexing should succeed");
+        handle_index(
+            embedder,
+            Some(repo.clone()),
+            true,
+            Some(32),
+            true,
+            false,
+            None,
+        )
+        .expect("indexing should succeed");
         std::fs::remove_dir_all(&repo).ok();
     }
 
@@ -1143,7 +1211,7 @@ mod tests {
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
 
         // No files means cache_hits + cache_misses = 0, exercising the zero-hit-rate branch.
-        handle_index(embedder, Some(repo.clone()), true, None, true, false).unwrap();
+        handle_index(embedder, Some(repo.clone()), true, None, true, false, None).unwrap();
 
         std::fs::remove_dir_all(&repo).ok();
     }
@@ -1162,11 +1230,143 @@ mod tests {
             None,
             true,
             false,
+            None,
         )
         .unwrap();
         // second run should see cache hits > 0 and exercise hit-rate branch
-        handle_index(embedder, Some(repo.clone()), false, None, true, false).unwrap();
+        handle_index(embedder, Some(repo.clone()), false, None, true, false, None).unwrap();
 
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn search_uses_remote_store_when_flagged() {
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+
+        let remote = Arc::new(MockRemoteStore::with_hits(vec![RemoteSearchHit {
+            id: "hit1".into(),
+            score: 0.9,
+            path: repo.join("lib.rs").display().to_string(),
+            start_line: 1,
+            end_line: 1,
+            content: "pub fn hi() {}".into(),
+            language: "rust".into(),
+        }]));
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+
+        handle_search(
+            embedder,
+            SearchParams {
+                query: "hi",
+                path: repo.as_path(),
+                limit: 1,
+                context: false,
+                glob: vec![],
+                filters: vec![],
+                json: true,
+                debug: false,
+                no_rerank: true,
+                rerank_oversample: 1,
+                offload: false,
+                remote: Some(remote.clone()),
+            },
+        )
+        .unwrap();
+
+        assert!(remote.query_called());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn search_uses_local_index_when_remote_not_requested() {
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+
+        let indexer = indexer::Indexer::new(embedder.clone());
+        indexer
+            .build_index(indexer::IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: Some(4),
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        handle_search(
+            embedder,
+            SearchParams {
+                query: "hi",
+                path: repo.as_path(),
+                limit: 1,
+                context: false,
+                glob: vec![],
+                filters: vec![],
+                json: true,
+                debug: false,
+                no_rerank: true,
+                rerank_oversample: 1,
+                offload: false,
+                remote: None,
+            },
+        )
+        .unwrap();
+
+        let store = store::IndexStore::new(repo.as_path()).unwrap();
+        assert!(store.load().unwrap().is_some());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn index_pushes_remote_when_flag_true() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let remote = Arc::new(MockRemoteStore::default());
+
+        handle_index(
+            embedder,
+            Some(repo.clone()),
+            true,
+            Some(16),
+            false,
+            true,
+            Some(remote.clone()),
+        )
+        .unwrap();
+
+        assert!(remote.upsert_called());
+        assert!(remote.last_upsert_count().unwrap_or_default() > 0);
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn index_saves_locally_when_remote_flag_absent() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let remote = Arc::new(MockRemoteStore::default());
+
+        handle_index(
+            embedder,
+            Some(repo.clone()),
+            true,
+            None,
+            false,
+            false,
+            Some(remote.clone()),
+        )
+        .unwrap();
+
+        assert!(!remote.upsert_called());
+        let store = store::IndexStore::new(repo.as_path()).unwrap();
+        assert!(store.load().unwrap().is_some());
         std::fs::remove_dir_all(&repo).ok();
     }
 
