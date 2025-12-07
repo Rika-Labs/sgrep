@@ -1329,7 +1329,10 @@ mod tests {
                     filters: vec![],
                     rerank: false,
                     oversample_factor: 3,
-                    dedup: DedupOptions { enabled: false, ..Default::default() },
+                    dedup: DedupOptions {
+                        enabled: false,
+                        ..Default::default()
+                    },
                 },
             )
             .unwrap();
@@ -1476,7 +1479,10 @@ mod tests {
                     filters: vec![],
                     rerank: false,
                     oversample_factor: 3,
-                    dedup: DedupOptions { enabled: false, ..Default::default() },
+                    dedup: DedupOptions {
+                        enabled: false,
+                        ..Default::default()
+                    },
                 },
             )
             .unwrap();
@@ -1514,7 +1520,10 @@ mod tests {
                     filters: vec![],
                     rerank: false,
                     oversample_factor: 3,
-                    dedup: DedupOptions { enabled: false, ..Default::default() },
+                    dedup: DedupOptions {
+                        enabled: false,
+                        ..Default::default()
+                    },
                 },
             )
             .unwrap();
@@ -1555,7 +1564,10 @@ mod tests {
                     filters: vec![],
                     rerank: true,
                     oversample_factor: 3,
-                    dedup: DedupOptions { enabled: false, ..Default::default() },
+                    dedup: DedupOptions {
+                        enabled: false,
+                        ..Default::default()
+                    },
                 },
             )
             .unwrap();
@@ -1592,7 +1604,10 @@ mod tests {
                     filters: vec![],
                     rerank: false,
                     oversample_factor: 3,
-                    dedup: DedupOptions { enabled: false, ..Default::default() },
+                    dedup: DedupOptions {
+                        enabled: false,
+                        ..Default::default()
+                    },
                 },
             )
             .unwrap();
@@ -1625,7 +1640,10 @@ mod tests {
                     filters: vec![],
                     rerank: true,
                     oversample_factor: 3,
-                    dedup: DedupOptions { enabled: false, ..Default::default() },
+                    dedup: DedupOptions {
+                        enabled: false,
+                        ..Default::default()
+                    },
                 },
             )
             .unwrap();
@@ -1800,7 +1818,10 @@ mod tests {
                     filters: vec![],
                     rerank: false,
                     oversample_factor: 3,
-                    dedup: DedupOptions { enabled: false, ..Default::default() },
+                    dedup: DedupOptions {
+                        enabled: false,
+                        ..Default::default()
+                    },
                 },
             )
             .unwrap();
@@ -2424,7 +2445,11 @@ mod tests {
         }
 
         #[allow(dead_code)]
-        fn make_result_with_score(chunk: CodeChunk, score: f32, vector: Vec<f32>) -> (SearchResult, Vec<f32>) {
+        fn make_result_with_score(
+            chunk: CodeChunk,
+            score: f32,
+            vector: Vec<f32>,
+        ) -> (SearchResult, Vec<f32>) {
             (
                 SearchResult {
                     chunk,
@@ -2477,8 +2502,13 @@ mod tests {
 
         #[test]
         fn suppress_semantically_similar_chunks() {
-            let chunk1 = make_chunk_with_hash("fn authenticate() { check_password(); }", "auth.rs", "h1");
-            let chunk2 = make_chunk_with_hash("fn authenticate() { check_password(); verify(); }", "auth2.rs", "h2");
+            let chunk1 =
+                make_chunk_with_hash("fn authenticate() { check_password(); }", "auth.rs", "h1");
+            let chunk2 = make_chunk_with_hash(
+                "fn authenticate() { check_password(); verify(); }",
+                "auth2.rs",
+                "h2",
+            );
             let chunk3 = make_chunk_with_hash("fn connect_to_database() {}", "db.rs", "h3");
 
             let vectors = vec![
@@ -2528,10 +2558,7 @@ mod tests {
             let chunk1 = make_chunk_with_hash("fn process_user() {}", "a.rs", "h1");
             let chunk2 = make_chunk_with_hash("fn process_order() {}", "b.rs", "h2");
 
-            let vectors = vec![
-                vec![1.0, 0.0, 0.0, 0.0],
-                vec![0.8, 0.6, 0.0, 0.0],
-            ];
+            let vectors = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.8, 0.6, 0.0, 0.0]];
 
             let mut results = vec![
                 SearchResult {
@@ -2572,29 +2599,31 @@ mod tests {
                 vec![0.0, 1.0, 0.0, 0.0],
             ];
 
-            let create_results = || vec![
-                SearchResult {
-                    chunk: chunk1.clone(),
-                    score: 0.9,
-                    semantic_score: 0.9,
-                    bm25_score: 0.0,
-                    show_full_context: false,
-                },
-                SearchResult {
-                    chunk: chunk2.clone(),
-                    score: 0.85,
-                    semantic_score: 0.85,
-                    bm25_score: 0.0,
-                    show_full_context: false,
-                },
-                SearchResult {
-                    chunk: chunk3.clone(),
-                    score: 0.8,
-                    semantic_score: 0.8,
-                    bm25_score: 0.0,
-                    show_full_context: false,
-                },
-            ];
+            let create_results = || {
+                vec![
+                    SearchResult {
+                        chunk: chunk1.clone(),
+                        score: 0.9,
+                        semantic_score: 0.9,
+                        bm25_score: 0.0,
+                        show_full_context: false,
+                    },
+                    SearchResult {
+                        chunk: chunk2.clone(),
+                        score: 0.85,
+                        semantic_score: 0.85,
+                        bm25_score: 0.0,
+                        show_full_context: false,
+                    },
+                    SearchResult {
+                        chunk: chunk3.clone(),
+                        score: 0.8,
+                        semantic_score: 0.8,
+                        bm25_score: 0.0,
+                        show_full_context: false,
+                    },
+                ]
+            };
 
             let mut results1 = create_results();
             let mut results2 = create_results();
@@ -2667,7 +2696,11 @@ mod tests {
             }];
 
             let original_len = results.len();
-            suppress_near_duplicates(&mut results, &[vec![1.0, 0.0, 0.0, 0.0]], &DedupOptions::default());
+            suppress_near_duplicates(
+                &mut results,
+                &[vec![1.0, 0.0, 0.0, 0.0]],
+                &DedupOptions::default(),
+            );
             assert_eq!(results.len(), original_len);
         }
 
@@ -2700,7 +2733,10 @@ mod tests {
                 )
                 .unwrap();
 
-            let same_hash_count = results.iter().filter(|r| r.chunk.hash == "same_hash").count();
+            let same_hash_count = results
+                .iter()
+                .filter(|r| r.chunk.hash == "same_hash")
+                .count();
             assert_eq!(same_hash_count, 1);
         }
 
@@ -2719,7 +2755,10 @@ mod tests {
                 .collect();
 
             let options = SearchOptions {
-                dedup: DedupOptions { enabled: false, ..Default::default() },
+                dedup: DedupOptions {
+                    enabled: false,
+                    ..Default::default()
+                },
                 rerank: false,
                 ..Default::default()
             };

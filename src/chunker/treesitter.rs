@@ -120,13 +120,12 @@ fn merge_small_spans(mut spans: Vec<SemanticSpan>, file_context: &str) -> Vec<Se
 
                 if should_merge {
                     c.end_line = span.end_line;
-                    let span_text_no_context = if !file_context.is_empty()
-                        && span.text.starts_with(file_context)
-                    {
-                        &span.text[file_context.len()..]
-                    } else {
-                        &span.text
-                    };
+                    let span_text_no_context =
+                        if !file_context.is_empty() && span.text.starts_with(file_context) {
+                            &span.text[file_context.len()..]
+                        } else {
+                            &span.text
+                        };
                     c.text = format!("{}\n\n{}", c.text, span_text_no_context);
                     current = Some(c);
                 } else {

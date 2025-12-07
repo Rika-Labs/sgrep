@@ -487,11 +487,19 @@ impl Bar {
         std::fs::write(&path, source).unwrap();
 
         let chunks = chunk_file(&path, &dir).unwrap();
-        let foo_chunks: Vec<_> = chunks.iter().filter(|c| c.text.contains("impl Foo")).collect();
-        let bar_chunks: Vec<_> = chunks.iter().filter(|c| c.text.contains("impl Bar")).collect();
+        let foo_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.text.contains("impl Foo"))
+            .collect();
+        let bar_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.text.contains("impl Bar"))
+            .collect();
 
-        let has_foo = !foo_chunks.is_empty() || chunks.iter().any(|c| c.text.contains("struct Foo"));
-        let has_bar = !bar_chunks.is_empty() || chunks.iter().any(|c| c.text.contains("struct Bar"));
+        let has_foo =
+            !foo_chunks.is_empty() || chunks.iter().any(|c| c.text.contains("struct Foo"));
+        let has_bar =
+            !bar_chunks.is_empty() || chunks.iter().any(|c| c.text.contains("struct Bar"));
         assert!(has_foo, "Expected Foo content in chunks");
         assert!(has_bar, "Expected Bar content in chunks");
     }
@@ -561,7 +569,10 @@ impl Bar {
         std::fs::write(&path, &source).unwrap();
 
         let chunks = chunk_file(&path, &dir).unwrap();
-        assert!(chunks.len() >= 2, "Expected fallback to create multiple chunks");
+        assert!(
+            chunks.len() >= 2,
+            "Expected fallback to create multiple chunks"
+        );
         assert_eq!(chunks[0].language, "plain");
         assert!(
             chunks[0].end_line >= 350,

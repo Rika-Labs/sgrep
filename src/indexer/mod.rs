@@ -324,6 +324,7 @@ impl Indexer {
             pb.set_message(format!("indexed {} (cached)", files_completed));
         }
 
+        let pending_batches = batches.len();
         let mut pending_chunks: Vec<(usize, String)> = Vec::new();
         for batch in batches.into_iter() {
             for (idx, text) in batch.indices.into_iter().zip(batch.texts.into_iter()) {
@@ -345,7 +346,10 @@ impl Indexer {
             );
             pb.set_length(total_pending as u64);
             pb.set_position(0);
-            pb.set_message("embedding...");
+            pb.set_message(format!(
+                "{} pending across {} batches; {} cached",
+                total_pending, pending_batches, cache_hits
+            ));
 
             // Collect all texts for batch embedding (much faster for remote embedders like Modal)
             let texts: Vec<String> = pending_chunks
@@ -355,9 +359,11 @@ impl Indexer {
             let indices: Vec<usize> = pending_chunks.iter().map(|(idx, _)| *idx).collect();
 
             // Embed in batches using embed_batch for efficiency
+            pb.set_message("embedding: waiting on embedder response");
             let all_embeddings = self.embedder.embed_batch(&texts)?;
 
             pb.set_position(total_pending as u64);
+            pb.set_message("embedding: received vectors");
 
             for (i, vec) in all_embeddings.into_iter().enumerate() {
                 let idx = indices[i];

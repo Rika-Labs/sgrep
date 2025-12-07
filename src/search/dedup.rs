@@ -191,7 +191,11 @@ mod tests {
         let chunk = make_chunk_with_hash("fn foo() {}", "a.rs", "h1");
         let mut results = vec![make_result(chunk, 0.9)];
 
-        suppress_near_duplicates(&mut results, &[vec![1.0, 0.0, 0.0, 0.0]], &DedupOptions::default());
+        suppress_near_duplicates(
+            &mut results,
+            &[vec![1.0, 0.0, 0.0, 0.0]],
+            &DedupOptions::default(),
+        );
 
         assert_eq!(results.len(), 1);
     }
@@ -208,10 +212,7 @@ mod tests {
             ]
         };
 
-        let vectors = vec![
-            vec![1.0, 0.0, 0.0, 0.0],
-            vec![0.5, 0.5, 0.0, 0.0],
-        ];
+        let vectors = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.5, 0.5, 0.0, 0.0]];
 
         let mut results1 = create_results();
         let mut results2 = create_results();
@@ -229,7 +230,8 @@ mod tests {
     fn semantic_dedup_with_unsorted_input() {
         let chunk_low = make_chunk_with_hash("fn low_score() {}", "low.rs", "h_low");
         let chunk_high = make_chunk_with_hash("fn high_score() {}", "high.rs", "h_high");
-        let chunk_similar = make_chunk_with_hash("fn similar_to_high() {}", "similar.rs", "h_similar");
+        let chunk_similar =
+            make_chunk_with_hash("fn similar_to_high() {}", "similar.rs", "h_similar");
 
         let mut results = vec![
             make_result(chunk_low.clone(), 0.5),
