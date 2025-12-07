@@ -108,6 +108,7 @@ impl RemoteVectorStore for PineconeStore {
         }
 
         #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
         struct QueryRequest<'a> {
             vector: &'a [f32],
             top_k: usize,
@@ -182,6 +183,7 @@ impl RemoteVectorStore for PineconeStore {
     fn delete_namespace(&self) -> Result<()> {
         let url = self.vectors_url("vectors/delete");
         #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
         struct DeleteRequest<'a> {
             delete_all: bool,
             namespace: &'a str,
