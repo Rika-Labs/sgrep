@@ -1,6 +1,6 @@
 [package]
 name = "sgrep"
-version = "1.5.4"
+version = "1.5.5"
 edition = "2021"
 rust-version = "1.75"
 description = "Lightning-fast local-first semantic code search"
