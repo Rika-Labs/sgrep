@@ -15,21 +15,18 @@ const HEALTH_TIMEOUT_SECS: u64 = 10;
 struct EndpointCache {
     embed_url: String,
     health_url: String,
-    gpu_tier: String,
 }
 
 pub struct ModalDeployer {
-    gpu_tier: String,
     token_id: Option<String>,
     token_secret: Option<String>,
     cache_path: PathBuf,
 }
 
 impl ModalDeployer {
-    pub fn new(gpu_tier: String, token_id: Option<String>, token_secret: Option<String>) -> Self {
+    pub fn new(token_id: Option<String>, token_secret: Option<String>) -> Self {
         let cache_path = Self::default_cache_path();
         Self {
-            gpu_tier,
             token_id,
             token_secret,
             cache_path,
@@ -47,7 +44,6 @@ impl ModalDeployer {
     }
 
     pub fn check_modal_cli(&self) -> Result<()> {
-        // Check if Modal CLI is installed
         if Command::new("modal").arg("--version").output().is_err() {
             eprintln!("[info] Modal CLI not found. Installing...");
             let pip = if Command::new("pip3").arg("--version").output().is_ok() {
@@ -69,12 +65,10 @@ impl ModalDeployer {
             eprintln!("[info] Modal CLI installed.");
         }
 
-        // If tokens are provided in config, trust them - deploy will fail if invalid
         if self.token_id.is_some() && self.token_secret.is_some() {
             return Ok(());
         }
 
-        // No tokens in config - check if already authenticated via modal CLI
         let is_authenticated = Command::new("modal")
             .args(["token", "show"])
             .output()
@@ -97,7 +91,6 @@ impl ModalDeployer {
         Ok(())
     }
 
-    /// Build a Command with Modal token env vars set if available
     fn modal_command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new("modal");
         cmd.args(args);
@@ -110,13 +103,12 @@ impl ModalDeployer {
         cmd
     }
 
-    pub fn check_health(&self, base_url: &str) -> Result<bool> {
-        let health_url = format!("{}/health", base_url.trim_end_matches('/'));
+    pub fn check_health(&self, health_url: &str) -> Result<bool> {
         let client = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS))
             .build();
 
-        match client.get(&health_url).call() {
+        match client.get(health_url).call() {
             Ok(resp) if resp.status() == 200 => Ok(true),
             Ok(_) => Ok(false),
             Err(_) => Ok(false),
@@ -144,10 +136,7 @@ impl ModalDeployer {
         let service_path = temp_dir.path().join("service.py");
         fs::write(&service_path, MODAL_SERVICE_PY).context("Failed to write service.py")?;
 
-        eprintln!(
-            "[info] Deploying Modal service to modal.com (GPU: {})...",
-            self.gpu_tier
-        );
+        eprintln!("[info] Deploying Modal service to modal.com...");
 
         let service_path_str = service_path
             .to_str()
@@ -155,7 +144,6 @@ impl ModalDeployer {
 
         let output = self
             .modal_command(&["deploy", service_path_str])
-            .env("GPU_TIER", &self.gpu_tier)
             .output()
             .context("Failed to run modal deploy")?;
 
@@ -191,25 +179,16 @@ impl ModalDeployer {
         Ok(EndpointCache {
             embed_url,
             health_url,
-            gpu_tier: self.gpu_tier.clone(),
         })
     }
 
-    /// Returns (embed_url, used_cache)
     pub fn ensure_deployed(&self) -> Result<(String, bool)> {
         if let Some(cache) = self.load_cache() {
-            if cache.gpu_tier == self.gpu_tier {
-                eprintln!("[info] Checking cached Modal endpoint health...");
-                if self.check_health(&cache.health_url).unwrap_or(false) {
-                    return Ok((cache.embed_url, true));
-                }
-                eprintln!("[info] Cached endpoint unhealthy, redeploying...");
-            } else {
-                eprintln!(
-                    "[info] GPU tier changed ({} -> {}), redeploying...",
-                    cache.gpu_tier, self.gpu_tier
-                );
+            eprintln!("[info] Checking cached Modal endpoint health...");
+            if self.check_health(&cache.health_url).unwrap_or(false) {
+                return Ok((cache.embed_url, true));
             }
+            eprintln!("[info] Cached endpoint unhealthy, redeploying...");
         }
 
         let cache = self.deploy()?;
@@ -237,18 +216,16 @@ mod tests {
     #[test]
     fn new_deployer_has_correct_fields() {
         let deployer = ModalDeployer::new(
-            "balanced".to_string(),
             Some("token-id".to_string()),
             Some("token-secret".to_string()),
         );
-        assert_eq!(deployer.gpu_tier, "balanced");
         assert_eq!(deployer.token_id, Some("token-id".to_string()));
         assert_eq!(deployer.token_secret, Some("token-secret".to_string()));
     }
 
     #[test]
     fn parse_deploy_output_extracts_urls() {
-        let deployer = ModalDeployer::new("high".to_string(), None, None);
+        let deployer = ModalDeployer::new(None, None);
         let output = r#"
 Creating objects...
 Created fastapi_endpoint embed at https://user--sgrep-offload-embed.modal.run
@@ -267,8 +244,8 @@ Created fastapi_endpoint health at https://user--sgrep-offload-health.modal.run
 
     #[test]
     fn check_health_returns_false_for_invalid_url() {
-        let deployer = ModalDeployer::new("high".to_string(), None, None);
-        let result = deployer.check_health("http://localhost:99999");
+        let deployer = ModalDeployer::new(None, None);
+        let result = deployer.check_health("http://localhost:99999/health");
         assert!(result.is_ok());
         assert!(!result.unwrap());
     }
@@ -278,13 +255,11 @@ Created fastapi_endpoint health at https://user--sgrep-offload-health.modal.run
         let cache = EndpointCache {
             embed_url: "https://embed.modal.run".to_string(),
             health_url: "https://health.modal.run".to_string(),
-            gpu_tier: "high".to_string(),
         };
 
         let json = serde_json::to_string(&cache).unwrap();
         let parsed: EndpointCache = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.embed_url, cache.embed_url);
-        assert_eq!(parsed.gpu_tier, cache.gpu_tier);
     }
 }

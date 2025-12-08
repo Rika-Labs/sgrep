@@ -74,8 +74,7 @@ token_secret = "as-..."          # Modal API token secret from https://modal.com
 proxy_token_id = "wk-..."        # Modal proxy auth token ID from https://modal.com/settings
 proxy_token_secret = "ws-..."    # Modal proxy auth token secret from https://modal.com/settings
 
-gpu_tier = "high"                # budget (T4), balanced (A10G), high (L40S)
-batch_size = 128                 # texts per request
+batch_size = 128                 # texts per request (default: 128)
 endpoint = "https://..."         # auto-populated after first deploy
 ```
 
@@ -93,16 +92,9 @@ Modal requires two types of tokens:
    - Get from [Modal Settings](https://modal.com/settings) under "Proxy Auth Tokens"
    - These secure your endpoints so only you can call them
 
-**GPU tiers:**
+**GPU:** A10G (~$0.45/hr) is used for all Modal workloads, providing a good balance of speed and cost.
 
-| Tier | GPU | Cost | Best for |
-|------|-----|------|----------|
-| `budget` | T4 | ~$0.25/hr | Cost-sensitive workloads |
-| `balanced` | A10G | ~$0.45/hr | Good balance of speed/cost |
-| `high` | L40S | ~$1.10/hr | Maximum performance (default) |
-
-**Models used:**
-- Embeddings: [Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) (8K context, truncated to 384 dimensions for local compatibility)
+**Model:** [jina-embeddings-v2-base-code](https://huggingface.co/jinaai/jina-embeddings-v2-base-code) (8K context, truncated to 384 dimensions for local compatibility)
 
 First run auto-deploys the service; subsequent runs use cached endpoints.
 

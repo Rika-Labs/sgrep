@@ -290,14 +290,7 @@ fn resolve_modal_endpoints(config: &Config, json_mode: bool) -> Result<(String, 
         return Ok(existing.clone());
     }
 
-    let gpu_tier = if config.modal.gpu_tier.is_empty() {
-        "high".to_string()
-    } else {
-        config.modal.gpu_tier.clone()
-    };
-
     let deployer = ModalDeployer::new(
-        gpu_tier,
         config.modal.token_id.clone(),
         config.modal.token_secret.clone(),
     );
@@ -328,8 +321,7 @@ fn build_modal_embedder(config: &Config) -> Result<Arc<dyn embedding::BatchEmbed
         resolve_modal_endpoints(config, false).context("Modal embedder unavailable")?;
 
     eprintln!(
-        "[info] Using Modal embedder (GPU: {}, dim: {}, batch: {}, concurrency: {})",
-        effective_gpu_tier(&config.modal.gpu_tier),
+        "[info] Using Modal embedder (GPU: A10G, dim: {}, batch: {}, concurrency: {})",
         MODAL_DIMENSION,
         batch_size,
         concurrency
@@ -360,20 +352,13 @@ fn resolve_modal_batch_size(config: &Config) -> usize {
         .ok()
         .and_then(|v| v.parse::<usize>().ok());
 
-    let tier_default = match effective_gpu_tier(&config.modal.gpu_tier).as_str() {
-        "high" => 128,
-        "balanced" => 96,
-        "budget" => 64,
-        _ => 128,
-    };
-
     let configured = if config.modal.batch_size == 0 {
         None
     } else {
         Some(config.modal.batch_size)
     };
 
-    let batch_size = env_override.or(configured).unwrap_or(tier_default);
+    let batch_size = env_override.or(configured).unwrap_or(128);
     batch_size.clamp(16, MODAL_MAX_TEXTS_PER_REQUEST)
 }
 
@@ -391,15 +376,6 @@ fn resolve_modal_concurrency(config: &Config) -> usize {
 fn default_modal_concurrency() -> usize {
     let cpus = num_cpus::get();
     cpus.clamp(16, 48)
-}
-
-fn effective_gpu_tier(tier: &str) -> String {
-    let trimmed = tier.trim();
-    if trimmed.is_empty() {
-        "high".to_string()
-    } else {
-        trimmed.to_string()
-    }
 }
 
 fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result<()> {
@@ -1052,22 +1028,14 @@ mod tests {
 
     #[test]
     #[serial]
-    fn modal_batch_size_defaults_by_tier_and_env_override() {
+    fn modal_batch_size_defaults_and_env_override() {
         env::remove_var("SGREP_MODAL_BATCH_SIZE");
 
         let mut config = Config::default();
-        config.modal.gpu_tier = "high".into();
         config.modal.batch_size = 0;
         assert_eq!(resolve_modal_batch_size(&config), 128);
 
-        config.modal.gpu_tier = "balanced".into();
-        assert_eq!(resolve_modal_batch_size(&config), 96);
-
-        config.modal.gpu_tier = "budget".into();
-        assert_eq!(resolve_modal_batch_size(&config), 64);
-
         config.modal.batch_size = 2000;
-        config.modal.gpu_tier = "high".into();
         assert_eq!(
             resolve_modal_batch_size(&config),
             MODAL_MAX_TEXTS_PER_REQUEST
@@ -1075,7 +1043,6 @@ mod tests {
 
         env::set_var("SGREP_MODAL_BATCH_SIZE", "32");
         config.modal.batch_size = 0;
-        config.modal.gpu_tier = "".into();
         assert_eq!(resolve_modal_batch_size(&config), 32);
         env::remove_var("SGREP_MODAL_BATCH_SIZE");
     }

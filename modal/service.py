@@ -1,61 +1,54 @@
 import modal
-import os
 import socket
 import subprocess
+import time
 from pydantic import BaseModel
 from typing import List
 
 MODEL_ID = "jinaai/jina-embeddings-v2-base-code"
-GPU_CONFIG = os.environ.get("SGREP_MODAL_GPU", "T4")
+GPU = "A10G"
 PORT = 8000
-MAX_CONCURRENT = int(os.environ.get("SGREP_MODAL_MAX_CONCURRENT", "64"))
+MAX_CONCURRENT = 64
 MINUTES = 60
-STARTUP_TIMEOUT = int(os.environ.get("SGREP_MODAL_STARTUP_TIMEOUT_SECS", "600"))
+STARTUP_TIMEOUT = 300
+MAX_BATCH_TOKENS = 65536
+SERVER_READY_TIMEOUT = 180
 
-TEI_VERSION = "1.8"
-TEI_IMAGE_VARIANTS = {
-    "T4": f"ghcr.io/huggingface/text-embeddings-inference:turing-{TEI_VERSION}",
-    "L4": f"ghcr.io/huggingface/text-embeddings-inference:89-{TEI_VERSION}",
-    "L40S": f"ghcr.io/huggingface/text-embeddings-inference:89-{TEI_VERSION}",
-    "A10G": f"ghcr.io/huggingface/text-embeddings-inference:86-{TEI_VERSION}",
-    "A40": f"ghcr.io/huggingface/text-embeddings-inference:86-{TEI_VERSION}",
-    "A100": f"ghcr.io/huggingface/text-embeddings-inference:{TEI_VERSION}",
-    "A100-40GB": f"ghcr.io/huggingface/text-embeddings-inference:{TEI_VERSION}",
-    "A100-80GB": f"ghcr.io/huggingface/text-embeddings-inference:{TEI_VERSION}",
-    "H100": f"ghcr.io/huggingface/text-embeddings-inference:hopper-{TEI_VERSION}",
-}
-TEI_IMAGE = TEI_IMAGE_VARIANTS.get(GPU_CONFIG, TEI_IMAGE_VARIANTS["T4"])
+TEI_IMAGE = "ghcr.io/huggingface/text-embeddings-inference:86-1.8"
 
 app = modal.App("sgrep-offload")
 
 health_image = modal.Image.debian_slim().pip_install("fastapi")
 
-MAX_BATCH_TOKENS = int(os.environ.get("SGREP_MODAL_MAX_BATCH_TOKENS", "65536"))
-
 def spawn_server() -> subprocess.Popen:
+    print(f"Starting TEI server with model {MODEL_ID}...")
+    start_time = time.time()
     process = subprocess.Popen(
         [
             "text-embeddings-router",
             "--model-id", MODEL_ID,
             "--port", str(PORT),
             "--max-batch-tokens", str(MAX_BATCH_TOKENS),
+            "--max-client-batch-size", "1024",
             "--auto-truncate",
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
     )
+    attempt = 0
     while True:
+        elapsed = time.time() - start_time
+        attempt += 1
+        if elapsed > SERVER_READY_TIMEOUT:
+            process.terminate()
+            raise RuntimeError(f"TEI server failed to start within {SERVER_READY_TIMEOUT}s")
         try:
             socket.create_connection(("127.0.0.1", PORT), timeout=1).close()
+            print(f"TEI server ready after {elapsed:.1f}s ({attempt} attempts)")
             return process
         except (socket.timeout, ConnectionRefusedError):
             if process.poll() is not None:
-                stdout, stderr = process.communicate()
-                raise RuntimeError(
-                    f"TEI server exited with code {process.returncode}\n"
-                    f"stdout: {stdout.decode()}\n"
-                    f"stderr: {stderr.decode()}"
-                )
+                raise RuntimeError(f"TEI server exited with code {process.returncode}")
+            if attempt % 30 == 0:
+                print(f"Waiting for TEI server... {elapsed:.0f}s elapsed")
 
 def download_model():
     spawn_server().terminate()
@@ -69,7 +62,7 @@ tei_image = (
     .dockerfile_commands("ENTRYPOINT []")
     .pip_install("httpx", "pydantic", "fastapi[standard]", "huggingface_hub")
     .run_function(download_model_hf)
-    .run_function(download_model, gpu=GPU_CONFIG)
+    .run_function(download_model, gpu=GPU)
 )
 
 
@@ -84,7 +77,7 @@ class EmbedResponse(BaseModel):
     dimension: int
 
 
-@app.cls(gpu=GPU_CONFIG, image=tei_image, scaledown_window=5 * MINUTES, max_containers=10, startup_timeout=STARTUP_TIMEOUT)
+@app.cls(gpu=GPU, image=tei_image, scaledown_window=5 * MINUTES, max_containers=10, startup_timeout=STARTUP_TIMEOUT)
 @modal.concurrent(max_inputs=MAX_CONCURRENT)
 class Embedder:
     @modal.enter()
@@ -108,7 +101,7 @@ class Embedder:
         return resp.json()
 
 
-@app.function(image=tei_image, startup_timeout=STARTUP_TIMEOUT)
+@app.function(image=tei_image, startup_timeout=STARTUP_TIMEOUT, timeout=600)
 @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
 def embed(request: EmbedRequest) -> EmbedResponse:
     embedder = Embedder()
@@ -129,7 +122,5 @@ def health():
     return {
         "status": "ok",
         "model": MODEL_ID,
-        "gpu": GPU_CONFIG,
-        "tei_image": TEI_IMAGE,
-        "max_concurrent": MAX_CONCURRENT,
+        "gpu": GPU,
     }

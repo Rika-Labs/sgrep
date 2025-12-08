@@ -30,10 +30,7 @@ pub struct ModalConfig {
     pub proxy_token_id: Option<String>,
     /// Modal proxy token secret for endpoint auth (ws-... format, from modal.com/settings)
     pub proxy_token_secret: Option<String>,
-    /// GPU tier: "budget" (T4), "balanced" (A10G), "high" (L40S)
-    #[serde(default = "default_gpu_tier")]
-    pub gpu_tier: String,
-    /// Batch size for embedding requests
+    /// Batch size for embedding requests (default: 128)
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
     /// Optional concurrency override for Modal embedder
@@ -42,12 +39,8 @@ pub struct ModalConfig {
     pub endpoint: Option<String>,
 }
 
-fn default_gpu_tier() -> String {
-    "high".to_string()
-}
-
 fn default_batch_size() -> usize {
-    0 // Calculated based on GPU tier at runtime
+    128
 }
 
 /// Configuration for Turbopuffer remote storage
@@ -274,7 +267,6 @@ token_id = "ak-test"
 token_secret = "as-test"
 proxy_token_id = "wk-proxy-test"
 proxy_token_secret = "ws-proxy-test"
-gpu_tier = "balanced"
 batch_size = 64
 concurrency = 6
 endpoint = "https://example.modal.run"
@@ -291,7 +283,6 @@ endpoint = "https://example.modal.run"
             config.modal.proxy_token_secret,
             Some("ws-proxy-test".to_string())
         );
-        assert_eq!(config.modal.gpu_tier, "balanced");
         assert_eq!(config.modal.batch_size, 64);
         assert_eq!(config.modal.concurrency, Some(6));
         assert_eq!(
@@ -307,8 +298,7 @@ endpoint = "https://example.modal.run"
 token_id = "ak-test"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.modal.gpu_tier, "high");
-        assert_eq!(config.modal.batch_size, 0);
+        assert_eq!(config.modal.batch_size, 128);
         assert_eq!(config.modal.concurrency, None);
         assert_eq!(config.modal.endpoint, None);
     }
@@ -316,7 +306,6 @@ token_id = "ak-test"
     #[test]
     fn empty_config_has_modal_defaults() {
         let config = Config::default();
-        assert_eq!(config.modal.gpu_tier, "");
         assert_eq!(config.modal.concurrency, None);
     }
 
@@ -363,7 +352,6 @@ token_id = "ak-test"
 token_secret = "as-test"
 proxy_token_id = "wk-proxy"
 proxy_token_secret = "ws-proxy"
-gpu_tier = "high"
 
 [turbopuffer]
 api_key = "tpuf-key"
