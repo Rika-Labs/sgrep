@@ -1,56 +1,80 @@
-"""
-Modal.dev service for sgrep embedding and reranking offload.
-
-This service provides:
-- /embed - Embedding endpoint using Qwen3-Embedding-8B
-- /rerank - Reranking endpoint using Qwen3-Reranker-8B
-- /health - Health check endpoint
-
-Configuration via environment variables:
-- GPU_TIER: "budget" (T4), "balanced" (A10G), or "high" (L40S, default)
-- SGREP_EMBED_MODEL: Embedding model (default: Qwen/Qwen3-Embedding-8B)
-- SGREP_RERANK_MODEL: Reranker model (default: Qwen/Qwen3-Reranker-8B)
-
-Deploy with: modal deploy modal/service.py
-"""
-
 import modal
 import os
+import socket
+import subprocess
 from pydantic import BaseModel
-from typing import List, Tuple
+from typing import List
 
-GPU_TIERS = {
-    "budget": "T4",        # ~$0.25/hr, slower
-    "balanced": "A10G",    # ~$0.45/hr, good balance
-    "high": "L40S",        # ~$1.10/hr, best performance (default)
-}
-GPU_TIER = os.environ.get("GPU_TIER", "high")
-GPU_CONFIG = GPU_TIERS.get(GPU_TIER, "L40S")
-
-EMBED_MODEL = os.environ.get("SGREP_EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
-RERANK_MODEL = os.environ.get("SGREP_RERANK_MODEL", "Qwen/Qwen3-Reranker-8B")
-MAX_MODEL_LEN = int(os.environ.get("SGREP_MODAL_MAX_MODEL_LEN", "2048"))
-
+MODEL_ID = "jinaai/jina-embeddings-v2-base-code"
+GPU_CONFIG = os.environ.get("SGREP_MODAL_GPU", "T4")
+PORT = 8000
+MAX_CONCURRENT = int(os.environ.get("SGREP_MODAL_MAX_CONCURRENT", "64"))
 MINUTES = 60
+
+TEI_VERSION = "1.8"
+TEI_IMAGE_VARIANTS = {
+    "T4": f"ghcr.io/huggingface/text-embeddings-inference:turing-{TEI_VERSION}",
+    "L4": f"ghcr.io/huggingface/text-embeddings-inference:89-{TEI_VERSION}",
+    "L40S": f"ghcr.io/huggingface/text-embeddings-inference:89-{TEI_VERSION}",
+    "A10G": f"ghcr.io/huggingface/text-embeddings-inference:86-{TEI_VERSION}",
+    "A40": f"ghcr.io/huggingface/text-embeddings-inference:86-{TEI_VERSION}",
+    "A100": f"ghcr.io/huggingface/text-embeddings-inference:{TEI_VERSION}",
+    "A100-40GB": f"ghcr.io/huggingface/text-embeddings-inference:{TEI_VERSION}",
+    "A100-80GB": f"ghcr.io/huggingface/text-embeddings-inference:{TEI_VERSION}",
+    "H100": f"ghcr.io/huggingface/text-embeddings-inference:hopper-{TEI_VERSION}",
+}
+TEI_IMAGE = TEI_IMAGE_VARIANTS.get(GPU_CONFIG, TEI_IMAGE_VARIANTS["T4"])
 
 app = modal.App("sgrep-offload")
 
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install(
-        "vllm>=0.8",
-        "transformers",
-        "torch",
-        "fastapi[standard]",
-        "pydantic",
-        "sentence-transformers",
+health_image = modal.Image.debian_slim().pip_install("fastapi")
+
+MAX_BATCH_TOKENS = int(os.environ.get("SGREP_MODAL_MAX_BATCH_TOKENS", "65536"))
+
+def spawn_server() -> subprocess.Popen:
+    process = subprocess.Popen(
+        [
+            "text-embeddings-router",
+            "--model-id", MODEL_ID,
+            "--port", str(PORT),
+            "--max-batch-tokens", str(MAX_BATCH_TOKENS),
+            "--auto-truncate",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
+    while True:
+        try:
+            socket.create_connection(("127.0.0.1", PORT), timeout=1).close()
+            return process
+        except (socket.timeout, ConnectionRefusedError):
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise RuntimeError(
+                    f"TEI server exited with code {process.returncode}\n"
+                    f"stdout: {stdout.decode()}\n"
+                    f"stderr: {stderr.decode()}"
+                )
+
+def download_model():
+    spawn_server().terminate()
+
+def download_model_hf():
+    from huggingface_hub import snapshot_download
+    snapshot_download(MODEL_ID, cache_dir="/data")
+
+tei_image = (
+    modal.Image.from_registry(TEI_IMAGE, add_python="3.11")
+    .dockerfile_commands("ENTRYPOINT []")
+    .pip_install("httpx", "pydantic", "fastapi[standard]", "huggingface_hub")
+    .run_function(download_model_hf)
+    .run_function(download_model, gpu=GPU_CONFIG)
 )
 
 
 class EmbedRequest(BaseModel):
     texts: List[str]
-    dimension: int = 384  # Matches local embedder for compatibility
+    dimension: int = 768
 
 
 class EmbedResponse(BaseModel):
@@ -59,171 +83,52 @@ class EmbedResponse(BaseModel):
     dimension: int
 
 
-class RerankRequest(BaseModel):
-    query: str
-    documents: List[str]
-    top_k: int = 10
-
-
-class RerankResult(BaseModel):
-    index: int
-    score: float
-
-
-class RerankResponse(BaseModel):
-    results: List[RerankResult]
-    model: str
-
-
-@app.cls(
-    gpu=GPU_CONFIG,
-    image=image,
-    scaledown_window=5 * MINUTES,
-)
+@app.cls(gpu=GPU_CONFIG, image=tei_image, scaledown_window=5 * MINUTES, max_containers=10)
+@modal.concurrent(max_inputs=MAX_CONCURRENT)
 class Embedder:
     @modal.enter()
-    def load_model(self):
-        from vllm import LLM
+    def setup_server(self):
+        import httpx
+        self.process = spawn_server()
+        self.client = httpx.Client(base_url=f"http://127.0.0.1:{PORT}", timeout=120.0)
 
-        print(f"Loading embedding model: {EMBED_MODEL}")
-        self.model = LLM(
-            model=EMBED_MODEL,
-            task="embed",
-            trust_remote_code=True,
-            gpu_memory_utilization=0.90,  # Use more GPU memory for larger batches
-            max_model_len=MAX_MODEL_LEN,  # Guarded below with tokenizer truncation
-            enforce_eager=True,           # Faster for embeddings (no CUDA graphs overhead)
-        )
-        try:
-            self.tokenizer = self.model.get_tokenizer()
-        except Exception:
-            from transformers import AutoTokenizer
-
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                EMBED_MODEL, trust_remote_code=True
-            )
-        self.max_tokens = max(1, MAX_MODEL_LEN - 8)
-        print("Embedding model loaded successfully")
+    @modal.exit()
+    def teardown_server(self):
+        self.process.terminate()
 
     @modal.method()
-    def embed(self, texts: List[str], dimension: int = 384) -> List[List[float]]:
-        """Embed texts and truncate to requested dimension.
-
-        Args:
-            texts: List of texts to embed (max 1000 per request)
-            dimension: Must be 384 to match local embedder for compatibility
-        """
+    def embed(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
         if len(texts) > 1000:
             raise ValueError(f"Too many texts: {len(texts)} > 1000 max")
-        if dimension != 384:
-            raise ValueError(f"Dimension must be 384 for local/remote compatibility, got {dimension}")
-
-        truncated = []
-        for text in texts:
-            tokens = self.tokenizer.encode(text, add_special_tokens=False)
-            if len(tokens) > self.max_tokens:
-                tokens = tokens[: self.max_tokens]
-                text = self.tokenizer.decode(tokens, skip_special_tokens=False)
-            truncated.append(text)
-
-        outputs = self.model.embed(truncated)
-        return [list(out.outputs.embedding[:dimension]) for out in outputs]
+        resp = self.client.post("/embed", json={"inputs": texts})
+        resp.raise_for_status()
+        return resp.json()
 
 
-@app.function(image=image)
+@app.function(image=tei_image)
 @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
 def embed(request: EmbedRequest) -> EmbedResponse:
-    """Embed texts using Qwen3-Embedding-8B."""
     embedder = Embedder()
-    embeddings = embedder.embed.remote(request.texts, request.dimension)
+    embeddings = embedder.embed.remote(request.texts)
+    dim = request.dimension
+    if dim != 768:
+        embeddings = [emb[:dim] for emb in embeddings]
     return EmbedResponse(
         embeddings=embeddings,
-        model=EMBED_MODEL,
-        dimension=request.dimension,
+        model=MODEL_ID,
+        dimension=dim,
     )
 
 
-@app.cls(
-    gpu=GPU_CONFIG,
-    image=image,
-    scaledown_window=5 * MINUTES,
-)
-class Reranker:
-    @modal.enter()
-    def load_model(self):
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer
-        import torch
-
-        print(f"Loading reranker model: {RERANK_MODEL}")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            RERANK_MODEL, trust_remote_code=True
-        )
-        self.model = (
-            AutoModelForSequenceClassification.from_pretrained(
-                RERANK_MODEL, trust_remote_code=True, torch_dtype=torch.float16
-            )
-            .cuda()
-            .eval()
-        )
-        print("Reranker model loaded successfully")
-
-    @modal.method()
-    def rerank(
-        self, query: str, documents: List[str], top_k: int = 10
-    ) -> List[Tuple[int, float]]:
-        """Rerank documents by relevance to query.
-
-        Args:
-            query: Search query
-            documents: Documents to rerank (max 500)
-            top_k: Number of top results to return
-        """
-        import torch
-
-        if not documents:
-            return []
-        if len(documents) > 500:
-            raise ValueError(f"Too many documents: {len(documents)} > 500 max")
-        if not query.strip():
-            raise ValueError("Query cannot be empty")
-
-        pairs = [[query, doc] for doc in documents]
-        inputs = self.tokenizer(
-            pairs,
-            padding=True,
-            truncation=True,
-            return_tensors="pt",
-            max_length=8192,
-        ).to("cuda")
-
-        with torch.no_grad():
-            scores = self.model(**inputs).logits.squeeze(-1).cpu().tolist()
-
-        # Handle case where scores is a single float
-        if isinstance(scores, float):
-            scores = [scores]
-
-        indexed_scores = list(enumerate(scores))
-        indexed_scores.sort(key=lambda x: x[1], reverse=True)
-        return indexed_scores[:top_k]
-
-
-@app.function(image=image)
-@modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
-def rerank(request: RerankRequest) -> RerankResponse:
-    """Rerank documents by relevance to query using Qwen3-Reranker-8B."""
-    reranker = Reranker()
-    results = reranker.rerank.remote(request.query, request.documents, request.top_k)
-    return RerankResponse(
-        results=[RerankResult(index=idx, score=score) for idx, score in results],
-        model=RERANK_MODEL,
-    )
-
-
-@app.function(image=image)
+@app.function(image=health_image)
 @modal.fastapi_endpoint(method="GET")
 def health():
-    """Health check endpoint - returns service status and GPU tier."""
-    return {"status": "ok", "gpu_tier": GPU_TIER, "embed_model": EMBED_MODEL, "rerank_model": RERANK_MODEL}
+    return {
+        "status": "ok",
+        "model": MODEL_ID,
+        "gpu": GPU_CONFIG,
+        "tei_image": TEI_IMAGE,
+        "max_concurrent": MAX_CONCURRENT,
+    }

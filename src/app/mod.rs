@@ -32,8 +32,6 @@ pub struct SearchParams<'a> {
     pub filters: Vec<String>,
     pub json: bool,
     pub debug: bool,
-    pub no_rerank: bool,
-    pub rerank_oversample: usize,
     pub offload: bool,
     pub remote: Option<Arc<dyn RemoteVectorStore>>,
 }
@@ -204,8 +202,6 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             filters,
             json,
             debug,
-            no_rerank,
-            rerank_oversample,
             offload: _offload,
             remote,
         } => {
@@ -221,8 +217,6 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                     filters,
                     json,
                     debug,
-                    no_rerank,
-                    rerank_oversample,
                     offload,
                     remote: remote_store,
                 },
@@ -291,9 +285,9 @@ fn build_embedder(
 const MODAL_DIMENSION: usize = 384;
 const MODAL_MAX_TEXTS_PER_REQUEST: usize = 1000;
 
-static MODAL_ENDPOINTS: OnceCell<(String, String, bool)> = OnceCell::new();
+static MODAL_ENDPOINTS: OnceCell<(String, bool)> = OnceCell::new();
 
-fn resolve_modal_endpoints(config: &Config, json_mode: bool) -> Result<(String, String, bool)> {
+fn resolve_modal_endpoints(config: &Config, json_mode: bool) -> Result<(String, bool)> {
     if let Some(existing) = MODAL_ENDPOINTS.get() {
         return Ok(existing.clone());
     }
@@ -310,7 +304,7 @@ fn resolve_modal_endpoints(config: &Config, json_mode: bool) -> Result<(String, 
         config.modal.token_secret.clone(),
     );
 
-    let (embed_url, rerank_url, cached) = deployer.ensure_deployed()?;
+    let (embed_url, cached) = deployer.ensure_deployed()?;
 
     if !json_mode {
         if cached {
@@ -320,8 +314,8 @@ fn resolve_modal_endpoints(config: &Config, json_mode: bool) -> Result<(String, 
         }
     }
 
-    let _ = MODAL_ENDPOINTS.set((embed_url.clone(), rerank_url.clone(), cached));
-    Ok((embed_url, rerank_url, cached))
+    let _ = MODAL_ENDPOINTS.set((embed_url.clone(), cached));
+    Ok((embed_url, cached))
 }
 
 fn build_modal_embedder(config: &Config) -> Result<Arc<dyn embedding::BatchEmbedder>> {
@@ -332,7 +326,7 @@ fn build_modal_embedder(config: &Config) -> Result<Arc<dyn embedding::BatchEmbed
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    let (embed_endpoint, _rerank_endpoint, _cached) =
+    let (embed_endpoint, _cached) =
         resolve_modal_endpoints(config, false).context("Modal embedder unavailable")?;
 
     eprintln!(
@@ -369,9 +363,9 @@ fn resolve_modal_batch_size(config: &Config) -> usize {
         .and_then(|v| v.parse::<usize>().ok());
 
     let tier_default = match effective_gpu_tier(&config.modal.gpu_tier).as_str() {
-        "high" => 256,
-        "balanced" => 192,
-        "budget" => 96,
+        "high" => 128,
+        "balanced" => 96,
+        "budget" => 64,
         _ => 128,
     };
 
@@ -397,8 +391,8 @@ fn resolve_modal_concurrency(config: &Config) -> usize {
 }
 
 fn default_modal_concurrency() -> usize {
-    let half = num_cpus::get().saturating_div(2).max(1);
-    half.clamp(2, 8)
+    let cpus = num_cpus::get();
+    cpus.clamp(16, 48)
 }
 
 fn effective_gpu_tier(tier: &str) -> String {
@@ -407,77 +401,6 @@ fn effective_gpu_tier(tier: &str) -> String {
         "high".to_string()
     } else {
         trimmed.to_string()
-    }
-}
-
-#[cfg(not(test))]
-fn build_reranker_silent(
-    json_mode: bool,
-    offload: bool,
-) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
-    use crate::reranker::CrossEncoderReranker;
-
-    if offload {
-        return build_modal_reranker(json_mode);
-    }
-
-    match CrossEncoderReranker::new(!json_mode) {
-        Ok(reranker) => Some(Arc::new(reranker)),
-        Err(e) => {
-            if !json_mode {
-                eprintln!(
-                    "[warn] Reranker unavailable: {} (falling back to semantic search)",
-                    e
-                );
-            }
-            None
-        }
-    }
-}
-
-#[cfg(not(test))]
-fn build_modal_reranker(
-    json_mode: bool,
-) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
-    use crate::modal::reranker::ModalReranker;
-
-    let config = Config::load().ok()?;
-
-    let (_, rerank_endpoint, _cached) = resolve_modal_endpoints(&config, json_mode).ok()?;
-
-    if !json_mode {
-        eprintln!("[info] Using Modal reranker (Qwen3-Reranker-8B)");
-    }
-
-    Some(Arc::new(ModalReranker::new(
-        rerank_endpoint,
-        config.modal.proxy_token_id.clone(),
-        config.modal.proxy_token_secret.clone(),
-    )))
-}
-
-#[cfg(test)]
-fn build_reranker_silent(
-    _json_mode: bool,
-    _offload: bool,
-) -> Option<Arc<dyn crate::reranker::Reranker + Send + Sync>> {
-    Some(Arc::new(TestReranker::default()))
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct TestReranker;
-
-#[cfg(test)]
-impl crate::reranker::Reranker for TestReranker {
-    fn rerank(&self, _query: &str, docs: &[&str]) -> anyhow::Result<Vec<(usize, f32)>> {
-        let mut scored: Vec<(usize, f32)> = docs
-            .iter()
-            .enumerate()
-            .map(|(idx, doc)| (idx, doc.len() as f32))
-            .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(scored)
     }
 }
 
@@ -689,27 +612,11 @@ fn handle_search(
 ) -> Result<()> {
     let start = Instant::now();
 
-    let reranker = if params.no_rerank {
-        None
-    } else {
-        match build_reranker_silent(params.json, params.offload) {
-            Some(r) => Some(r),
-            None => {
-                return Err(anyhow!(
-                    "Reranker unavailable. Use --no-rerank to disable reranking explicitly."
-                ))
-            }
-        }
-    };
-
     if let Some(remote) = params.remote.clone() {
-        return handle_remote_search(embedder, params, remote, reranker, start);
+        return handle_remote_search(embedder, params, remote, start);
     }
 
-    let mut engine = match &reranker {
-        Some(r) => search::SearchEngine::with_reranker(embedder.clone(), r.clone()),
-        None => search::SearchEngine::new(embedder.clone()),
-    };
+    let mut engine = search::SearchEngine::new(embedder.clone());
 
     if let Err(e) = engine.enable_query_expander_silent() {
         if !params.json {
@@ -717,15 +624,11 @@ fn handle_search(
         }
     }
 
-    // Try to load the code graph for hybrid search
     let store_result = store::IndexStore::new(params.path)?;
     if let Ok(Some(graph)) = store_result.load_graph() {
         engine.set_graph(graph);
     }
 
-    let rerank_enabled = reranker.is_some();
-
-    // Try mmap-based search first for zero-copy performance
     if let Ok(Some(mmap_index)) = store_result.load_mmap() {
         if mmap_index.metadata.vector_dim == embedder.dimension() {
             let results = engine.search_hybrid_mmap(
@@ -736,8 +639,6 @@ fn handle_search(
                     include_context: params.context,
                     glob: params.glob.clone(),
                     filters: params.filters.clone(),
-                    rerank: rerank_enabled,
-                    oversample_factor: params.rerank_oversample,
                     dedup: search::DedupOptions::default(),
                 },
             )?;
@@ -755,7 +656,6 @@ fn handle_search(
         }
     }
 
-    // Fall back to standard loading
     let index = load_or_index(params.path, embedder.clone())?;
     let results = engine.search_hybrid(
         &index,
@@ -765,8 +665,6 @@ fn handle_search(
             include_context: params.context,
             glob: params.glob,
             filters: params.filters,
-            rerank: rerank_enabled,
-            oversample_factor: params.rerank_oversample,
             dedup: search::DedupOptions::default(),
         },
     )?;
@@ -787,19 +685,12 @@ fn handle_remote_search(
     embedder: Arc<dyn embedding::BatchEmbedder>,
     params: SearchParams<'_>,
     remote: Arc<dyn RemoteVectorStore>,
-    reranker: Option<Arc<dyn crate::reranker::Reranker + Send + Sync>>,
     start: Instant,
 ) -> Result<()> {
     let limit = params.limit.max(1);
-    let oversample = if reranker.is_some() {
-        params.rerank_oversample.max(1)
-    } else {
-        1
-    };
-    let fetch_limit = limit.saturating_mul(oversample);
 
     let query_vec = embedder.embed(params.query)?;
-    let hits = remote.query(&query_vec, fetch_limit)?;
+    let hits = remote.query(&query_vec, limit)?;
 
     let mut results: Vec<search::SearchResult> = hits
         .into_iter()
@@ -823,34 +714,6 @@ fn handle_remote_search(
             }
         })
         .collect();
-
-    if let Some(reranker) = reranker {
-        if results.len() > 1 {
-            let docs: Vec<&str> = results.iter().map(|r| r.chunk.text.as_str()).collect();
-            if let Ok(reranked) = reranker.rerank(params.query, &docs) {
-                let mut reordered: Vec<search::SearchResult> = reranked
-                    .into_iter()
-                    .filter_map(|(idx, rerank_score)| {
-                        results.get(idx).map(|base| {
-                            let mut result = base.clone();
-                            let rerank_boost = rerank_score * 0.4;
-                            result.score += rerank_boost;
-                            result
-                        })
-                    })
-                    .collect();
-
-                reordered.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-
-                reordered.truncate(limit);
-                results = reordered;
-            }
-        }
-    }
 
     if results.len() > limit {
         results.truncate(limit);
@@ -1197,13 +1060,13 @@ mod tests {
         let mut config = Config::default();
         config.modal.gpu_tier = "high".into();
         config.modal.batch_size = 0;
-        assert_eq!(resolve_modal_batch_size(&config), 256);
+        assert_eq!(resolve_modal_batch_size(&config), 128);
 
         config.modal.gpu_tier = "balanced".into();
-        assert_eq!(resolve_modal_batch_size(&config), 192);
+        assert_eq!(resolve_modal_batch_size(&config), 96);
 
         config.modal.gpu_tier = "budget".into();
-        assert_eq!(resolve_modal_batch_size(&config), 96);
+        assert_eq!(resolve_modal_batch_size(&config), 64);
 
         config.modal.batch_size = 2000;
         config.modal.gpu_tier = "high".into();
@@ -1499,8 +1362,6 @@ mod tests {
                 filters: vec![],
                 json: true,
                 debug: false,
-                no_rerank: true,
-                rerank_oversample: 1,
                 offload: false,
                 remote: Some(remote.clone()),
             },
@@ -1512,101 +1373,6 @@ mod tests {
         env::remove_var("SGREP_HOME");
     }
 
-    #[test]
-    #[serial]
-    fn remote_search_reranks_and_oversamples_by_default() {
-        let repo = temp_repo();
-        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
-
-        let remote = Arc::new(MockRemoteStore::with_hits(vec![
-            RemoteSearchHit {
-                id: "short".into(),
-                score: 0.8,
-                path: repo.join("lib.rs").display().to_string(),
-                start_line: 1,
-                end_line: 1,
-                content: "hi".into(),
-                language: "rust".into(),
-            },
-            RemoteSearchHit {
-                id: "long".into(),
-                score: 0.5,
-                path: repo.join("lib.rs").display().to_string(),
-                start_line: 1,
-                end_line: 2,
-                content: "pub fn longer() {}".into(),
-                language: "rust".into(),
-            },
-        ]));
-        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
-
-        let limit = 1;
-        let oversample = 2;
-
-        handle_search(
-            embedder,
-            SearchParams {
-                query: "hi",
-                path: repo.as_path(),
-                limit,
-                context: false,
-                glob: vec![],
-                filters: vec![],
-                json: true,
-                debug: false,
-                no_rerank: false,
-                rerank_oversample: oversample,
-                offload: false,
-                remote: Some(remote.clone()),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(remote.last_query_top_k(), Some(limit * oversample));
-        std::fs::remove_dir_all(&repo).ok();
-        env::remove_var("SGREP_HOME");
-    }
-
-    #[test]
-    #[serial]
-    fn remote_search_respects_no_rerank_limit() {
-        let repo = temp_repo();
-        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
-
-        let remote = Arc::new(MockRemoteStore::with_hits(vec![RemoteSearchHit {
-            id: "hit1".into(),
-            score: 0.9,
-            path: repo.join("lib.rs").display().to_string(),
-            start_line: 1,
-            end_line: 1,
-            content: "pub fn hi() {}".into(),
-            language: "rust".into(),
-        }]));
-        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
-
-        handle_search(
-            embedder,
-            SearchParams {
-                query: "hi",
-                path: repo.as_path(),
-                limit: 2,
-                context: false,
-                glob: vec![],
-                filters: vec![],
-                json: true,
-                debug: false,
-                no_rerank: true,
-                rerank_oversample: 5,
-                offload: false,
-                remote: Some(remote.clone()),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(remote.last_query_top_k(), Some(2));
-        std::fs::remove_dir_all(&repo).ok();
-        env::remove_var("SGREP_HOME");
-    }
 
     #[test]
     #[serial]
@@ -1637,8 +1403,6 @@ mod tests {
                 filters: vec![],
                 json: true,
                 debug: false,
-                no_rerank: true,
-                rerank_oversample: 1,
                 offload: false,
                 remote: None,
             },
@@ -1953,8 +1717,6 @@ mod tests {
                 filters: vec![],
                 json: true,
                 debug: false,
-                no_rerank: false,
-                rerank_oversample: 3,
                 offload: Some(false),
                 remote: false,
             },
@@ -2056,8 +1818,6 @@ mod tests {
             filters: vec!["lang=rust".to_string()],
             json: false,
             debug: true,
-            no_rerank: false,
-            rerank_oversample: 3,
             offload: false,
             remote: None,
         };
@@ -2070,8 +1830,6 @@ mod tests {
         assert_eq!(params.filters.len(), 1);
         assert!(!params.json);
         assert!(params.debug);
-        assert!(!params.no_rerank);
-        assert_eq!(params.rerank_oversample, 3);
         assert!(!params.offload);
     }
 

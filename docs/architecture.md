@@ -149,21 +149,7 @@ Top-10 results → Extract terms → Expand query → Re-score
 
 Adds up to 5 terms from top results to capture domain vocabulary.
 
-### 5. Reranking
-
-```
-Top candidates → Cross-encoder → Final ranking
-```
-
-**Local:**
-- Uses same embedding model
-- Re-scores with pairwise attention
-
-**Modal.dev:**
-- Model: `Qwen3-Reranker-8B`
-- Deep query-document interaction
-
-### 6. Deduplication
+### 5. Deduplication
 
 ```
 Results → Near-duplicate detection → Unique results
@@ -300,7 +286,6 @@ Main thread
 
 - Missing symbols → Search works, BM25F less accurate
 - Query expander unavailable → Standard search
-- Reranker fails → Return pre-rerank results
 - Remote timeout → Retry with backoff
 
 ### Recovery
@@ -334,11 +319,3 @@ Implementations:
 - `PineconeStore`
 - `TurbopufferStore`
 
-### Rerankers
-
-Trait: `Reranker`
-- `rerank(query, documents) -> scores`
-
-Implementations:
-- `LocalReranker`
-- `ModalReranker`

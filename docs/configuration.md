@@ -7,7 +7,7 @@
 - `--threads <n>` (or `SGREP_MAX_THREADS`) to bound parallelism
 - `--cpu-preset <auto|low|medium|high|background>` (or `SGREP_CPU_PRESET`)
   
-Command-specific flags (offload, remote, rerank controls, detach) are listed per subcommand below. If `--offload` is omitted, the default comes from `[embedding].provider` in the config (default `local`).
+Command-specific flags (offload, remote, detach) are listed per subcommand below. If `--offload` is omitted, the default comes from `[embedding].provider` in the config (default `local`).
 
 ## Commands
 
@@ -20,9 +20,7 @@ Command-specific flags (offload, remote, rerank controls, detach) are listed per
 - `--filters key=value` (repeatable) for metadata filters like `lang=rust`
 - `--json` for structured output
 - `--debug` to surface scores and timings
-- `--no-rerank` to skip cross-encoder reranking
-- `--rerank-oversample <n>` (default `3`) to control candidate pooling before rerank
-- `--offload` (or `SGREP_OFFLOAD`) to use [Modal.dev](https://modal.com) for embeddings/reranking; omit to follow config, pass `--offload=false` to force local
+- `--offload` (or `SGREP_OFFLOAD`) to use [Modal.dev](https://modal.com) for embeddings; omit to follow config, pass `--offload=false` to force local
 - `--remote` (or `SGREP_REMOTE=1`) to query a configured remote vector store (Pinecone/Turbopuffer)
 
 ### index
@@ -58,13 +56,13 @@ Command-specific flags (offload, remote, rerank controls, detach) are listed per
 
 ```toml
 [embedding]
-# Default provider for embeddings/reranking when --offload is not set
+# Default provider for embeddings when --offload is not set
 provider = "local" # or "modal"
 ```
 
 ## Modal.dev offload
 
-Offload embeddings and reranking to [Modal.dev](https://modal.com) GPUs for faster processing on large codebases.
+Offload embeddings to [Modal.dev](https://modal.com) GPUs for faster processing on large codebases.
 
 ```toml
 [modal]
@@ -105,7 +103,6 @@ Modal requires two types of tokens:
 
 **Models used:**
 - Embeddings: [Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) (8K context, truncated to 384 dimensions for local compatibility)
-- Reranking: [Qwen3-Reranker-8B](https://huggingface.co/Qwen/Qwen3-Reranker-8B)
 
 First run auto-deploys the service; subsequent runs use cached endpoints.
 

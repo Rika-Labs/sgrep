@@ -14,7 +14,6 @@ const HEALTH_TIMEOUT_SECS: u64 = 10;
 #[derive(Debug, Serialize, Deserialize)]
 struct EndpointCache {
     embed_url: String,
-    rerank_url: String,
     health_url: String,
     gpu_tier: String,
 }
@@ -171,7 +170,6 @@ impl ModalDeployer {
 
     fn parse_deploy_output(&self, output: &str) -> Result<EndpointCache> {
         let mut embed_url = None;
-        let mut rerank_url = None;
         let mut health_url = None;
 
         for line in output.lines() {
@@ -180,8 +178,6 @@ impl ModalDeployer {
                     let url = url.trim();
                     if line.contains("embed") && !line.contains("health") {
                         embed_url = Some(url.to_string());
-                    } else if line.contains("rerank") {
-                        rerank_url = Some(url.to_string());
                     } else if line.contains("health") {
                         health_url = Some(url.to_string());
                     }
@@ -190,24 +186,22 @@ impl ModalDeployer {
         }
 
         let embed_url = embed_url.ok_or_else(|| anyhow!("Could not find embed endpoint URL"))?;
-        let rerank_url = rerank_url.ok_or_else(|| anyhow!("Could not find rerank endpoint URL"))?;
         let health_url = health_url.ok_or_else(|| anyhow!("Could not find health endpoint URL"))?;
 
         Ok(EndpointCache {
             embed_url,
-            rerank_url,
             health_url,
             gpu_tier: self.gpu_tier.clone(),
         })
     }
 
-    /// Returns (embed_url, rerank_url, used_cache)
-    pub fn ensure_deployed(&self) -> Result<(String, String, bool)> {
+    /// Returns (embed_url, used_cache)
+    pub fn ensure_deployed(&self) -> Result<(String, bool)> {
         if let Some(cache) = self.load_cache() {
             if cache.gpu_tier == self.gpu_tier {
                 eprintln!("[info] Checking cached Modal endpoint health...");
                 if self.check_health(&cache.health_url).unwrap_or(false) {
-                    return Ok((cache.embed_url, cache.rerank_url, true));
+                    return Ok((cache.embed_url, true));
                 }
                 eprintln!("[info] Cached endpoint unhealthy, redeploying...");
             } else {
@@ -220,19 +214,13 @@ impl ModalDeployer {
 
         let cache = self.deploy()?;
         self.save_cache(&cache)?;
-        Ok((cache.embed_url, cache.rerank_url, false))
+        Ok((cache.embed_url, false))
     }
 
     #[allow(dead_code)]
     pub fn get_embed_endpoint(&self) -> Result<String> {
-        let (embed_url, _, _) = self.ensure_deployed()?;
+        let (embed_url, _) = self.ensure_deployed()?;
         Ok(embed_url)
-    }
-
-    #[allow(dead_code)]
-    pub fn get_rerank_endpoint(&self) -> Result<String> {
-        let (_, rerank_url, _) = self.ensure_deployed()?;
-        Ok(rerank_url)
     }
 }
 
@@ -264,17 +252,12 @@ mod tests {
         let output = r#"
 Creating objects...
 Created fastapi_endpoint embed at https://user--sgrep-offload-embed.modal.run
-Created fastapi_endpoint rerank at https://user--sgrep-offload-rerank.modal.run
 Created fastapi_endpoint health at https://user--sgrep-offload-health.modal.run
 "#;
         let cache = deployer.parse_deploy_output(output).unwrap();
         assert_eq!(
             cache.embed_url,
             "https://user--sgrep-offload-embed.modal.run"
-        );
-        assert_eq!(
-            cache.rerank_url,
-            "https://user--sgrep-offload-rerank.modal.run"
         );
         assert_eq!(
             cache.health_url,
@@ -294,7 +277,6 @@ Created fastapi_endpoint health at https://user--sgrep-offload-health.modal.run
     fn endpoint_cache_serialization() {
         let cache = EndpointCache {
             embed_url: "https://embed.modal.run".to_string(),
-            rerank_url: "https://rerank.modal.run".to_string(),
             health_url: "https://health.modal.run".to_string(),
             gpu_tier: "high".to_string(),
         };
@@ -303,7 +285,6 @@ Created fastapi_endpoint health at https://user--sgrep-offload-health.modal.run
         let parsed: EndpointCache = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.embed_url, cache.embed_url);
-        assert_eq!(parsed.rerank_url, cache.rerank_url);
         assert_eq!(parsed.gpu_tier, cache.gpu_tier);
     }
 }

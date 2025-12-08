@@ -43,7 +43,6 @@ sgrep search --offload --json "find authentication logic"
 
 This auto-deploys a Modal service with:
 - **Qwen3-Embedding-8B**: 8K context window, outputs truncated to 384 dimensions for local compatibility
-- **Qwen3-Reranker-8B**: Cross-encoder reranking for improved accuracy
 
 See [configuration.md](configuration.md) for GPU tier options and full configuration.
 

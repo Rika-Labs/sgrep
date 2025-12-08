@@ -21,7 +21,6 @@ use crate::embedding::BatchEmbedder;
 use crate::fts::{self, Bm25FDocument, Bm25FIndex};
 use crate::graph::{CodeGraph, Symbol};
 use crate::query_expander::{QueryAnalysis, QueryExpander};
-use crate::reranker::Reranker;
 use crate::store::{HierarchicalIndex, MmapIndex, RepositoryIndex};
 
 use bm25_cache::{Bm25CacheKey, Bm25FCache};
@@ -29,7 +28,7 @@ use bm25_cache::{Bm25CacheKey, Bm25FCache};
 use binary::{binary_shortlist, binary_shortlist_precomputed, quantize_to_binary};
 use config::{
     BINARY_QUANTIZATION_THRESHOLD, BINARY_SHORTLIST_FACTOR, HNSW_THRESHOLD, PRF_EXPANSION_TERMS,
-    PRF_TOP_K, RERANK_OVERSAMPLE_FACTOR,
+    PRF_TOP_K,
 };
 use hnsw::{build_hnsw_index, search_hnsw_candidates};
 use scoring::{normalize_bm25_scores, select_top_k, AdaptiveWeights as Weights};
@@ -67,8 +66,6 @@ pub struct SearchOptions {
     pub include_context: bool,
     pub glob: Vec<String>,
     pub filters: Vec<String>,
-    pub rerank: bool,
-    pub oversample_factor: usize,
     pub dedup: DedupOptions,
 }
 
@@ -79,8 +76,6 @@ impl Default for SearchOptions {
             include_context: false,
             glob: vec![],
             filters: vec![],
-            rerank: true,
-            oversample_factor: RERANK_OVERSAMPLE_FACTOR,
             dedup: DedupOptions::default(),
         }
     }
@@ -88,7 +83,6 @@ impl Default for SearchOptions {
 
 pub struct SearchEngine {
     embedder: Arc<dyn BatchEmbedder>,
-    reranker: Option<Arc<dyn Reranker>>,
     graph: Option<CodeGraph>,
     query_expander: Option<QueryExpander>,
     bm25_cache: RefCell<Bm25FCache>,
@@ -99,18 +93,6 @@ impl SearchEngine {
     pub fn new(embedder: Arc<dyn BatchEmbedder>) -> Self {
         Self {
             embedder,
-            reranker: None,
-            graph: None,
-            query_expander: None,
-            bm25_cache: RefCell::new(Bm25FCache::new()),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn with_reranker(embedder: Arc<dyn BatchEmbedder>, reranker: Arc<dyn Reranker>) -> Self {
-        Self {
-            embedder,
-            reranker: Some(reranker),
             graph: None,
             query_expander: None,
             bm25_cache: RefCell::new(Bm25FCache::new()),
@@ -301,8 +283,7 @@ impl SearchEngine {
         }
 
         select_top_k(&mut matches, fetch_limit);
-        let matches = self.maybe_rerank(query, matches, &options);
-        let matches = self.apply_dedup(matches, index, &options);
+                let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
     }
 
@@ -380,8 +361,7 @@ impl SearchEngine {
         }
 
         select_top_k(&mut matches, fetch_limit);
-        let matches = self.maybe_rerank(query, matches, &options);
-        let matches = self.apply_dedup(matches, index, &options);
+                let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
     }
 
@@ -475,8 +455,7 @@ impl SearchEngine {
         }
 
         select_top_k(&mut matches, fetch_limit);
-        let matches = self.maybe_rerank(query, matches, &options);
-        let matches = self.apply_dedup(matches, index, &options);
+                let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
     }
 
@@ -564,8 +543,7 @@ impl SearchEngine {
         }
 
         select_top_k(&mut matches, fetch_limit);
-        let matches = self.maybe_rerank(query, matches, &options);
-        let matches = self.apply_dedup_mmap(matches, index, &options);
+                let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
     }
 
@@ -662,8 +640,7 @@ impl SearchEngine {
         }
 
         select_top_k(&mut matches, fetch_limit);
-        let matches = self.maybe_rerank(query, matches, &options);
-        let matches = self.apply_dedup_mmap(matches, index, &options);
+                let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
     }
 
@@ -754,20 +731,14 @@ impl SearchEngine {
         }
 
         select_top_k(&mut matches, fetch_limit);
-        let matches = self.maybe_rerank(query, matches, &options);
-        let matches = self.apply_dedup_mmap(matches, index, &options);
+                let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
     }
 
     fn prepare_search(&self, query: &str, options: &SearchOptions) -> Result<(Vec<f32>, usize)> {
         let query_vec = self.embedder.embed(query)?;
         let limit = options.limit.max(1);
-        let fetch_limit = if options.rerank && self.reranker.is_some() {
-            limit * options.oversample_factor.max(1)
-        } else {
-            limit
-        };
-        Ok((query_vec, fetch_limit))
+        Ok((query_vec, limit))
     }
 
     fn merge_result(results: &mut Vec<SearchResult>, new_result: SearchResult) {
@@ -840,56 +811,6 @@ impl SearchEngine {
         }
 
         format!("{} {}", original_query, expansion_terms.join(" "))
-    }
-
-    fn maybe_rerank(
-        &self,
-        query: &str,
-        results: Vec<SearchResult>,
-        options: &SearchOptions,
-    ) -> Vec<SearchResult> {
-        if !options.rerank {
-            return results;
-        }
-
-        let reranker = match &self.reranker {
-            Some(r) => r,
-            None => return results,
-        };
-
-        if results.len() <= 1 {
-            return results;
-        }
-
-        let docs: Vec<&str> = results.iter().map(|r| r.chunk.text.as_str()).collect();
-
-        match reranker.rerank(query, &docs) {
-            Ok(reranked) => {
-                let mut reordered: Vec<SearchResult> = reranked
-                    .into_iter()
-                    .filter_map(|(idx, rerank_score)| {
-                        if idx < results.len() {
-                            let mut result = results[idx].clone();
-                            let rerank_boost = rerank_score * 0.4;
-                            result.score += rerank_boost;
-                            Some(result)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                reordered.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-
-                reordered.truncate(options.limit);
-                reordered
-            }
-            Err(_) => results,
-        }
     }
 
     fn apply_dedup(
@@ -1328,8 +1249,6 @@ mod tests {
                     include_context: false,
                     glob: vec![],
                     filters: vec![],
-                    rerank: false,
-                    oversample_factor: 3,
                     dedup: DedupOptions {
                         enabled: false,
                         ..Default::default()
@@ -1364,8 +1283,6 @@ mod tests {
                     include_context: false,
                     glob: vec!["src/**/*.rs".to_string()],
                     filters: vec![],
-                    rerank: false,
-                    oversample_factor: 3,
                     dedup: DedupOptions::default(),
                 },
             )
@@ -1398,8 +1315,6 @@ mod tests {
                     include_context: false,
                     glob: vec![],
                     filters: vec!["lang=rust".to_string()],
-                    rerank: false,
-                    oversample_factor: 3,
                     dedup: DedupOptions::default(),
                 },
             )
@@ -1478,8 +1393,6 @@ mod tests {
                     include_context: false,
                     glob: vec![],
                     filters: vec![],
-                    rerank: false,
-                    oversample_factor: 3,
                     dedup: DedupOptions {
                         enabled: false,
                         ..Default::default()
@@ -1519,8 +1432,6 @@ mod tests {
                     include_context: false,
                     glob: vec![],
                     filters: vec![],
-                    rerank: false,
-                    oversample_factor: 3,
                     dedup: DedupOptions {
                         enabled: false,
                         ..Default::default()
@@ -1532,133 +1443,6 @@ mod tests {
         assert_eq!(results.len(), 10);
     }
 
-    #[test]
-    fn reranking_reorders_results_when_enabled() {
-        use crate::reranker::MockReranker;
-
-        let embedder = Arc::new(MockEmbedder);
-        let reranker = Arc::new(MockReranker);
-        let engine = SearchEngine::with_reranker(embedder.clone(), reranker);
-
-        let chunks = vec![
-            make_chunk("short", "rust", "a.rs"),
-            make_chunk(
-                "this is a much longer document that should be preferred",
-                "rust",
-                "b.rs",
-            ),
-            make_chunk("medium length", "rust", "c.rs"),
-        ];
-        let vectors: Vec<Vec<f32>> = chunks
-            .iter()
-            .map(|c| embedder.embed(&c.text).unwrap())
-            .collect();
-
-        let results = engine
-            .search(
-                &make_index(chunks, vectors),
-                "query",
-                SearchOptions {
-                    limit: 3,
-                    include_context: false,
-                    glob: vec![],
-                    filters: vec![],
-                    rerank: true,
-                    oversample_factor: 3,
-                    dedup: DedupOptions {
-                        enabled: false,
-                        ..Default::default()
-                    },
-                },
-            )
-            .unwrap();
-
-        assert_eq!(results.len(), 3);
-        assert!(results[0].chunk.text.contains("much longer"));
-    }
-
-    #[test]
-    fn reranking_skipped_when_disabled() {
-        use crate::reranker::MockReranker;
-
-        let embedder = Arc::new(MockEmbedder);
-        let reranker = Arc::new(MockReranker);
-        let engine = SearchEngine::with_reranker(embedder.clone(), reranker);
-
-        let chunks = vec![
-            make_chunk("fn foo() {}", "rust", "a.rs"),
-            make_chunk("fn bar() {}", "rust", "b.rs"),
-        ];
-        let vectors: Vec<Vec<f32>> = chunks
-            .iter()
-            .map(|c| embedder.embed(&c.text).unwrap())
-            .collect();
-
-        let results = engine
-            .search(
-                &make_index(chunks, vectors),
-                "function",
-                SearchOptions {
-                    limit: 2,
-                    include_context: false,
-                    glob: vec![],
-                    filters: vec![],
-                    rerank: false,
-                    oversample_factor: 3,
-                    dedup: DedupOptions {
-                        enabled: false,
-                        ..Default::default()
-                    },
-                },
-            )
-            .unwrap();
-
-        assert_eq!(results.len(), 2);
-    }
-
-    #[test]
-    fn reranking_skipped_without_reranker() {
-        let embedder = Arc::new(MockEmbedder);
-        let engine = SearchEngine::new(embedder.clone());
-
-        let chunks = vec![
-            make_chunk("fn foo() {}", "rust", "a.rs"),
-            make_chunk("fn bar() {}", "rust", "b.rs"),
-        ];
-        let vectors: Vec<Vec<f32>> = chunks
-            .iter()
-            .map(|c| embedder.embed(&c.text).unwrap())
-            .collect();
-
-        let results = engine
-            .search(
-                &make_index(chunks, vectors),
-                "function",
-                SearchOptions {
-                    limit: 2,
-                    include_context: false,
-                    glob: vec![],
-                    filters: vec![],
-                    rerank: true,
-                    oversample_factor: 3,
-                    dedup: DedupOptions {
-                        enabled: false,
-                        ..Default::default()
-                    },
-                },
-            )
-            .unwrap();
-
-        assert_eq!(results.len(), 2);
-    }
-
-    #[test]
-    fn search_options_default_has_rerank_enabled_and_oversample() {
-        let options = SearchOptions::default();
-        assert!(options.rerank, "Rerank should be enabled by default");
-        assert_eq!(options.limit, 10);
-        assert_eq!(options.oversample_factor, RERANK_OVERSAMPLE_FACTOR);
-    }
 
     #[test]
     fn search_files_returns_file_level_results() {
@@ -1781,8 +1565,6 @@ mod tests {
                     include_context: false,
                     glob: vec![],
                     filters: vec!["lang=python".to_string()],
-                    rerank: false,
-                    oversample_factor: 3,
                     dedup: DedupOptions::default(),
                 },
             )
@@ -1817,8 +1599,6 @@ mod tests {
                     include_context: false,
                     glob: vec!["src/**/*.rs".to_string()],
                     filters: vec![],
-                    rerank: false,
-                    oversample_factor: 3,
                     dedup: DedupOptions {
                         enabled: false,
                         ..Default::default()
@@ -2075,8 +1855,6 @@ mod tests {
                     include_context: true,
                     glob: vec![],
                     filters: vec![],
-                    rerank: false,
-                    oversample_factor: 3,
                     dedup: DedupOptions::default(),
                 },
             )
@@ -2098,29 +1876,11 @@ mod tests {
         use super::*;
 
         #[test]
-        fn search_context_calculates_fetch_limit_with_rerank() {
-            use crate::reranker::MockReranker;
-
-            let embedder = Arc::new(MockEmbedder);
-            let reranker = Arc::new(MockReranker);
-            let engine = SearchEngine::with_reranker(embedder.clone(), reranker);
-            let options = SearchOptions {
-                limit: 5,
-                rerank: true,
-                ..Default::default()
-            };
-            let expected = 5 * RERANK_OVERSAMPLE_FACTOR;
-            let (_, fetch_limit) = engine.prepare_search("test", &options).unwrap();
-            assert_eq!(fetch_limit, expected);
-        }
-
-        #[test]
-        fn search_context_calculates_fetch_limit_without_rerank() {
+        fn search_context_calculates_fetch_limit() {
             let embedder = Arc::new(MockEmbedder);
             let engine = SearchEngine::new(embedder.clone());
             let options = SearchOptions {
                 limit: 5,
-                rerank: false,
                 ..Default::default()
             };
             let (_, fetch_limit) = engine.prepare_search("test", &options).unwrap();
@@ -2760,7 +2520,6 @@ mod tests {
                     enabled: false,
                     ..Default::default()
                 },
-                rerank: false,
                 ..Default::default()
             };
 

@@ -267,19 +267,14 @@ modal deploy  # From the sgrep repo
 
 **Solutions:**
 
-1. **Enable reranking** (on by default):
-   ```bash
-   sgrep search "query"  # Uses cross-encoder reranking
-   ```
-
-2. **Use GPU-accelerated reranking for better quality:**
+1. **Use GPU-accelerated embeddings for better quality:**
    ```bash
    sgrep search --offload "query"
    ```
 
-3. **Increase result count before reranking:**
+2. **Increase result count:**
    ```bash
-   sgrep search --rerank-oversample 5 "query"  # 5x candidates
+   sgrep search --limit 20 "query"
    ```
 
 ---
@@ -296,11 +291,6 @@ modal deploy  # From the sgrep repo
 2. **Use GPU offload for faster embedding:**
    ```bash
    sgrep search --offload "query"
-   ```
-
-3. **Disable reranking for speed over quality:**
-   ```bash
-   sgrep search --no-rerank "query"
    ```
 
 ---

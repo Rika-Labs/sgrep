@@ -152,12 +152,15 @@ impl ModalEmbedder {
             }
         }
         .map_err(|e| {
-            if let ureq::Error::Status(status, _) = &e {
-                match *status {
+            if let ureq::Error::Status(status, response) = e {
+                let body = response.into_string().unwrap_or_default();
+                match status {
+                    400 => anyhow!("Modal bad request (400): {}", body),
                     401 => anyhow!("Modal authentication failed. Check your proxy_token_id and proxy_token_secret."),
+                    422 => anyhow!("Modal validation error (422): {}", body),
                     429 => anyhow!("Rate limited by Modal. Please wait and retry."),
-                    500..=599 => anyhow!("Modal server error ({}). Please retry.", status),
-                    _ => anyhow!("Modal request failed with status {}: {}", status, e),
+                    500..=599 => anyhow!("Modal server error ({}): {}", status, body),
+                    _ => anyhow!("Modal request failed with status {}: {}", status, body),
                 }
             } else {
                 anyhow!("Failed to send request to Modal: {}", e)
@@ -348,7 +351,7 @@ mod tests {
     fn embed_response_deserialization() {
         let json = r#"{
             "embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
-            "model": "Qwen/Qwen3-Embedding-8B",
+            "model": "jinaai/jina-embeddings-v2-base-code",
             "dimension": 3
         }"#;
         let response: EmbedResponse = serde_json::from_str(json).unwrap();

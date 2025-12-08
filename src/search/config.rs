@@ -14,20 +14,12 @@ pub const HNSW_THRESHOLD: usize = 500;
 
 /// Number of vectors at which binary quantization (BQ) search activates.
 /// BQ reduces memory bandwidth by 32x (f32 -> 1-bit) with ~5% recall loss.
-/// At 1000+ vectors, BQ shortlisting + exact rerank outperforms HNSW.
+/// At 1000+ vectors, BQ shortlisting + exact scoring outperforms HNSW.
 pub const BINARY_QUANTIZATION_THRESHOLD: usize = 1000;
 
 /// Multiplier for binary shortlist size before exact cosine refinement.
 /// A factor of 10 ensures 95%+ recall while limiting exact computations.
 pub const BINARY_SHORTLIST_FACTOR: usize = 10;
-
-// ============================================================================
-// Reranking Configuration
-// ============================================================================
-
-/// Oversampling factor when reranking is enabled.
-/// Fetches 3x results initially to allow reranker to surface buried gems.
-pub const RERANK_OVERSAMPLE_FACTOR: usize = 3;
 
 // ============================================================================
 // Pseudo-Relevance Feedback (PRF) Configuration
@@ -88,12 +80,6 @@ mod tests {
     }
 
     #[test]
-    fn rerank_oversample_is_reasonable() {
-        assert!(RERANK_OVERSAMPLE_FACTOR >= 2);
-        assert!(RERANK_OVERSAMPLE_FACTOR <= 10);
-    }
-
-    #[test]
     fn prf_parameters_are_reasonable() {
         assert!(PRF_TOP_K >= 3);
         assert!(PRF_EXPANSION_TERMS >= 2);
@@ -117,7 +103,6 @@ mod tests {
         assert_eq!(HNSW_THRESHOLD, 500);
         assert_eq!(BINARY_QUANTIZATION_THRESHOLD, 1000);
         assert_eq!(BINARY_SHORTLIST_FACTOR, 10);
-        assert_eq!(RERANK_OVERSAMPLE_FACTOR, 3);
         assert_eq!(PRF_TOP_K, 10);
         assert_eq!(PRF_EXPANSION_TERMS, 5);
         assert_eq!(HNSW_CONNECTIVITY, 16);

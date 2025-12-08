@@ -131,7 +131,6 @@ batch_size = 128               # texts per request
 
 This auto-deploys a Modal service with:
 - **Embeddings**: Qwen3-Embedding-8B (8K context, outputs truncated to 384 dimensions for local compatibility)
-- **Reranking**: Qwen3-Reranker-8B for improved result quality
 
 ### Remote Storage (Pinecone or Turbopuffer)
 

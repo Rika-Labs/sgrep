@@ -8,7 +8,7 @@ sgrep doesn't just do vector search. It combines multiple ranking signals:
 
 ```
 Query → BM25F (keywords) ─┐
-      → Embeddings ───────┼→ Adaptive Fusion → Reranker → Results
+      → Embeddings ───────┼→ Adaptive Fusion → Results
       → Symbol Boost ─────┘
 ```
 
@@ -29,12 +29,6 @@ Dense vector representations that capture meaning beyond exact matches.
 Extracted symbol names (functions, classes, variables) get additional weight in BM25F scoring.
 
 **What it catches:** Queries for "handleClick" finding the actual handler even in large files.
-
-### 4. Cross-Encoder Reranking
-
-A secondary model that deeply analyzes query-document pairs for final ranking.
-
-**What it catches:** Subtle relevance that simpler models miss.
 
 ```bash
 # See all score components
