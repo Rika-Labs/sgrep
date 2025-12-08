@@ -32,7 +32,6 @@ pub struct SearchParams<'a> {
     pub filters: Vec<String>,
     pub json: bool,
     pub debug: bool,
-    pub offload: bool,
     pub remote: Option<Arc<dyn RemoteVectorStore>>,
 }
 
@@ -217,7 +216,6 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                     filters,
                     json,
                     debug,
-                    offload,
                     remote: remote_store,
                 },
             )
@@ -1362,7 +1360,6 @@ mod tests {
                 filters: vec![],
                 json: true,
                 debug: false,
-                offload: false,
                 remote: Some(remote.clone()),
             },
         )
@@ -1372,7 +1369,6 @@ mod tests {
         std::fs::remove_dir_all(&repo).ok();
         env::remove_var("SGREP_HOME");
     }
-
 
     #[test]
     #[serial]
@@ -1403,7 +1399,6 @@ mod tests {
                 filters: vec![],
                 json: true,
                 debug: false,
-                offload: false,
                 remote: None,
             },
         )
@@ -1818,7 +1813,6 @@ mod tests {
             filters: vec!["lang=rust".to_string()],
             json: false,
             debug: true,
-            offload: false,
             remote: None,
         };
 
@@ -1830,7 +1824,6 @@ mod tests {
         assert_eq!(params.filters.len(), 1);
         assert!(!params.json);
         assert!(params.debug);
-        assert!(!params.offload);
     }
 
     #[test]

@@ -283,7 +283,7 @@ impl SearchEngine {
         }
 
         select_top_k(&mut matches, fetch_limit);
-                let matches = self.apply_dedup(matches, index, &options);
+        let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
     }
 
@@ -361,7 +361,7 @@ impl SearchEngine {
         }
 
         select_top_k(&mut matches, fetch_limit);
-                let matches = self.apply_dedup(matches, index, &options);
+        let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
     }
 
@@ -455,7 +455,7 @@ impl SearchEngine {
         }
 
         select_top_k(&mut matches, fetch_limit);
-                let matches = self.apply_dedup(matches, index, &options);
+        let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
     }
 
@@ -543,7 +543,7 @@ impl SearchEngine {
         }
 
         select_top_k(&mut matches, fetch_limit);
-                let matches = self.apply_dedup_mmap(matches, index, &options);
+        let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
     }
 
@@ -640,7 +640,7 @@ impl SearchEngine {
         }
 
         select_top_k(&mut matches, fetch_limit);
-                let matches = self.apply_dedup_mmap(matches, index, &options);
+        let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
     }
 
@@ -731,7 +731,7 @@ impl SearchEngine {
         }
 
         select_top_k(&mut matches, fetch_limit);
-                let matches = self.apply_dedup_mmap(matches, index, &options);
+        let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
     }
 
@@ -1442,7 +1442,6 @@ mod tests {
 
         assert_eq!(results.len(), 10);
     }
-
 
     #[test]
     fn search_files_returns_file_level_results() {
