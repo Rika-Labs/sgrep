@@ -10,6 +10,7 @@ GPU_CONFIG = os.environ.get("SGREP_MODAL_GPU", "T4")
 PORT = 8000
 MAX_CONCURRENT = int(os.environ.get("SGREP_MODAL_MAX_CONCURRENT", "64"))
 MINUTES = 60
+STARTUP_TIMEOUT = int(os.environ.get("SGREP_MODAL_STARTUP_TIMEOUT_SECS", "600"))
 
 TEI_VERSION = "1.8"
 TEI_IMAGE_VARIANTS = {
@@ -83,7 +84,7 @@ class EmbedResponse(BaseModel):
     dimension: int
 
 
-@app.cls(gpu=GPU_CONFIG, image=tei_image, scaledown_window=5 * MINUTES, max_containers=10)
+@app.cls(gpu=GPU_CONFIG, image=tei_image, scaledown_window=5 * MINUTES, max_containers=10, startup_timeout=STARTUP_TIMEOUT)
 @modal.concurrent(max_inputs=MAX_CONCURRENT)
 class Embedder:
     @modal.enter()
@@ -107,7 +108,7 @@ class Embedder:
         return resp.json()
 
 
-@app.function(image=tei_image)
+@app.function(image=tei_image, startup_timeout=STARTUP_TIMEOUT)
 @modal.fastapi_endpoint(method="POST", requires_proxy_auth=True)
 def embed(request: EmbedRequest) -> EmbedResponse:
     embedder = Embedder()

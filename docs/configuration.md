@@ -151,6 +151,7 @@ remote_provider = "pinecone"  # or "turbopuffer"; inferred if only one is config
 | `SGREP_REMOTE` | `0` | Enable remote vector storage |
 | `SGREP_BATCH_SIZE` | auto | Embedding batch size |
 | `SGREP_INIT_TIMEOUT_SECS` | `120` | Model initialization timeout |
+| `SGREP_MODAL_STARTUP_TIMEOUT_SECS` | `600` | Modal function startup timeout (seconds) |
 
 ### Threading
 
