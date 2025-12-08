@@ -6,6 +6,7 @@ use anyhow::Result;
 use notify::EventKind;
 
 use crate::indexer::{DirtySet, IndexRequest, Indexer};
+use crate::remote;
 use crate::remote::{push_remote_index, RemoteVectorStore};
 use crate::store::IndexStore;
 #[cfg(not(test))]
@@ -103,6 +104,7 @@ pub struct WatchService {
     debounce: Duration,
     batch_size: Option<usize>,
     remote: Option<Arc<dyn RemoteVectorStore>>,
+    remote_bundle: Option<Arc<dyn RemoteVectorStore>>,
 }
 
 impl WatchService {
@@ -111,18 +113,33 @@ impl WatchService {
         debounce: Duration,
         batch_size: Option<usize>,
         remote: Option<Arc<dyn RemoteVectorStore>>,
+        remote_bundle: Option<Arc<dyn RemoteVectorStore>>,
     ) -> Self {
         Self {
             indexer,
             debounce,
             batch_size,
             remote,
+            remote_bundle,
         }
     }
 
     fn sync_remote(&self, path: &Path, reset_namespace: bool) -> Result<()> {
         if let Some(remote) = &self.remote {
             push_remote_index(path, remote, reset_namespace)?;
+        }
+        if let Some(bundle_remote) = &self.remote_bundle {
+            let reset_bundle = self
+                .remote
+                .as_ref()
+                .map(|r| !Arc::ptr_eq(r, bundle_remote))
+                .unwrap_or(true);
+            remote::push_remote_bundle(
+                path,
+                bundle_remote,
+                self.indexer.embedder_dimension(),
+                reset_namespace && reset_bundle,
+            )?;
         }
         Ok(())
     }
@@ -444,7 +461,7 @@ mod tests {
         std::env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
 
         let indexer = Indexer::new(Arc::new(crate::embedding::Embedder::default()));
-        let mut svc = WatchService::new(indexer, Duration::from_millis(200), Some(32), None);
+        let mut svc = WatchService::new(indexer, Duration::from_millis(200), Some(32), None, None);
         svc.run(&repo).expect("test run should be a no-op");
 
         std::fs::remove_dir_all(&repo).ok();

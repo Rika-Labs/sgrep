@@ -1,13 +1,19 @@
 //! Turbopuffer vector store for remote index storage.
 
 use anyhow::{anyhow, Context, Result};
+use indicatif::ProgressBar;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::remote::{RemoteChunk, RemoteSearchHit, RemoteVectorStore};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 const MAX_RETRIES: usize = 3;
+const MAX_VECTORS_PER_REQUEST: usize = 1000;
+const TP_ATTR_LIMIT_BYTES: usize = 3800; // under 4KB filterable attribute limit
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchResult {
@@ -22,14 +28,14 @@ pub struct SearchResult {
 }
 
 #[derive(Serialize)]
-struct UpsertRow<'a> {
-    id: &'a str,
-    vector: &'a [f32],
-    path: &'a str,
+struct UpsertRow {
+    id: String,
+    vector: Vec<f32>,
+    path: String,
     start_line: usize,
     end_line: usize,
-    content: &'a str,
-    language: &'a str,
+    content: String,
+    language: String,
 }
 
 #[derive(Serialize)]
@@ -46,15 +52,16 @@ struct QueryResponse {
 }
 
 #[derive(Serialize)]
-struct WriteRequest<'a> {
+struct WriteRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
-    upsert_rows: Option<Vec<UpsertRow<'a>>>,
+    upsert_rows: Option<Vec<UpsertRow>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     distance_metric: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deletes: Option<Vec<String>>,
 }
 
+#[derive(Clone)]
 pub struct TurbopufferStore {
     client: ureq::Agent,
     api_key: String,
@@ -91,6 +98,37 @@ impl TurbopufferStore {
         )
     }
 
+    fn truncate_attr(value: &str) -> String {
+        let bytes = value.as_bytes();
+        if bytes.len() <= TP_ATTR_LIMIT_BYTES {
+            return value.to_owned();
+        }
+
+        let max_bytes = TP_ATTR_LIMIT_BYTES.saturating_sub(3); // leave room for ellipsis bytes
+        let mut end = 0;
+        for (idx, _) in value.char_indices() {
+            if idx <= max_bytes {
+                end = idx;
+            } else {
+                break;
+            }
+        }
+        let mut truncated = value[..end].to_owned();
+        truncated.push('…');
+        truncated
+    }
+
+    fn dedup_rows(rows: Vec<UpsertRow>) -> Vec<UpsertRow> {
+        let mut seen = HashSet::with_capacity(rows.len());
+        let mut unique = Vec::with_capacity(rows.len());
+        for row in rows.into_iter() {
+            if seen.insert(row.id.clone()) {
+                unique.push(row);
+            }
+        }
+        unique
+    }
+
     fn post_with_retry<T: Serialize, R: for<'de> Deserialize<'de>>(
         &self,
         url: &str,
@@ -112,19 +150,40 @@ impl TurbopufferStore {
                         .context("Failed to parse Turbopuffer response");
                 }
                 Err(e) => {
-                    let err = if let ureq::Error::Status(status, _) = &e {
-                        match *status {
-                            401 => anyhow!("Authentication failed: invalid Turbopuffer API key"),
-                            429 => anyhow!("Rate limited by Turbopuffer. Please wait and retry."),
-                            500..=599 => {
-                                anyhow!("Turbopuffer server error ({}). Please retry.", status)
-                            }
-                            _ => {
-                                anyhow!("Turbopuffer request failed with status {}: {}", status, e)
+                    let err = match e {
+                        ureq::Error::Status(status, response) => {
+                            let body = response.into_string().unwrap_or_default();
+                            match status {
+                                401 => {
+                                    anyhow!("Authentication failed: invalid Turbopuffer API key")
+                                }
+                                429 => {
+                                    anyhow!("Rate limited by Turbopuffer. Please wait and retry.")
+                                }
+                                500..=599 => {
+                                    if body.is_empty() {
+                                        anyhow!(
+                                            "Turbopuffer server error ({}). Please retry.",
+                                            status
+                                        )
+                                    } else {
+                                        anyhow!("Turbopuffer server error ({}): {}", status, body)
+                                    }
+                                }
+                                _ => {
+                                    if body.is_empty() {
+                                        anyhow!("Turbopuffer request failed with status {}", status)
+                                    } else {
+                                        anyhow!(
+                                            "Turbopuffer request failed with status {}: {}",
+                                            status,
+                                            body
+                                        )
+                                    }
+                                }
                             }
                         }
-                    } else {
-                        anyhow!("Failed to send request to Turbopuffer: {}", e)
+                        e => anyhow!("Failed to send request to Turbopuffer: {}", e),
                     };
 
                     // Don't retry auth failures
@@ -158,26 +217,74 @@ impl RemoteVectorStore for TurbopufferStore {
         }
 
         let url = self.base_url();
-        let rows: Vec<UpsertRow> = chunks
-            .iter()
-            .map(|c| UpsertRow {
-                id: &c.id,
-                vector: &c.vector,
-                path: &c.path,
-                start_line: c.start_line,
-                end_line: c.end_line,
-                content: &c.content,
-                language: &c.language,
-            })
-            .collect();
 
-        let request = WriteRequest {
-            upsert_rows: Some(rows),
-            distance_metric: Some("cosine_distance".to_string()),
-            deletes: None,
-        };
+        for batch in chunks.chunks(MAX_VECTORS_PER_REQUEST) {
+            let rows: Vec<UpsertRow> = Self::dedup_rows(
+                batch
+                    .iter()
+                    .map(|c| UpsertRow {
+                        id: c.id.clone(),
+                        vector: c.vector.clone(),
+                        path: c.path.clone(),
+                        start_line: c.start_line,
+                        end_line: c.end_line,
+                        content: Self::truncate_attr(&c.content),
+                        language: c.language.clone(),
+                    })
+                    .collect(),
+            );
 
-        self.post_with_retry::<_, serde_json::Value>(&url, &request)?;
+            let request = WriteRequest {
+                upsert_rows: Some(rows),
+                distance_metric: Some("cosine_distance".to_string()),
+                deletes: None,
+            };
+
+            self.post_with_retry::<_, serde_json::Value>(&url, &request)?;
+        }
+
+        Ok(())
+    }
+
+    fn upsert_with_progress(&self, chunks: &[RemoteChunk], pb: &ProgressBar) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+
+        let url = self.base_url();
+        let uploaded = AtomicUsize::new(0);
+        let store = self.clone();
+
+        let batches: Vec<_> = chunks.chunks(MAX_VECTORS_PER_REQUEST).collect();
+
+        batches.par_iter().try_for_each(|batch| {
+            let rows: Vec<UpsertRow> = Self::dedup_rows(
+                batch
+                    .iter()
+                    .map(|c| UpsertRow {
+                        id: c.id.clone(),
+                        vector: c.vector.clone(),
+                        path: c.path.clone(),
+                        start_line: c.start_line,
+                        end_line: c.end_line,
+                        content: Self::truncate_attr(&c.content),
+                        language: c.language.clone(),
+                    })
+                    .collect(),
+            );
+
+            let request = WriteRequest {
+                upsert_rows: Some(rows),
+                distance_metric: Some("cosine_distance".to_string()),
+                deletes: None,
+            };
+
+            store.post_with_retry::<_, serde_json::Value>(&url, &request)?;
+            let uploaded_count = uploaded.fetch_add(batch.len(), Ordering::SeqCst) + batch.len();
+            pb.set_position(uploaded_count as u64);
+            Ok::<(), anyhow::Error>(())
+        })?;
+
         Ok(())
     }
 
@@ -337,5 +444,113 @@ mod tests {
     fn delete_not_found_status_is_ignored() {
         assert!(TurbopufferStore::should_ignore_delete_status(404));
         assert!(!TurbopufferStore::should_ignore_delete_status(500));
+    }
+
+    #[test]
+    fn truncate_attr_respects_limit() {
+        let long = "a".repeat(TP_ATTR_LIMIT_BYTES + 200);
+        let truncated = TurbopufferStore::truncate_attr(&long);
+        assert!(truncated.len() <= TP_ATTR_LIMIT_BYTES);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn dedup_rows_removes_duplicates() {
+        let rows = vec![
+            UpsertRow {
+                id: "a".into(),
+                vector: vec![0.1],
+                path: "p".into(),
+                start_line: 1,
+                end_line: 1,
+                content: "c".into(),
+                language: "rust".into(),
+            },
+            UpsertRow {
+                id: "a".into(),
+                vector: vec![0.2],
+                path: "p2".into(),
+                start_line: 1,
+                end_line: 2,
+                content: "c2".into(),
+                language: "rust".into(),
+            },
+        ];
+        let deduped = TurbopufferStore::dedup_rows(rows);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].id, "a");
+    }
+
+    #[test]
+    fn max_vectors_per_request_is_set() {
+        use super::MAX_VECTORS_PER_REQUEST;
+        assert_eq!(MAX_VECTORS_PER_REQUEST, 1000);
+    }
+
+    fn create_test_chunk(id: usize) -> crate::remote::RemoteChunk {
+        crate::remote::RemoteChunk {
+            id: format!("chunk-{}", id),
+            vector: vec![0.1, 0.2, 0.3],
+            path: format!("file{}.rs", id),
+            start_line: 1,
+            end_line: 10,
+            content: format!("content {}", id),
+            language: "rust".to_string(),
+        }
+    }
+
+    #[test]
+    fn batching_splits_large_requests() {
+        use super::MAX_VECTORS_PER_REQUEST;
+        let chunks: Vec<crate::remote::RemoteChunk> =
+            (0..2500).map(|i| create_test_chunk(i)).collect();
+
+        let batches: Vec<_> = chunks.chunks(MAX_VECTORS_PER_REQUEST).collect();
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].len(), 1000);
+        assert_eq!(batches[1].len(), 1000);
+        assert_eq!(batches[2].len(), 500);
+    }
+
+    #[test]
+    fn batching_handles_exact_multiple() {
+        use super::MAX_VECTORS_PER_REQUEST;
+        let chunks: Vec<crate::remote::RemoteChunk> =
+            (0..2000).map(|i| create_test_chunk(i)).collect();
+
+        let batches: Vec<_> = chunks.chunks(MAX_VECTORS_PER_REQUEST).collect();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), 1000);
+        assert_eq!(batches[1].len(), 1000);
+    }
+
+    #[test]
+    fn batching_handles_small_batch() {
+        use super::MAX_VECTORS_PER_REQUEST;
+        let chunks: Vec<crate::remote::RemoteChunk> =
+            (0..500).map(|i| create_test_chunk(i)).collect();
+
+        let batches: Vec<_> = chunks.chunks(MAX_VECTORS_PER_REQUEST).collect();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 500);
+    }
+
+    #[test]
+    fn batching_handles_single_chunk() {
+        use super::MAX_VECTORS_PER_REQUEST;
+        let chunks: Vec<crate::remote::RemoteChunk> = vec![create_test_chunk(0)];
+
+        let batches: Vec<_> = chunks.chunks(MAX_VECTORS_PER_REQUEST).collect();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+    }
+
+    #[test]
+    fn batching_handles_empty_chunks() {
+        use super::MAX_VECTORS_PER_REQUEST;
+        let chunks: Vec<crate::remote::RemoteChunk> = vec![];
+
+        let batches: Vec<_> = chunks.chunks(MAX_VECTORS_PER_REQUEST).collect();
+        assert_eq!(batches.len(), 0);
     }
 }

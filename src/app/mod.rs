@@ -7,18 +7,41 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-use chrono::Utc;
 use clap::Parser;
 use console::{style, Term};
 use indicatif::HumanDuration;
 use tracing::{info, warn};
-use uuid::Uuid;
+
+fn format_info(msg: &str) -> String {
+    format!("{} {}", style("[info]").blue().bold(), msg)
+}
+
+fn format_ok(msg: &str) -> String {
+    format!("{} {}", style("[ok]").green().bold(), msg)
+}
+
+fn format_warn(msg: &str) -> String {
+    format!("{} {}", style("[warn]").yellow().bold(), msg)
+}
+
+pub fn log_info(msg: &str) {
+    eprintln!("{}", format_info(msg));
+}
+
+pub fn log_ok(msg: &str) {
+    println!("{}", format_ok(msg));
+}
+
+pub fn log_warn(msg: &str) {
+    eprintln!("{}", format_warn(msg));
+}
 
 use crate::cli::{resolve_repo_path, Cli, Commands};
 use crate::config::{Config, EmbeddingProviderType, RemoteProviderType};
 use crate::embedding::{self, Embedder, PooledEmbedder};
 use crate::modal::{ModalDeployer, ModalEmbedder};
 use crate::output::JsonResponse;
+use crate::remote;
 use crate::remote::{push_remote_index, RemoteFactory, RemoteVectorStore};
 use crate::threading::{CpuPreset, ThreadConfig};
 use crate::{indexer, search, store, watch};
@@ -33,7 +56,13 @@ pub struct SearchParams<'a> {
     pub json: bool,
     pub debug: bool,
     pub remote: Option<Arc<dyn RemoteVectorStore>>,
+    pub remote_bundle: Option<Arc<dyn RemoteVectorStore>>,
 }
+
+type RemoteStorePair = (
+    Option<Arc<dyn RemoteVectorStore>>,
+    Option<Arc<dyn RemoteVectorStore>>,
+);
 
 #[allow(dead_code)]
 struct ProgressLine {
@@ -204,7 +233,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             offload: _offload,
             remote,
         } => {
-            let remote_store = build_remote_store(remote, &path)?;
+            let (remote_store, bundle_store) = build_remote_stores(remote, &path)?;
             handle_search(
                 embedder,
                 SearchParams {
@@ -217,6 +246,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                     json,
                     debug,
                     remote: remote_store,
+                    remote_bundle: bundle_store,
                 },
             )
         }
@@ -299,9 +329,9 @@ fn resolve_modal_endpoints(config: &Config, json_mode: bool) -> Result<(String, 
 
     if !json_mode {
         if cached {
-            eprintln!("[info] Using cached Modal endpoints");
+            log_info("Using cached Modal endpoints");
         } else {
-            eprintln!("[info] Deployed Modal endpoints");
+            log_info("Deployed Modal endpoints");
         }
     }
 
@@ -320,15 +350,13 @@ fn build_modal_embedder(config: &Config) -> Result<Arc<dyn embedding::BatchEmbed
     let (embed_endpoint, _cached) =
         resolve_modal_endpoints(config, false).context("Modal embedder unavailable")?;
 
-    eprintln!(
-        "[info] Using Modal embedder (GPU: A10G, dim: {}, batch: {}, concurrency: {})",
-        MODAL_DIMENSION,
-        batch_size,
-        concurrency
-    );
+    log_info(&format!(
+        "Using Modal embedder (GPU: A10G, dim: {}, batch: {}, concurrency: {})",
+        MODAL_DIMENSION, batch_size, concurrency
+    ));
 
     let endpoint = if let Some(endpoint) = config.modal.endpoint.clone() {
-        eprintln!("[info] Using cached endpoint: {}", endpoint);
+        log_info(&format!("Using cached endpoint: {}", endpoint));
         endpoint
     } else {
         embed_endpoint
@@ -393,15 +421,18 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
 
     if init {
         if config_path.exists() {
-            println!("[info] Config already exists at {}", config_path.display());
+            log_info(&format!(
+                "Config already exists at {}",
+                config_path.display()
+            ));
         } else {
             let path = Config::create_default_config()?;
-            println!("[ok] Created config at {}", path.display());
+            log_ok(&format!("Created config at {}", path.display()));
         }
         return Ok(());
     }
 
-    println!("[info] Config path: {}", config_path.display());
+    log_info(&format!("Config path: {}", config_path.display()));
 
     if config_path.exists() {
         println!(
@@ -424,7 +455,7 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
 fn verify_model_files() -> Result<()> {
     let model_dir = embedding::get_fastembed_cache_dir().join(embedding::MODEL_NAME);
 
-    println!("[info] Model directory: {}\n", model_dir.display());
+    log_info(&format!("Model directory: {}\n", model_dir.display()));
 
     let mut all_ok = true;
     for file in embedding::MODEL_FILES {
@@ -440,7 +471,7 @@ fn verify_model_files() -> Result<()> {
 
     println!();
     if all_ok {
-        println!("[ok] All model files present.");
+        log_ok("All model files present.");
         Ok(())
     } else {
         println!("[error] Some model files are missing.\n");
@@ -501,21 +532,21 @@ fn handle_index(
     if !crate::query_expander::is_model_cached() {
         use crate::query_expander::QueryExpander;
         if let Err(e) = QueryExpander::new() {
-            eprintln!(
-                "[warn] Query expander download failed: {} (search will use heuristics)",
+            log_warn(&format!(
+                "Query expander download failed: {} (search will use heuristics)",
                 e
-            );
+            ));
         }
     }
 
-    let remote_store = if remote_flag {
-        if let Some(store) = remote_override {
-            Some(store)
+    let (remote_store, bundle_store) = if remote_flag {
+        if let Some(override_store) = remote_override {
+            (Some(override_store.clone()), Some(override_store))
         } else {
-            build_remote_store(true, &path)?
+            build_remote_stores(true, &path)?
         }
     } else {
-        None
+        (None, None)
     };
 
     let indexer = if remote_embedding {
@@ -532,18 +563,44 @@ fn handle_index(
             dirty: None,
         })
         .context("Failed to build index")?;
+    let index_duration = report.duration;
 
-    if let Some(remote) = remote_store {
-        push_remote_index(&path, &remote, true)?;
-        eprintln!("[ok] Remote index pushed to {}", remote.name());
+    let mut upload_duration = None;
+
+    if remote_store.is_some() || bundle_store.is_some() {
+        let upload_start = Instant::now();
+
+        if let Some(remote) = remote_store.as_ref() {
+            push_remote_index(&path, remote, true)?;
+            log_ok(&format!("Remote index pushed to {}", remote.name()));
+        }
+
+        if let Some(bundle_remote) = bundle_store.as_ref() {
+            let reset_bundle = remote_store
+                .as_ref()
+                .map(|r| !Arc::ptr_eq(r, bundle_remote))
+                .unwrap_or(true);
+            let manifest = remote::push_remote_bundle(
+                &path,
+                bundle_remote,
+                embedder.dimension(),
+                reset_bundle,
+            )?;
+            log_ok(&format!(
+                "Remote bundle uploaded ({} parts, {} bytes)",
+                manifest.parts, manifest.total_bytes
+            ));
+        }
+
+        upload_duration = Some(upload_start.elapsed());
     }
 
-    println!(
-        "[ok] Indexed {} files ({} chunks) in {}",
+    log_ok(&format!(
+        "Indexed {} files ({} chunks) in {}",
         report.files_indexed,
         report.chunks_indexed,
         HumanDuration(report.duration)
-    );
+    ));
 
     // Show graph statistics
     if report.graph_symbols > 0 {
@@ -577,6 +634,15 @@ fn handle_index(
         );
     }
 
+    log_info(&format!(
+        "Timers: indexed {}, uploaded {}",
+        HumanDuration(index_duration),
+        upload_duration
+            .map(HumanDuration)
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "n/a".to_string())
+    ));
+
     Ok(())
 }
 
@@ -587,14 +653,17 @@ fn handle_search(
     let start = Instant::now();
 
     if let Some(remote) = params.remote.clone() {
-        return handle_remote_search(embedder, params, remote, start);
+        let bundle_store = params.remote_bundle.clone().ok_or_else(|| {
+            anyhow!("--remote requested but bundle store unavailable; re-run index with --remote")
+        })?;
+        return handle_remote_search(embedder, params, remote, bundle_store, start);
     }
 
     let mut engine = search::SearchEngine::new(embedder.clone());
 
     if let Err(e) = engine.enable_query_expander_silent() {
         if !params.json {
-            eprintln!("[warn] Query expander unavailable: {}", e);
+            log_warn(&format!("Query expander unavailable: {}", e));
         }
     }
 
@@ -659,86 +728,112 @@ fn handle_remote_search(
     embedder: Arc<dyn embedding::BatchEmbedder>,
     params: SearchParams<'_>,
     remote: Arc<dyn RemoteVectorStore>,
+    bundle_remote: Arc<dyn RemoteVectorStore>,
     start: Instant,
 ) -> Result<()> {
-    let limit = params.limit.max(1);
-
-    let query_vec = embedder.embed(params.query)?;
-    let hits = remote.query(&query_vec, limit)?;
-
-    let mut results: Vec<search::SearchResult> = hits
-        .into_iter()
-        .map(|h| {
-            let chunk = crate::chunker::CodeChunk {
-                id: Uuid::new_v4(),
-                path: Path::new(&h.path).to_path_buf(),
-                language: h.language,
-                start_line: h.start_line,
-                end_line: h.end_line,
-                text: h.content,
-                hash: h.id.clone(),
-                modified_at: Utc::now(),
-            };
-            search::SearchResult {
-                chunk,
-                score: h.score,
-                semantic_score: h.score,
-                bm25_score: 0.0,
-                show_full_context: params.context,
+    match remote::bundle::download_bundle(bundle_remote.as_ref(), embedder.dimension()) {
+        Ok((index, graph, _hierarchy)) => {
+            let mut engine = search::SearchEngine::new(embedder.clone());
+            if let Some(g) = graph {
+                engine.set_graph(g);
             }
-        })
-        .collect();
 
-    if results.len() > limit {
-        results.truncate(limit);
+            if let Err(e) = engine.enable_query_expander_silent() {
+                if !params.json {
+                    log_warn(&format!("Query expander unavailable: {}", e));
+                }
+            }
+
+            let results = engine.search(
+                &index,
+                params.query,
+                search::SearchOptions {
+                    limit: params.limit,
+                    include_context: params.context,
+                    glob: params.glob.clone(),
+                    filters: params.filters.clone(),
+                    dedup: search::DedupOptions::default(),
+                },
+            )?;
+
+            let elapsed = start.elapsed();
+
+            render_results(RenderContext {
+                results,
+                query: params.query,
+                limit: params.limit,
+                index: &index,
+                elapsed,
+                json: params.json,
+                debug: params.debug,
+            })
+        }
+        Err(e) => {
+            if bundle_remote.name() == "turbopuffer" && remote::bundle::is_bundle_too_large(&e) {
+                // Fallback: vector-only remote query when bundle exceeds part limits
+                let limit = params.limit.max(1).min(10_000);
+                let query_vec = embedder.embed(params.query)?;
+                let hits = remote.query(&query_vec, limit)?;
+
+                let mut results: Vec<search::SearchResult> = hits
+                    .into_iter()
+                    .map(|h| {
+                        let chunk = crate::chunker::CodeChunk {
+                            id: uuid::Uuid::new_v4(),
+                            path: std::path::Path::new(&h.path).to_path_buf(),
+                            language: h.language,
+                            start_line: h.start_line,
+                            end_line: h.end_line,
+                            text: h.content,
+                            hash: h.id.clone(),
+                            modified_at: chrono::Utc::now(),
+                        };
+                        search::SearchResult {
+                            chunk,
+                            score: h.score,
+                            semantic_score: h.score,
+                            bm25_score: 0.0,
+                            show_full_context: params.context,
+                        }
+                    })
+                    .collect();
+
+                if results.len() > limit {
+                    results.truncate(limit);
+                }
+
+                let elapsed = start.elapsed();
+                let store = store::IndexStore::new(params.path)?;
+                let metadata = store::IndexMetadata {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    repo_path: params.path.to_path_buf(),
+                    repo_hash: store.repo_hash().to_string(),
+                    vector_dim: embedder.dimension(),
+                    indexed_at: chrono::Utc::now(),
+                    total_files: 0,
+                    total_chunks: results.len(),
+                };
+                let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
+
+                return render_results(RenderContext {
+                    results,
+                    query: params.query,
+                    limit: params.limit,
+                    index: &index,
+                    elapsed,
+                    json: params.json,
+                    debug: params.debug,
+                });
+            }
+
+            Err(e)
+        }
     }
-
-    let vectors = embedder
-        .embed_batch(
-            &results
-                .iter()
-                .map(|r| r.chunk.text.clone())
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or_default();
-
-    let mut deduped = results;
-    search::suppress_near_duplicates(&mut deduped, &vectors, &search::DedupOptions::default());
-
-    if deduped.len() > limit {
-        deduped.truncate(limit);
-    }
-
-    let elapsed = start.elapsed();
-    let store = store::IndexStore::new(params.path)?;
-    let metadata = store::IndexMetadata {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        repo_path: params.path.to_path_buf(),
-        repo_hash: store.repo_hash().to_string(),
-        vector_dim: embedder.dimension(),
-        indexed_at: Utc::now(),
-        total_files: 0,
-        total_chunks: deduped.len(),
-    };
-    let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
-
-    render_results(RenderContext {
-        results: deduped,
-        query: params.query,
-        limit: params.limit,
-        index: &index,
-        elapsed,
-        json: params.json,
-        debug: params.debug,
-    })
 }
 
-fn build_remote_store(
-    remote_flag: bool,
-    path: &Path,
-) -> Result<Option<Arc<dyn RemoteVectorStore>>> {
+fn build_remote_stores(remote_flag: bool, path: &Path) -> Result<RemoteStorePair> {
     if !remote_flag {
-        return Ok(None);
+        return Ok((None, None));
     }
 
     let mut config = Config::load().unwrap_or_default();
@@ -751,13 +846,21 @@ fn build_remote_store(
     }
 
     let remote = RemoteFactory::build_from_config(&config, &repo_hash)?;
+    let bundle_remote = RemoteFactory::build_bundle_store(&config, &repo_hash)?;
+
     if remote.is_none() {
         return Err(anyhow!(
             "--remote requested but no provider configured. Configure [turbopuffer] or [pinecone], or set remote_provider."
         ));
     }
 
-    Ok(remote)
+    if bundle_remote.is_none() {
+        return Err(anyhow!(
+            "--remote requested but bundle storage could not be built. Check remote configuration."
+        ));
+    }
+
+    Ok((remote, bundle_remote))
 }
 
 fn handle_watch(
@@ -770,14 +873,14 @@ fn handle_watch(
     remote_embedding: bool,
 ) -> Result<()> {
     let path = resolve_repo_path(path)?;
-    let remote_store = if remote_flag {
-        if let Some(store) = remote_override {
-            Some(store)
+    let (remote_store, bundle_store) = if remote_flag {
+        if let Some(override_store) = remote_override {
+            (Some(override_store.clone()), Some(override_store))
         } else {
-            build_remote_store(true, &path)?
+            build_remote_stores(true, &path)?
         }
     } else {
-        remote_override
+        (None, None)
     };
     let indexer = if remote_embedding {
         indexer::Indexer::with_remote_embedding(embedder.clone(), true)
@@ -789,6 +892,7 @@ fn handle_watch(
         Duration::from_millis(debounce_ms),
         batch_size,
         remote_store,
+        bundle_store,
     );
     watcher.run(&path)
 }
@@ -897,7 +1001,7 @@ fn render_results(ctx: RenderContext<'_>) -> Result<()> {
             JsonResponse::from_results(ctx.query, ctx.limit, ctx.results, ctx.index, ctx.elapsed);
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if ctx.results.is_empty() {
-        println!("[warn] No matches found");
+        log_warn("No matches found");
     } else {
         for (idx, result) in ctx.results.iter().enumerate() {
             let header = format!(
@@ -918,7 +1022,11 @@ fn render_results(ctx: RenderContext<'_>) -> Result<()> {
             println!();
         }
         if ctx.debug {
-            println!("[info] {} results in {:?}", ctx.results.len(), ctx.elapsed);
+            log_info(&format!(
+                "{} results in {:?}",
+                ctx.results.len(),
+                ctx.elapsed
+            ));
         }
     }
     Ok(())
@@ -938,6 +1046,8 @@ mod tests {
     use crate::chunker::CodeChunk;
     use crate::remote::{RemoteChunk, RemoteSearchHit};
     use crate::store::{IndexMetadata, RepositoryIndex};
+    use base64::Engine;
+    use chrono::Utc;
     use serial_test::serial;
     use std::any::type_name_of_val;
     use std::ffi::OsString;
@@ -1305,16 +1415,36 @@ mod tests {
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
 
-        let remote = Arc::new(MockRemoteStore::with_hits(vec![RemoteSearchHit {
-            id: "hit1".into(),
-            score: 0.9,
-            path: repo.join("lib.rs").display().to_string(),
-            start_line: 1,
-            end_line: 1,
-            content: "pub fn hi() {}".into(),
-            language: "rust".into(),
-        }]));
         let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+
+        let indexer = indexer::Indexer::new(embedder.clone());
+        indexer
+            .build_index(indexer::IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: Some(4),
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        let parts = remote::bundle::build_bundle(repo.as_path(), Some(8 * 1024)).unwrap();
+        let chunks = remote::bundle::encode_parts_for_upload(&parts, embedder.dimension());
+        let hits: Vec<RemoteSearchHit> = chunks
+            .into_iter()
+            .map(|c| RemoteSearchHit {
+                id: c.id,
+                score: 1.0,
+                path: c.path,
+                start_line: c.start_line,
+                end_line: c.end_line,
+                content: c.content,
+                language: c.language,
+            })
+            .collect();
+
+        let bundle_remote = Arc::new(MockRemoteStore::with_hits(hits));
+        let remote = Arc::new(MockRemoteStore::default());
 
         handle_search(
             embedder,
@@ -1328,11 +1458,12 @@ mod tests {
                 json: true,
                 debug: false,
                 remote: Some(remote.clone()),
+                remote_bundle: Some(bundle_remote.clone()),
             },
         )
         .unwrap();
 
-        assert!(remote.query_called());
+        assert!(bundle_remote.query_called());
         std::fs::remove_dir_all(&repo).ok();
         env::remove_var("SGREP_HOME");
     }
@@ -1367,6 +1498,7 @@ mod tests {
                 json: true,
                 debug: false,
                 remote: None,
+                remote_bundle: None,
             },
         )
         .unwrap();
@@ -1781,6 +1913,7 @@ mod tests {
             json: false,
             debug: true,
             remote: None,
+            remote_bundle: None,
         };
 
         assert_eq!(params.query, "test query");
@@ -1872,5 +2005,17 @@ mod tests {
         let result = handle_index_stats(Some(repo.clone()), true);
         assert!(result.is_ok());
         std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn log_formatters_include_prefix_and_message() {
+        let msg = "hello";
+        let info = format_info(msg);
+        let ok = format_ok(msg);
+        let warn = format_warn(msg);
+
+        assert!(info.contains("[info]") && info.contains(msg));
+        assert!(ok.contains("[ok]") && ok.contains(msg));
+        assert!(warn.contains("[warn]") && warn.contains(msg));
     }
 }

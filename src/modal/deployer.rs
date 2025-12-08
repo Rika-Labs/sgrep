@@ -8,6 +8,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use super::MODAL_SERVICE_PY;
+use crate::app::log_info;
 
 const HEALTH_TIMEOUT_SECS: u64 = 10;
 
@@ -45,7 +46,7 @@ impl ModalDeployer {
 
     pub fn check_modal_cli(&self) -> Result<()> {
         if Command::new("modal").arg("--version").output().is_err() {
-            eprintln!("[info] Modal CLI not found. Installing...");
+            log_info("Modal CLI not found. Installing...");
             let pip = if Command::new("pip3").arg("--version").output().is_ok() {
                 "pip3"
             } else {
@@ -62,7 +63,7 @@ impl ModalDeployer {
                     "Failed to install Modal CLI. Install manually with: pip install modal"
                 ));
             }
-            eprintln!("[info] Modal CLI installed.");
+            log_info("Modal CLI installed.");
         }
 
         if self.token_id.is_some() && self.token_secret.is_some() {
@@ -136,7 +137,7 @@ impl ModalDeployer {
         let service_path = temp_dir.path().join("service.py");
         fs::write(&service_path, MODAL_SERVICE_PY).context("Failed to write service.py")?;
 
-        eprintln!("[info] Deploying Modal service to modal.com...");
+        log_info("Deploying Modal service to modal.com...");
 
         let service_path_str = service_path
             .to_str()
@@ -184,11 +185,11 @@ impl ModalDeployer {
 
     pub fn ensure_deployed(&self) -> Result<(String, bool)> {
         if let Some(cache) = self.load_cache() {
-            eprintln!("[info] Checking cached Modal endpoint health...");
+            log_info("Checking cached Modal endpoint health...");
             if self.check_health(&cache.health_url).unwrap_or(false) {
                 return Ok((cache.embed_url, true));
             }
-            eprintln!("[info] Cached endpoint unhealthy, redeploying...");
+            log_info("Cached endpoint unhealthy, redeploying...");
         }
 
         let cache = self.deploy()?;

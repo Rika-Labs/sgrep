@@ -3125,6 +3125,7 @@ name = "sgrep"
 version = "2.0.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bincode",
  "blake3",
  "chrono",

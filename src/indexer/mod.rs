@@ -23,6 +23,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use console::style;
 use dashmap::DashMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rayon::prelude::*;
@@ -32,6 +33,10 @@ use crate::chunker::{self, CodeChunk};
 use crate::embedding::{BatchEmbedder, EmbedProgress, ProgressCallback};
 use crate::graph::{CodeGraph, SymbolExtractor};
 use crate::store::{IndexMetadata, IndexStore, RepositoryIndex};
+
+const PARSE_TEMPLATE: &str = "{prefix} Parsing files ({pos}/{len}, {percent}%)";
+const INDEX_TEMPLATE: &str = "{prefix} Indexing files ({pos}/{len}, {percent}%) • {msg}";
+const EMBED_TEMPLATE: &str = "{prefix} Embedding chunks ({pos}/{len}, {percent}%)";
 
 pub struct IndexRequest {
     pub path: PathBuf,
@@ -96,6 +101,10 @@ pub struct Indexer {
 impl Indexer {
     pub fn new(embedder: Arc<dyn BatchEmbedder>) -> Self {
         Self { embedder }
+    }
+
+    pub fn embedder_dimension(&self) -> usize {
+        self.embedder.dimension()
     }
 
     #[allow(dead_code)]
@@ -196,17 +205,15 @@ impl Indexer {
 
         let cancelled = Arc::new(AtomicBool::new(false));
 
+        let info_prefix = style("[info]").blue().bold().to_string();
         let pb =
             ProgressBar::with_draw_target(Some(files.len() as u64), ProgressDrawTarget::stderr());
-        pb.enable_steady_tick(Duration::from_millis(100));
+        pb.set_prefix(info_prefix.clone());
         pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({percent}%) {msg}",
-            )
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .progress_chars("█▓▒░  "),
+            ProgressStyle::with_template(PARSE_TEMPLATE)
+                .unwrap_or_else(|_| ProgressStyle::default_bar()),
         );
-        pb.set_message("parsing files...");
+        pb.set_message("parsing files");
 
         let chunk_start = Instant::now();
         let chunks: Vec<CodeChunk> = files
@@ -244,11 +251,10 @@ impl Indexer {
         pb.set_position(0);
         pb.reset_elapsed();
         pb.set_style(
-            ProgressStyle::with_template("{spinner:.green} Indexing files ({pos}/{len}) • {msg}")
+            ProgressStyle::with_template(INDEX_TEMPLATE)
                 .unwrap_or_else(|_| ProgressStyle::default_bar()),
         );
-        pb.set_message("starting...");
-        pb.enable_steady_tick(Duration::from_millis(100));
+        pb.set_message("starting");
 
         let base_batch_size = determine_batch_size(request.batch_size);
         let batch_size = adjust_batch_size_for_progress(base_batch_size, chunks.len());
@@ -350,7 +356,7 @@ impl Indexer {
 
         if pending_batches.is_empty() {
             pb.set_position(total_files as u64);
-            pb.finish_with_message("all cached");
+            pb.finish_with_message(format!("{} all cached", info_prefix));
         } else {
             let total_pending = pending_batches
                 .iter()
@@ -358,7 +364,7 @@ impl Indexer {
                 .sum::<usize>();
 
             pb.set_style(
-                ProgressStyle::with_template("{spinner:.green} Embedding chunks ({pos}/{len})")
+                ProgressStyle::with_template(EMBED_TEMPLATE)
                     .unwrap_or_else(|_| ProgressStyle::default_bar()),
             );
             pb.set_length(total_pending as u64);
@@ -411,7 +417,7 @@ impl Indexer {
 
         let embed_duration = embed_start.elapsed();
 
-        pb.finish_with_message("embedding complete");
+        pb.finish_with_message(format!("{} embedding complete", info_prefix));
 
         let graph_start = Instant::now();
         let graph = self.build_graph(root, &files);
@@ -861,6 +867,22 @@ mod tests {
     use std::fs;
     use std::sync::atomic::AtomicUsize;
     use uuid::Uuid;
+
+    #[test]
+    fn progress_templates_are_consistent() {
+        assert_eq!(
+            PARSE_TEMPLATE,
+            "{prefix} Parsing files ({pos}/{len}, {percent}%)"
+        );
+        assert_eq!(
+            INDEX_TEMPLATE,
+            "{prefix} Indexing files ({pos}/{len}, {percent}%) • {msg}"
+        );
+        assert_eq!(
+            EMBED_TEMPLATE,
+            "{prefix} Embedding chunks ({pos}/{len}, {percent}%)"
+        );
+    }
 
     #[derive(Clone, Default)]
     struct DeterministicEmbedder;

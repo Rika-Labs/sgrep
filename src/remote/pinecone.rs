@@ -1,5 +1,8 @@
 use anyhow::{anyhow, Result};
+use indicatif::ProgressBar;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::{RemoteChunk, RemoteSearchHit, RemoteVectorStore};
@@ -40,6 +43,8 @@ impl PineconeStore {
     }
 }
 
+const MAX_VECTORS_PER_REQUEST: usize = 100;
+
 impl RemoteVectorStore for PineconeStore {
     fn name(&self) -> &'static str {
         "pinecone"
@@ -72,38 +77,142 @@ impl RemoteVectorStore for PineconeStore {
             namespace: &'a str,
         }
 
-        let vectors: Vec<Vector> = chunks
-            .iter()
-            .map(|c| Vector {
-                id: &c.id,
-                values: &c.vector,
-                metadata: Metadata {
-                    path: &c.path,
-                    start_line: c.start_line,
-                    end_line: c.end_line,
-                    content: &c.content,
-                    language: &c.language,
-                },
-            })
-            .collect();
+        let url = self.vectors_url("vectors/upsert");
 
-        let req = UpsertRequest {
-            vectors,
-            namespace: &self.namespace,
-        };
+        for batch in chunks.chunks(MAX_VECTORS_PER_REQUEST) {
+            let vectors: Vec<Vector> = batch
+                .iter()
+                .map(|c| Vector {
+                    id: &c.id,
+                    values: &c.vector,
+                    metadata: Metadata {
+                        path: &c.path,
+                        start_line: c.start_line,
+                        end_line: c.end_line,
+                        content: &c.content,
+                        language: &c.language,
+                    },
+                })
+                .collect();
+
+            let req = UpsertRequest {
+                vectors,
+                namespace: &self.namespace,
+            };
+
+            let res = self
+                .client
+                .post(&url)
+                .set("Api-Key", &self.api_key)
+                .set("Content-Type", "application/json")
+                .send_json(&req);
+
+            match res {
+                Ok(_) => {}
+                Err(ureq::Error::Status(status, response)) => {
+                    let body = response.into_string().unwrap_or_default();
+                    if body.is_empty() {
+                        return Err(anyhow!("Pinecone upsert failed with status {}", status));
+                    } else {
+                        return Err(anyhow!(
+                            "Pinecone upsert failed with status {}: {}",
+                            status,
+                            body
+                        ));
+                    }
+                }
+                Err(e) => return Err(anyhow!("Pinecone upsert failed: {}", e)),
+            }
+        }
+
+        Ok(())
+    }
+
+    fn upsert_with_progress(&self, chunks: &[RemoteChunk], pb: &ProgressBar) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+
+        #[derive(Serialize)]
+        struct Metadata<'a> {
+            path: &'a str,
+            start_line: usize,
+            end_line: usize,
+            content: &'a str,
+            language: &'a str,
+        }
+
+        #[derive(Serialize)]
+        struct Vector<'a> {
+            id: &'a str,
+            values: &'a [f32],
+            metadata: Metadata<'a>,
+        }
+
+        #[derive(Serialize)]
+        struct UpsertRequest<'a> {
+            vectors: Vec<Vector<'a>>,
+            namespace: &'a str,
+        }
 
         let url = self.vectors_url("vectors/upsert");
-        let res = self
-            .client
-            .post(&url)
-            .set("Api-Key", &self.api_key)
-            .set("Content-Type", "application/json")
-            .send_json(&req);
+        let uploaded = AtomicUsize::new(0);
+        let store = self.clone();
 
-        match res {
-            Ok(_) => Ok(()),
-            Err(e) => Err(anyhow!("Pinecone upsert failed: {}", e)),
-        }
+        let batches: Vec<_> = chunks.chunks(MAX_VECTORS_PER_REQUEST).collect();
+
+        batches.par_iter().try_for_each(|batch| {
+            let vectors: Vec<Vector> = batch
+                .iter()
+                .map(|c| Vector {
+                    id: &c.id,
+                    values: &c.vector,
+                    metadata: Metadata {
+                        path: &c.path,
+                        start_line: c.start_line,
+                        end_line: c.end_line,
+                        content: &c.content,
+                        language: &c.language,
+                    },
+                })
+                .collect();
+
+            let req = UpsertRequest {
+                vectors,
+                namespace: &store.namespace,
+            };
+
+            let res = store
+                .client
+                .post(&url)
+                .set("Api-Key", &store.api_key)
+                .set("Content-Type", "application/json")
+                .send_json(&req);
+
+            match res {
+                Ok(_) => {
+                    let uploaded_count =
+                        uploaded.fetch_add(batch.len(), Ordering::SeqCst) + batch.len();
+                    pb.set_position(uploaded_count as u64);
+                    Ok(())
+                }
+                Err(ureq::Error::Status(status, response)) => {
+                    let body = response.into_string().unwrap_or_default();
+                    if body.is_empty() {
+                        Err(anyhow!("Pinecone upsert failed with status {}", status))
+                    } else {
+                        Err(anyhow!(
+                            "Pinecone upsert failed with status {}: {}",
+                            status,
+                            body
+                        ))
+                    }
+                }
+                Err(e) => Err(anyhow!("Pinecone upsert failed: {}", e)),
+            }
+        })?;
+
+        Ok(())
     }
 
     fn query(&self, vector: &[f32], top_k: usize) -> Result<Vec<RemoteSearchHit>> {
@@ -232,11 +341,76 @@ impl RemoteVectorStore for PineconeStore {
 
 #[cfg(test)]
 mod tests {
-    use super::PineconeStore;
+    use super::{PineconeStore, MAX_VECTORS_PER_REQUEST};
+    use crate::remote::RemoteChunk;
 
     #[test]
     fn delete_not_found_status_is_ignored() {
         assert!(PineconeStore::should_ignore_delete_status(404));
         assert!(!PineconeStore::should_ignore_delete_status(500));
+    }
+
+    #[test]
+    fn max_vectors_per_request_is_set() {
+        assert_eq!(MAX_VECTORS_PER_REQUEST, 100);
+    }
+
+    fn create_test_chunk(id: usize) -> RemoteChunk {
+        RemoteChunk {
+            id: format!("chunk-{}", id),
+            vector: vec![0.1, 0.2, 0.3],
+            path: format!("file{}.rs", id),
+            start_line: 1,
+            end_line: 10,
+            content: format!("content {}", id),
+            language: "rust".to_string(),
+        }
+    }
+
+    #[test]
+    fn batching_splits_large_requests() {
+        let chunks: Vec<RemoteChunk> = (0..250).map(|i| create_test_chunk(i)).collect();
+
+        let batches: Vec<_> = chunks.chunks(MAX_VECTORS_PER_REQUEST).collect();
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].len(), 100);
+        assert_eq!(batches[1].len(), 100);
+        assert_eq!(batches[2].len(), 50);
+    }
+
+    #[test]
+    fn batching_handles_exact_multiple() {
+        let chunks: Vec<RemoteChunk> = (0..200).map(|i| create_test_chunk(i)).collect();
+
+        let batches: Vec<_> = chunks.chunks(MAX_VECTORS_PER_REQUEST).collect();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), 100);
+        assert_eq!(batches[1].len(), 100);
+    }
+
+    #[test]
+    fn batching_handles_small_batch() {
+        let chunks: Vec<RemoteChunk> = (0..50).map(|i| create_test_chunk(i)).collect();
+
+        let batches: Vec<_> = chunks.chunks(MAX_VECTORS_PER_REQUEST).collect();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 50);
+    }
+
+    #[test]
+    fn batching_handles_single_chunk() {
+        let chunks: Vec<RemoteChunk> = vec![create_test_chunk(0)];
+
+        let batches: Vec<_> = chunks.chunks(MAX_VECTORS_PER_REQUEST).collect();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+    }
+
+    #[test]
+    fn batching_handles_empty_chunks() {
+        let chunks: Vec<RemoteChunk> = vec![];
+
+        let batches: Vec<_> = chunks.chunks(MAX_VECTORS_PER_REQUEST).collect();
+        assert_eq!(batches.len(), 0);
     }
 }
