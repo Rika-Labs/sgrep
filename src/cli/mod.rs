@@ -341,7 +341,6 @@ mod tests {
         }
     }
 
-    // --remote flag tests
     #[test]
     fn cli_parses_index_remote_flag() {
         let cli = Cli::parse_from(["sgrep", "index", "--remote"]);
@@ -413,7 +412,6 @@ mod tests {
         }
     }
 
-    // Combined flags test
     #[test]
     fn cli_parses_index_offload_and_remote_flags() {
         let cli = Cli::parse_from(["sgrep", "index", "--offload", "--remote"]);
