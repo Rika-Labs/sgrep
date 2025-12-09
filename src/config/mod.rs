@@ -108,7 +108,6 @@ pub struct Config {
     pub turbopuffer: TurbopufferConfig,
     #[serde(default)]
     pub pinecone: PineconeConfig,
-    /// Optional explicit remote provider; if unset we infer from configured provider sections.
     pub remote_provider: Option<RemoteProviderType>,
 }
 

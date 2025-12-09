@@ -3000,6 +3000,7 @@ dependencies = [
  "once_cell",
  "ort",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "serial_test",

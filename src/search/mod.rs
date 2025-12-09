@@ -2,11 +2,13 @@ mod binary;
 mod bm25_cache;
 pub mod config;
 mod dedup;
+pub mod file_type;
 mod hnsw;
 mod results;
 mod scoring;
 
 pub use dedup::{suppress_near_duplicates, DedupOptions};
+pub use file_type::{classify_path, FileType, FileTypePriority};
 pub use results::{DirectorySearchResult, FileSearchResult, SearchResult};
 pub use scoring::cosine_similarity;
 
@@ -66,6 +68,7 @@ pub struct SearchOptions {
     pub glob: Vec<String>,
     pub filters: Vec<String>,
     pub dedup: DedupOptions,
+    pub file_type_priority: FileTypePriority,
 }
 
 impl Default for SearchOptions {
@@ -76,6 +79,7 @@ impl Default for SearchOptions {
             glob: vec![],
             filters: vec![],
             dedup: DedupOptions::default(),
+            file_type_priority: FileTypePriority::default(),
         }
     }
 }
@@ -252,6 +256,7 @@ impl SearchEngine {
             }
         }
 
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
@@ -330,6 +335,7 @@ impl SearchEngine {
             }
         }
 
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
@@ -424,6 +430,7 @@ impl SearchEngine {
             }
         }
 
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
@@ -512,6 +519,7 @@ impl SearchEngine {
             }
         }
 
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
@@ -609,6 +617,7 @@ impl SearchEngine {
             }
         }
 
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
@@ -700,6 +709,7 @@ impl SearchEngine {
             }
         }
 
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
@@ -745,6 +755,13 @@ impl SearchEngine {
             semantic_score: semantic,
             bm25_score: bm25_raw,
             show_full_context: include_context,
+        }
+    }
+
+    fn apply_file_type_priority(results: &mut [SearchResult], priority: &FileTypePriority) {
+        for result in results.iter_mut() {
+            let multiplier = priority.multiplier(file_type::classify_path(&result.chunk.path));
+            result.score *= multiplier;
         }
     }
 
@@ -1117,13 +1134,11 @@ mod tests {
                 "function",
                 SearchOptions {
                     limit: 2,
-                    include_context: false,
-                    glob: vec![],
-                    filters: vec![],
                     dedup: DedupOptions {
                         enabled: false,
                         ..Default::default()
                     },
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1150,11 +1165,8 @@ mod tests {
                 &make_index(chunks, vectors),
                 "test",
                 SearchOptions {
-                    limit: 10,
-                    include_context: false,
                     glob: vec!["src/**/*.rs".to_string()],
-                    filters: vec![],
-                    dedup: DedupOptions::default(),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1182,11 +1194,8 @@ mod tests {
                 &make_index(chunks, vectors),
                 "test",
                 SearchOptions {
-                    limit: 10,
-                    include_context: false,
-                    glob: vec![],
                     filters: vec!["lang=rust".to_string()],
-                    dedup: DedupOptions::default(),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1260,14 +1269,11 @@ mod tests {
                 &make_index(chunks, vectors),
                 "function",
                 SearchOptions {
-                    limit: 10,
-                    include_context: false,
-                    glob: vec![],
-                    filters: vec![],
                     dedup: DedupOptions {
                         enabled: false,
                         ..Default::default()
                     },
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1299,14 +1305,11 @@ mod tests {
                 &make_index(chunks, vectors),
                 "function",
                 SearchOptions {
-                    limit: 10,
-                    include_context: false,
-                    glob: vec![],
-                    filters: vec![],
                     dedup: DedupOptions {
                         enabled: false,
                         ..Default::default()
                     },
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1431,11 +1434,8 @@ mod tests {
                 &make_index(chunks, vectors),
                 "test",
                 SearchOptions {
-                    limit: 10,
-                    include_context: false,
-                    glob: vec![],
                     filters: vec!["lang=python".to_string()],
-                    dedup: DedupOptions::default(),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1465,14 +1465,12 @@ mod tests {
                 &make_index(chunks, vectors),
                 "test",
                 SearchOptions {
-                    limit: 10,
-                    include_context: false,
                     glob: vec!["src/**/*.rs".to_string()],
-                    filters: vec![],
                     dedup: DedupOptions {
                         enabled: false,
                         ..Default::default()
                     },
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1721,11 +1719,8 @@ mod tests {
                 &make_index(chunks, vectors),
                 "test",
                 SearchOptions {
-                    limit: 10,
                     include_context: true,
-                    glob: vec![],
-                    filters: vec![],
-                    dedup: DedupOptions::default(),
+                    ..Default::default()
                 },
             )
             .unwrap();

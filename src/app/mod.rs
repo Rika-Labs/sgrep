@@ -690,7 +690,6 @@ fn handle_search(
             ));
         }
 
-        // Validate embedding model matches
         store::validate_index_model(
             &mmap_index.metadata.embedding_model,
             embedding::EmbeddingModel::default().config().name,
@@ -705,6 +704,7 @@ fn handle_search(
                 glob: params.glob.clone(),
                 filters: params.filters.clone(),
                 dedup: search::DedupOptions::default(),
+                file_type_priority: search::FileTypePriority::default(),
             },
         )?;
         let elapsed = start.elapsed();
@@ -730,6 +730,7 @@ fn handle_search(
             glob: params.glob,
             filters: params.filters,
             dedup: search::DedupOptions::default(),
+            file_type_priority: search::FileTypePriority::default(),
         },
     )?;
     let elapsed = start.elapsed();
@@ -842,6 +843,17 @@ fn handle_remote_search(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
+
+    let file_type_priority = search::FileTypePriority::default();
+    for result in &mut results {
+        let multiplier = file_type_priority.multiplier(search::classify_path(&result.chunk.path));
+        result.score *= multiplier;
+    }
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     results.truncate(params.limit);
 
