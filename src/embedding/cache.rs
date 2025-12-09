@@ -21,7 +21,8 @@ pub fn configure_offline_env(offline: bool) -> Result<()> {
 
     if offline && !cache_has_model(&cache_dir) {
         let config = super::EmbeddingModel::default().config();
-        let files_list = config.files
+        let files_list = config
+            .files
             .iter()
             .map(|(_, local)| format!("  - {}", local))
             .collect::<Vec<_>>()

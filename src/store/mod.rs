@@ -12,7 +12,8 @@ use std::fs::{self, File};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sysinfo::{Pid, System};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IndexStats {
@@ -55,6 +56,38 @@ const HNSW_FILE: &str = "hnsw.usearch";
 const HNSW_HEADER_FILE: &str = "hnsw_header.bin";
 const INDEX_FORMAT_VERSION: u32 = 6;
 const BUILDING_FILE: &str = "index.building";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct BuildMarker {
+    pid: u32,
+    started_at: DateTime<Utc>,
+    version: String,
+}
+
+impl BuildMarker {
+    fn new_current() -> Self {
+        Self {
+            pid: std::process::id(),
+            started_at: Utc::now(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexHealth {
+    Ready,
+    Missing,
+    Partial,
+}
+
+#[derive(Debug, Clone)]
+pub enum BuildState {
+    InProgress(BuildMarker),
+    Interrupted(Option<BuildMarker>),
+    Ready,
+    Missing,
+}
 
 #[derive(Debug, Clone)]
 pub struct IndexStore {
@@ -109,24 +142,102 @@ impl IndexStore {
     }
 
     pub fn is_building(&self) -> bool {
-        self.root.join(BUILDING_FILE).exists()
+        matches!(self.build_state(), BuildState::InProgress(_))
+    }
+
+    pub fn build_state(&self) -> BuildState {
+        let marker_path = self.root.join(BUILDING_FILE);
+        let marker = self.read_build_marker(&marker_path);
+        if let Some(marker) = marker {
+            if Self::is_pid_alive(marker.pid) {
+                return BuildState::InProgress(marker);
+            }
+
+            return BuildState::Interrupted(Some(marker));
+        }
+
+        let health = self.index_health();
+        match health {
+            IndexHealth::Ready => BuildState::Ready,
+            IndexHealth::Missing => BuildState::Missing,
+            IndexHealth::Partial => BuildState::Interrupted(None),
+        }
     }
 
     pub fn start_build_guard(&self) -> Result<BuildGuard> {
-        let path = self.root.join(BUILDING_FILE);
-        if path.exists() {
-            return Err(anyhow!(
-                "Index build already in progress for {}",
-                self.repo_path.display()
-            ));
+        match self.build_state() {
+            BuildState::InProgress(_) => {
+                return Err(anyhow!(
+                    "Index build already in progress for {}",
+                    self.repo_path.display()
+                ));
+            }
+            _ => {}
         }
 
-        fs::write(&path, b"building")
+        let path = self.root.join(BUILDING_FILE);
+        let _ = fs::remove_file(&path);
+
+        let marker = BuildMarker::new_current();
+        let payload = serde_json::to_vec(&marker)
+            .with_context(|| format!("Failed to serialize build marker for {}", path.display()))?;
+
+        fs::write(&path, payload)
             .with_context(|| format!("Failed to create {}", path.display()))?;
 
         Ok(BuildGuard { path })
     }
 
+    fn read_build_marker(&self, path: &Path) -> Option<BuildMarker> {
+        let content = fs::read_to_string(path).ok()?;
+        if let Ok(marker) = serde_json::from_str::<BuildMarker>(&content) {
+            return Some(marker);
+        }
+
+        if content.trim().is_empty() {
+            return None;
+        }
+
+        // Legacy markers were plain text (e.g., "building"); treat as stale
+        Some(BuildMarker {
+            pid: 0,
+            started_at: Utc::now(),
+            version: "legacy".to_string(),
+        })
+    }
+
+    fn index_health(&self) -> IndexHealth {
+        let has_any_artifact = [
+            INDEX_FILE,
+            VECTORS_FILE,
+            HIERARCHY_FILE,
+            DIR_VECTORS_FILE,
+            FILE_VECTORS_FILE,
+            GRAPH_FILE,
+            BINARY_VECTORS_FILE,
+            HNSW_FILE,
+            HNSW_HEADER_FILE,
+        ]
+        .iter()
+        .any(|file| self.root.join(file).exists());
+
+        match self.load() {
+            Ok(Some(_)) => IndexHealth::Ready,
+            Ok(None) => {
+                if has_any_artifact {
+                    IndexHealth::Partial
+                } else {
+                    IndexHealth::Missing
+                }
+            }
+            Err(_) => IndexHealth::Partial,
+        }
+    }
+
+    fn is_pid_alive(pid: u32) -> bool {
+        let system = System::new_all();
+        system.process(Pid::from_u32(pid)).is_some()
+    }
     pub fn load(&self) -> Result<Option<RepositoryIndex>> {
         let vectors_path = self.root.join(VECTORS_FILE);
         let index_path = self.root.join(INDEX_FILE);
@@ -559,6 +670,7 @@ mod tests {
     use super::*;
     use crate::chunker::CodeChunk;
     use chrono::Utc;
+    use serde_json;
     use serial_test::serial;
     use uuid::Uuid;
 
@@ -743,6 +855,66 @@ mod tests {
 
         assert!(mmap_index.is_empty());
         assert_eq!(mmap_index.len(), 0);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn build_state_reports_stale_marker_as_interrupted() {
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("stale_marker");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let marker_path = store.root.join(BUILDING_FILE);
+        let marker = BuildMarker {
+            pid: u32::MAX,
+            started_at: Utc::now(),
+            version: "test".to_string(),
+        };
+        fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+
+        assert!(matches!(
+            store.build_state(),
+            BuildState::Interrupted(Some(_))
+        ));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn start_build_guard_removes_stale_marker_and_allows_new_build() {
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("stale_guard");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        let marker_path = store.root.join(BUILDING_FILE);
+        fs::write(&marker_path, b"building").unwrap();
+
+        let guard = store.start_build_guard().unwrap();
+        assert!(matches!(store.build_state(), BuildState::InProgress(_)));
+
+        drop(guard);
+        assert!(!marker_path.exists());
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn build_state_detects_partial_without_marker() {
+        let _home = set_test_home();
+        let temp_dir = temp_dir_with_name("partial");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = IndexStore::new(&temp_dir).unwrap();
+        // Write a single artifact to simulate an interrupted build
+        fs::write(store.root.join(VECTORS_FILE), b"partial").unwrap();
+
+        assert!(matches!(store.build_state(), BuildState::Interrupted(None)));
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

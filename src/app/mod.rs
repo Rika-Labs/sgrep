@@ -440,7 +440,8 @@ fn default_modal_concurrency() -> usize {
 
 fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result<()> {
     if show_model_dir {
-        let model_dir = embedding::get_fastembed_cache_dir().join(embedding::EmbeddingModel::default().config().name);
+        let model_dir = embedding::get_fastembed_cache_dir()
+            .join(embedding::EmbeddingModel::default().config().name);
         println!("{}", model_dir.display());
         return Ok(());
     }
@@ -469,13 +470,21 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
     if config_path.exists() {
         println!(
             "  Provider: {}",
-            style(format!("local ({})", embedding::EmbeddingModel::default().config().name)).bold()
+            style(format!(
+                "local ({})",
+                embedding::EmbeddingModel::default().config().name
+            ))
+            .bold()
         );
     } else {
         println!("  No config file found (using defaults)");
         println!(
             "  Provider: {}",
-            style(format!("local ({})", embedding::EmbeddingModel::default().config().name)).bold()
+            style(format!(
+                "local ({})",
+                embedding::EmbeddingModel::default().config().name
+            ))
+            .bold()
         );
         println!();
         println!("  Run 'sgrep config --init' to create a config file");
@@ -485,7 +494,8 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
 }
 
 fn verify_model_files() -> Result<()> {
-    let model_dir = embedding::get_fastembed_cache_dir().join(embedding::EmbeddingModel::default().config().name);
+    let model_dir = embedding::get_fastembed_cache_dir()
+        .join(embedding::EmbeddingModel::default().config().name);
 
     log_info(&format!("Model directory: {}\n", model_dir.display()));
 
@@ -669,12 +679,18 @@ fn handle_search(
     let mut engine = search::SearchEngine::new(embedder.clone());
 
     let store_result = store::IndexStore::new(params.path)?;
-
-    if store_result.is_building() {
-        return Err(anyhow!(
-            "Index build in progress for {}. Wait for `sgrep index` to finish.",
-            params.path.display()
-        ));
+    match store_result.build_state() {
+        store::BuildState::InProgress(_) => {
+            return Err(anyhow!(
+                "Index is currently building. Wait for `sgrep index` to finish."
+            ));
+        }
+        store::BuildState::Interrupted(_) => {
+            return Err(anyhow!(
+                "Indexing was interrupted; rerun `sgrep index --force` to rebuild."
+            ));
+        }
+        _ => {}
     }
 
     if let Ok(Some(graph)) = store_result.load_graph() {
@@ -768,7 +784,10 @@ fn handle_remote_search(
             indexed_at: chrono::Utc::now(),
             total_files: 0,
             total_chunks: 0,
-            embedding_model: embedding::EmbeddingModel::default().config().name.to_string(),
+            embedding_model: embedding::EmbeddingModel::default()
+                .config()
+                .name
+                .to_string(),
         };
         let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
         return render_results(RenderContext {
@@ -866,7 +885,10 @@ fn handle_remote_search(
         indexed_at: chrono::Utc::now(),
         total_files: 0,
         total_chunks: results.len(),
-        embedding_model: embedding::EmbeddingModel::default().config().name.to_string(),
+        embedding_model: embedding::EmbeddingModel::default()
+            .config()
+            .name
+            .to_string(),
     };
     let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
 
@@ -881,10 +903,7 @@ fn handle_remote_search(
     })
 }
 
-fn build_remote_store(
-    use_remote: bool,
-    path: &Path,
-) -> Result<Option<Arc<dyn RemoteVectorStore>>> {
+fn build_remote_store(use_remote: bool, path: &Path) -> Result<Option<Arc<dyn RemoteVectorStore>>> {
     if !use_remote {
         return Ok(None);
     }
@@ -977,7 +996,10 @@ fn load_index_for_search(
     }
 
     // Validate embedding model matches
-    store::validate_index_model(&index.metadata.embedding_model, embedding::EmbeddingModel::default().config().name)?;
+    store::validate_index_model(
+        &index.metadata.embedding_model,
+        embedding::EmbeddingModel::default().config().name,
+    )?;
 
     if index.chunks.len() != index.vectors.len() {
         return Err(anyhow!(
@@ -1049,6 +1071,7 @@ mod tests {
     use super::*;
     use crate::chunker::CodeChunk;
     use crate::remote::{RemoteChunk, RemoteSearchHit};
+    use crate::store::utils::data_dir;
     use crate::store::{IndexMetadata, RepositoryIndex};
     use chrono::Utc;
     use serial_test::serial;
@@ -1212,7 +1235,10 @@ mod tests {
             indexed_at: Utc::now(),
             total_files: 1,
             total_chunks: 1,
-            embedding_model: embedding::EmbeddingModel::default().config().name.to_string(),
+            embedding_model: embedding::EmbeddingModel::default()
+                .config()
+                .name
+                .to_string(),
         };
         RepositoryIndex::new(meta, vec![chunk], vec![vec![1.0, 2.0, 3.0]])
     }
@@ -1762,7 +1788,49 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(format!("{err}").contains("Index build in progress"));
+        assert!(
+            format!("{err}").contains("Index is currently building"),
+            "expected in-progress message, got: {err}"
+        );
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn handle_search_errors_when_indexing_interrupted() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let store = store::IndexStore::new(&repo).unwrap();
+
+        let mut marker_path = data_dir();
+        marker_path.push("indexes");
+        marker_path.push(store.repo_hash());
+        marker_path.push("index.building");
+
+        std::fs::write(&marker_path, b"building").unwrap();
+
+        let err = handle_search(
+            embedder,
+            SearchParams {
+                query: "hi",
+                path: repo.as_path(),
+                limit: 1,
+                context: false,
+                glob: vec![],
+                filters: vec![],
+                json: false,
+                debug: false,
+                remote: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err}")
+                .contains("Indexing was interrupted; rerun `sgrep index --force` to rebuild."),
+            "expected interrupted message, got: {err}"
+        );
         std::fs::remove_dir_all(&repo).ok();
     }
 

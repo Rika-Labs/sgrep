@@ -161,14 +161,8 @@ mod tests {
 
     #[test]
     fn classify_rust_test_files() {
-        assert_eq!(
-            classify_path(Path::new("src/auth_test.rs")),
-            FileType::Test
-        );
-        assert_eq!(
-            classify_path(Path::new("src/auth_spec.rs")),
-            FileType::Test
-        );
+        assert_eq!(classify_path(Path::new("src/auth_test.rs")), FileType::Test);
+        assert_eq!(classify_path(Path::new("src/auth_spec.rs")), FileType::Test);
         assert_eq!(
             classify_path(Path::new("tests/integration.rs")),
             FileType::Test
@@ -181,10 +175,7 @@ mod tests {
             classify_path(Path::new("src/__tests__/auth.ts")),
             FileType::Test
         );
-        assert_eq!(
-            classify_path(Path::new("src/auth.test.ts")),
-            FileType::Test
-        );
+        assert_eq!(classify_path(Path::new("src/auth.test.ts")), FileType::Test);
         assert_eq!(
             classify_path(Path::new("src/auth.spec.tsx")),
             FileType::Test
@@ -201,19 +192,13 @@ mod tests {
             classify_path(Path::new("tests/test_auth.py")),
             FileType::Test
         );
-        assert_eq!(
-            classify_path(Path::new("src/auth_test.py")),
-            FileType::Test
-        );
+        assert_eq!(classify_path(Path::new("src/auth_test.py")), FileType::Test);
         assert_eq!(classify_path(Path::new("conftest.py")), FileType::Test);
     }
 
     #[test]
     fn classify_go_test_files() {
-        assert_eq!(
-            classify_path(Path::new("pkg/auth_test.go")),
-            FileType::Test
-        );
+        assert_eq!(classify_path(Path::new("pkg/auth_test.go")), FileType::Test);
     }
 
     #[test]

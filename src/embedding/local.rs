@@ -31,9 +31,9 @@ use ureq::{Agent, AgentBuilder, Proxy};
 use super::cache::{get_fastembed_cache_dir, setup_fastembed_cache_dir};
 #[cfg(not(test))]
 use super::providers::select_execution_providers;
+use super::BatchEmbedder;
 #[cfg(not(test))]
 use super::EmbeddingModel;
-use super::BatchEmbedder;
 #[cfg(test)]
 use super::DEFAULT_VECTOR_DIM;
 
@@ -103,11 +103,13 @@ impl Embedder {
                 .unwrap_or(super::DEFAULT_INIT_TIMEOUT_SECS),
         );
 
-        let text_embedding =
-            init_model_with_timeout(model, execution_providers, show_download_progress, init_timeout)
-                .expect(
-                    "Failed to initialize embedding model (try increasing SGREP_INIT_TIMEOUT_SECS)",
-                );
+        let text_embedding = init_model_with_timeout(
+            model,
+            execution_providers,
+            show_download_progress,
+            init_timeout,
+        )
+        .expect("Failed to initialize embedding model (try increasing SGREP_INIT_TIMEOUT_SECS)");
         drop(_cache_guard);
 
         Self {
@@ -430,7 +432,10 @@ fn download_file(url: &str, path: &std::path::Path, show_progress: bool) -> Resu
 }
 
 #[cfg(not(test))]
-fn load_model(model: EmbeddingModel, show_download_progress: bool) -> Result<UserDefinedEmbeddingModel> {
+fn load_model(
+    model: EmbeddingModel,
+    show_download_progress: bool,
+) -> Result<UserDefinedEmbeddingModel> {
     let config = model.config();
     let cache_dir = get_model_cache_dir(model);
 
@@ -455,7 +460,9 @@ fn load_model(model: EmbeddingModel, show_download_progress: bool) -> Result<Use
         })?;
     }
 
-    let onnx_local_name = config.files.iter()
+    let onnx_local_name = config
+        .files
+        .iter()
         .find(|(remote, _)| remote.ends_with(".onnx"))
         .map(|(_, local)| *local)
         .expect("ModelConfig must have an ONNX file");

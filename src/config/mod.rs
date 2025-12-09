@@ -182,7 +182,10 @@ mod tests {
     fn default_config_uses_local_provider() {
         let config = Config::default();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
-        assert_eq!(config.embedding.model, crate::embedding::EmbeddingModel::Mxbai);
+        assert_eq!(
+            config.embedding.model,
+            crate::embedding::EmbeddingModel::Mxbai
+        );
     }
 
     #[test]
@@ -193,7 +196,10 @@ provider = "local"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
-        assert_eq!(config.embedding.model, crate::embedding::EmbeddingModel::Mxbai);
+        assert_eq!(
+            config.embedding.model,
+            crate::embedding::EmbeddingModel::Mxbai
+        );
     }
 
     #[test]
@@ -204,7 +210,10 @@ model = "mxbai"
 provider = "local"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.embedding.model, crate::embedding::EmbeddingModel::Mxbai);
+        assert_eq!(
+            config.embedding.model,
+            crate::embedding::EmbeddingModel::Mxbai
+        );
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
     }
 
@@ -216,7 +225,10 @@ model = "jina"
 provider = "modal"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.embedding.model, crate::embedding::EmbeddingModel::Jina);
+        assert_eq!(
+            config.embedding.model,
+            crate::embedding::EmbeddingModel::Jina
+        );
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
     }
 
@@ -225,7 +237,10 @@ provider = "modal"
         let toml = "";
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
-        assert_eq!(config.embedding.model, crate::embedding::EmbeddingModel::Mxbai);
+        assert_eq!(
+            config.embedding.model,
+            crate::embedding::EmbeddingModel::Mxbai
+        );
     }
 
     #[test]
@@ -235,7 +250,10 @@ provider = "modal"
         env::set_var("SGREP_CONFIG", temp.join("nonexistent.toml"));
         let config = Config::load().unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
-        assert_eq!(config.embedding.model, crate::embedding::EmbeddingModel::Mxbai);
+        assert_eq!(
+            config.embedding.model,
+            crate::embedding::EmbeddingModel::Mxbai
+        );
         env::remove_var("SGREP_CONFIG");
     }
 

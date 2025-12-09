@@ -35,6 +35,7 @@ console = "0.15"
 clap = { version = "4.5", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+sysinfo = "0.30"
 tree-sitter = "0.25"
 tree-sitter-rust = "0.23"
 tree-sitter-python = "0.23"

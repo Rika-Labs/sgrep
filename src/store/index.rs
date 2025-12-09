@@ -32,7 +32,10 @@ pub struct IndexMetadata {
 }
 
 fn default_embedding_model() -> String {
-    crate::embedding::EmbeddingModel::default().config().name.to_string()
+    crate::embedding::EmbeddingModel::default()
+        .config()
+        .name
+        .to_string()
 }
 
 impl RepositoryIndex {
@@ -53,7 +56,8 @@ pub fn validate_index_model(index_model: &str, current_model: &str) -> anyhow::R
         anyhow::bail!(
             "Index was built with '{}' but current model is '{}'. \
              Please re-index with: sgrep index --force",
-            index_model, current_model
+            index_model,
+            current_model
         );
     }
     Ok(())
@@ -101,7 +105,10 @@ mod tests {
 
     #[test]
     fn validate_index_model_succeeds_when_models_match() {
-        let result = validate_index_model("jina-embeddings-v2-base-code", "jina-embeddings-v2-base-code");
+        let result = validate_index_model(
+            "jina-embeddings-v2-base-code",
+            "jina-embeddings-v2-base-code",
+        );
         assert!(result.is_ok());
     }
 
