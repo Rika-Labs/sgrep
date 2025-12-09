@@ -20,7 +20,6 @@ use crate::chunker::CodeChunk;
 use crate::embedding::BatchEmbedder;
 use crate::fts::{self, Bm25FDocument, Bm25FIndex};
 use crate::graph::{CodeGraph, Symbol};
-use crate::query_expander::{QueryAnalysis, QueryExpander};
 use crate::store::{HierarchicalIndex, MmapIndex, RepositoryIndex};
 
 use bm25_cache::{Bm25CacheKey, Bm25FCache};
@@ -84,7 +83,6 @@ impl Default for SearchOptions {
 pub struct SearchEngine {
     embedder: Arc<dyn BatchEmbedder>,
     graph: Option<CodeGraph>,
-    query_expander: Option<QueryExpander>,
     bm25_cache: RefCell<Bm25FCache>,
 }
 
@@ -94,25 +92,8 @@ impl SearchEngine {
         Self {
             embedder,
             graph: None,
-            query_expander: None,
             bm25_cache: RefCell::new(Bm25FCache::new()),
         }
-    }
-
-    /// Enable the query expander for intelligent query understanding.
-    /// This downloads the Qwen2.5 model on first use (~400MB).
-    pub fn enable_query_expander(&mut self) -> Result<()> {
-        if self.query_expander.is_none() {
-            self.query_expander = Some(QueryExpander::new()?);
-        }
-        Ok(())
-    }
-
-    pub fn enable_query_expander_silent(&mut self) -> Result<()> {
-        if self.query_expander.is_none() {
-            self.query_expander = Some(QueryExpander::new_silent_if_cached()?);
-        }
-        Ok(())
     }
 
     pub fn set_graph(&mut self, graph: CodeGraph) {
@@ -139,17 +120,6 @@ impl SearchEngine {
         let index = build_bm25f_from_chunks(chunks, self.graph.as_ref());
         cache.insert(key, index.clone());
         index
-    }
-
-    /// Analyze a query using the LLM-based expander, or fall back to heuristics.
-    fn analyze_query(&self, query: &str) -> QueryAnalysis {
-        if let Some(ref expander) = self.query_expander {
-            expander
-                .analyze(query)
-                .unwrap_or_else(|_| QueryAnalysis::from_heuristics(query))
-        } else {
-            QueryAnalysis::from_heuristics(query)
-        }
     }
 
     pub fn search(
@@ -872,106 +842,6 @@ impl SearchEngine {
 
         suppress_near_duplicates(&mut results, &vectors, &options.dedup);
         results
-    }
-
-    pub fn search_hybrid(
-        &self,
-        index: &RepositoryIndex,
-        query: &str,
-        options: SearchOptions,
-    ) -> Result<Vec<SearchResult>> {
-        let analysis = self.analyze_query(query);
-        self.search_with_fallback(index, query, options, &analysis)
-    }
-
-    fn search_with_fallback(
-        &self,
-        index: &RepositoryIndex,
-        query: &str,
-        options: SearchOptions,
-        analysis: &QueryAnalysis,
-    ) -> Result<Vec<SearchResult>> {
-        let mut results = self.search(index, query, options.clone())?;
-
-        let needs_fallback =
-            results.is_empty() || results.first().map(|r| r.score < 0.3).unwrap_or(true);
-
-        if needs_fallback && !analysis.expanded_queries.is_empty() {
-            for expanded_query in analysis.expanded_queries.iter().take(3) {
-                if expanded_query == query {
-                    continue;
-                }
-
-                let expanded_results = self.search(index, expanded_query, options.clone())?;
-
-                for result in expanded_results {
-                    if !results.iter().any(|r| r.chunk.id == result.chunk.id) {
-                        let mut discounted = result;
-                        discounted.score *= 0.9;
-                        results.push(discounted);
-                    }
-                }
-            }
-
-            results.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            results.truncate(options.limit);
-        }
-
-        Ok(results)
-    }
-
-    pub fn search_hybrid_mmap(
-        &self,
-        index: &MmapIndex,
-        query: &str,
-        options: SearchOptions,
-    ) -> Result<Vec<SearchResult>> {
-        let analysis = self.analyze_query(query);
-        self.search_mmap_with_fallback(index, query, options, &analysis)
-    }
-
-    fn search_mmap_with_fallback(
-        &self,
-        index: &MmapIndex,
-        query: &str,
-        options: SearchOptions,
-        analysis: &QueryAnalysis,
-    ) -> Result<Vec<SearchResult>> {
-        let mut results = self.search_mmap(index, query, options.clone())?;
-
-        let needs_fallback =
-            results.is_empty() || results.first().map(|r| r.score < 0.3).unwrap_or(true);
-
-        if needs_fallback && !analysis.expanded_queries.is_empty() {
-            for expanded_query in analysis.expanded_queries.iter().take(3) {
-                if expanded_query == query {
-                    continue;
-                }
-
-                let expanded_results = self.search_mmap(index, expanded_query, options.clone())?;
-
-                for result in expanded_results {
-                    if !results.iter().any(|r| r.chunk.id == result.chunk.id) {
-                        let mut discounted = result;
-                        discounted.score *= 0.9;
-                        results.push(discounted);
-                    }
-                }
-            }
-
-            results.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            results.truncate(options.limit);
-        }
-
-        Ok(results)
     }
 
     fn graph_results_to_search_results(

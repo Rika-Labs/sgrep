@@ -36,9 +36,11 @@ pub fn log_warn(msg: &str) {
     eprintln!("{}", format_warn(msg));
 }
 
+use crate::chunker;
 use crate::cli::{resolve_repo_path, Cli, Commands};
 use crate::config::{Config, EmbeddingProviderType, RemoteProviderType};
 use crate::embedding::{self, Embedder, PooledEmbedder};
+use crate::fts;
 use crate::modal::{ModalDeployer, ModalEmbedder};
 use crate::output::JsonResponse;
 use crate::remote;
@@ -56,13 +58,7 @@ pub struct SearchParams<'a> {
     pub json: bool,
     pub debug: bool,
     pub remote: Option<Arc<dyn RemoteVectorStore>>,
-    pub remote_bundle: Option<Arc<dyn RemoteVectorStore>>,
 }
-
-type RemoteStorePair = (
-    Option<Arc<dyn RemoteVectorStore>>,
-    Option<Arc<dyn RemoteVectorStore>>,
-);
 
 #[allow(dead_code)]
 struct ProgressLine {
@@ -233,7 +229,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             offload: _offload,
             remote,
         } => {
-            let (remote_store, bundle_store) = build_remote_stores(remote, &path)?;
+            let remote_store = build_remote_store(remote, &path)?;
             handle_search(
                 embedder,
                 SearchParams {
@@ -246,7 +242,6 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                     json,
                     debug,
                     remote: remote_store,
-                    remote_bundle: bundle_store,
                 },
             )
         }
@@ -529,24 +524,14 @@ fn handle_index(
 ) -> Result<()> {
     let path = resolve_repo_path(path)?;
 
-    if !crate::query_expander::is_model_cached() {
-        use crate::query_expander::QueryExpander;
-        if let Err(e) = QueryExpander::new() {
-            log_warn(&format!(
-                "Query expander download failed: {} (search will use heuristics)",
-                e
-            ));
-        }
-    }
-
-    let (remote_store, bundle_store) = if remote_flag {
+    let remote_store = if remote_flag {
         if let Some(override_store) = remote_override {
-            (Some(override_store.clone()), Some(override_store))
+            Some(override_store)
         } else {
-            build_remote_stores(true, &path)?
+            build_remote_store(true, &path)?
         }
     } else {
-        (None, None)
+        None
     };
 
     let indexer = if remote_embedding {
@@ -567,29 +552,16 @@ fn handle_index(
 
     let mut upload_duration = None;
 
-    if remote_store.is_some() || bundle_store.is_some() {
+    if let Some(remote) = remote_store.as_ref() {
         let upload_start = Instant::now();
 
-        if let Some(remote) = remote_store.as_ref() {
-            push_remote_index(&path, remote, true)?;
-            log_ok(&format!("Remote index pushed to {}", remote.name()));
-        }
+        push_remote_index(&path, remote, true)?;
+        log_ok(&format!("Remote index pushed to {}", remote.name()));
 
-        if let Some(bundle_remote) = bundle_store.as_ref() {
-            let reset_bundle = remote_store
-                .as_ref()
-                .map(|r| !Arc::ptr_eq(r, bundle_remote))
-                .unwrap_or(true);
-            let manifest = remote::push_remote_bundle(
-                &path,
-                bundle_remote,
-                embedder.dimension(),
-                reset_bundle,
-            )?;
-            log_ok(&format!(
-                "Remote bundle uploaded ({} parts, {} bytes)",
-                manifest.parts, manifest.total_bytes
-            ));
+        let store_inst = store::IndexStore::new(&path)?;
+        if let Ok(Some(graph)) = store_inst.load_graph() {
+            remote::graph_blob::push_graph_blob(remote.as_ref(), &graph, embedder.dimension())?;
+            log_ok("Graph blob uploaded");
         }
 
         upload_duration = Some(upload_start.elapsed());
@@ -653,19 +625,10 @@ fn handle_search(
     let start = Instant::now();
 
     if let Some(remote) = params.remote.clone() {
-        let bundle_store = params.remote_bundle.clone().ok_or_else(|| {
-            anyhow!("--remote requested but bundle store unavailable; re-run index with --remote")
-        })?;
-        return handle_remote_search(embedder, params, remote, bundle_store, start);
+        return handle_remote_search(embedder, params, remote, start);
     }
 
     let mut engine = search::SearchEngine::new(embedder.clone());
-
-    if let Err(e) = engine.enable_query_expander_silent() {
-        if !params.json {
-            log_warn(&format!("Query expander unavailable: {}", e));
-        }
-    }
 
     let store_result = store::IndexStore::new(params.path)?;
     if let Ok(Some(graph)) = store_result.load_graph() {
@@ -674,7 +637,7 @@ fn handle_search(
 
     if let Ok(Some(mmap_index)) = store_result.load_mmap() {
         if mmap_index.metadata.vector_dim == embedder.dimension() {
-            let results = engine.search_hybrid_mmap(
+            let results = engine.search_mmap(
                 &mmap_index,
                 params.query,
                 search::SearchOptions {
@@ -700,7 +663,7 @@ fn handle_search(
     }
 
     let index = load_or_index(params.path, embedder.clone())?;
-    let results = engine.search_hybrid(
+    let results = engine.search(
         &index,
         params.query,
         search::SearchOptions {
@@ -728,125 +691,131 @@ fn handle_remote_search(
     embedder: Arc<dyn embedding::BatchEmbedder>,
     params: SearchParams<'_>,
     remote: Arc<dyn RemoteVectorStore>,
-    bundle_remote: Arc<dyn RemoteVectorStore>,
     start: Instant,
 ) -> Result<()> {
-    match remote::bundle::download_bundle(bundle_remote.as_ref(), embedder.dimension()) {
-        Ok((index, graph, _hierarchy)) => {
-            let mut engine = search::SearchEngine::new(embedder.clone());
-            if let Some(g) = graph {
-                engine.set_graph(g);
-            }
+    let graph = remote::graph_blob::fetch_graph_blob(remote.as_ref(), embedder.dimension())?;
 
-            if let Err(e) = engine.enable_query_expander_silent() {
-                if !params.json {
-                    log_warn(&format!("Query expander unavailable: {}", e));
-                }
-            }
+    let query_vec = embedder.embed(params.query)?;
+    let oversample = params.limit * 4;
+    let hits = remote.query(&query_vec, oversample.max(20))?;
 
-            let results = engine.search(
-                &index,
-                params.query,
-                search::SearchOptions {
-                    limit: params.limit,
-                    include_context: params.context,
-                    glob: params.glob.clone(),
-                    filters: params.filters.clone(),
-                    dedup: search::DedupOptions::default(),
-                },
-            )?;
-
-            let elapsed = start.elapsed();
-
-            render_results(RenderContext {
-                results,
-                query: params.query,
-                limit: params.limit,
-                index: &index,
-                elapsed,
-                json: params.json,
-                debug: params.debug,
-            })
-        }
-        Err(e) => {
-            if bundle_remote.name() == "turbopuffer" && remote::bundle::is_bundle_too_large(&e) {
-                // Fallback: vector-only remote query when bundle exceeds part limits
-                let limit = params.limit.max(1).min(10_000);
-                let query_vec = embedder.embed(params.query)?;
-                let hits = remote.query(&query_vec, limit)?;
-
-                let mut results: Vec<search::SearchResult> = hits
-                    .into_iter()
-                    .map(|h| {
-                        let chunk = crate::chunker::CodeChunk {
-                            id: uuid::Uuid::new_v4(),
-                            path: std::path::Path::new(&h.path).to_path_buf(),
-                            language: h.language,
-                            start_line: h.start_line,
-                            end_line: h.end_line,
-                            text: h.content,
-                            hash: h.id.clone(),
-                            modified_at: chrono::Utc::now(),
-                        };
-                        search::SearchResult {
-                            chunk,
-                            score: h.score,
-                            semantic_score: h.score,
-                            bm25_score: 0.0,
-                            show_full_context: params.context,
-                        }
-                    })
-                    .collect();
-
-                if results.len() > limit {
-                    results.truncate(limit);
-                }
-
-                let elapsed = start.elapsed();
-                let store = store::IndexStore::new(params.path)?;
-                let metadata = store::IndexMetadata {
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    repo_path: params.path.to_path_buf(),
-                    repo_hash: store.repo_hash().to_string(),
-                    vector_dim: embedder.dimension(),
-                    indexed_at: chrono::Utc::now(),
-                    total_files: 0,
-                    total_chunks: results.len(),
-                };
-                let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
-
-                return render_results(RenderContext {
-                    results,
-                    query: params.query,
-                    limit: params.limit,
-                    index: &index,
-                    elapsed,
-                    json: params.json,
-                    debug: params.debug,
-                });
-            }
-
-            Err(e)
-        }
+    if hits.is_empty() {
+        let store_inst = store::IndexStore::new(params.path)?;
+        let metadata = store::IndexMetadata {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            repo_path: params.path.to_path_buf(),
+            repo_hash: store_inst.repo_hash().to_string(),
+            vector_dim: embedder.dimension(),
+            indexed_at: chrono::Utc::now(),
+            total_files: 0,
+            total_chunks: 0,
+        };
+        let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
+        return render_results(RenderContext {
+            results: Vec::new(),
+            query: params.query,
+            limit: params.limit,
+            index: &index,
+            elapsed: start.elapsed(),
+            json: params.json,
+            debug: params.debug,
+        });
     }
+
+    let chunks: Vec<chunker::CodeChunk> = hits
+        .iter()
+        .map(|h| chunker::CodeChunk {
+            id: uuid::Uuid::new_v4(),
+            path: std::path::Path::new(&h.path).to_path_buf(),
+            language: h.language.clone(),
+            start_line: h.start_line,
+            end_line: h.end_line,
+            text: h.content.clone(),
+            hash: h.id.clone(),
+            modified_at: chrono::Utc::now(),
+        })
+        .collect();
+
+    let chunk_refs: Vec<&chunker::CodeChunk> = chunks.iter().collect();
+    let symbols: Vec<Vec<String>> = hits.iter().map(|h| h.symbols.clone()).collect();
+    let bm25_index = fts::build_bm25f_index(&chunk_refs, Some(&symbols));
+
+    let mut results: Vec<search::SearchResult> = hits
+        .iter()
+        .enumerate()
+        .map(|(idx, h)| {
+            let semantic_score = h.score;
+            let bm25_score = bm25_index.score(params.query, idx);
+            let bm25_normalized = (bm25_score / 10.0).min(1.0);
+            let combined = 0.85 * semantic_score + 0.15 * bm25_normalized;
+
+            search::SearchResult {
+                chunk: chunks[idx].clone(),
+                score: combined,
+                semantic_score,
+                bm25_score,
+                show_full_context: params.context,
+            }
+        })
+        .collect();
+
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    if let Some(ref g) = graph {
+        for result in &mut results {
+            let chunk_text_lower = result.chunk.text.to_lowercase();
+            let query_lower = params.query.to_lowercase();
+            for word in query_lower.split_whitespace() {
+                if let Some(symbols) = g.name_index.get(word) {
+                    if !symbols.is_empty() && chunk_text_lower.contains(word) {
+                        result.score *= 1.1;
+                    }
+                }
+            }
+        }
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    results.truncate(params.limit);
+
+    let store_inst = store::IndexStore::new(params.path)?;
+    let metadata = store::IndexMetadata {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        repo_path: params.path.to_path_buf(),
+        repo_hash: store_inst.repo_hash().to_string(),
+        vector_dim: embedder.dimension(),
+        indexed_at: chrono::Utc::now(),
+        total_files: 0,
+        total_chunks: results.len(),
+    };
+    let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
+
+    render_results(RenderContext {
+        results,
+        query: params.query,
+        limit: params.limit,
+        index: &index,
+        elapsed: start.elapsed(),
+        json: params.json,
+        debug: params.debug,
+    })
 }
 
-fn build_remote_stores(remote_flag: bool, path: &Path) -> Result<RemoteStorePair> {
+fn build_remote_store(remote_flag: bool, path: &Path) -> Result<Option<Arc<dyn RemoteVectorStore>>> {
     if !remote_flag {
-        return Ok((None, None));
+        return Ok(None);
     }
 
     let mut config = Config::load().unwrap_or_default();
 
-    let store = store::IndexStore::new(path)?;
-    let repo_hash = store.repo_hash().to_string();
+    let store_inst = store::IndexStore::new(path)?;
+    let repo_hash = store_inst.repo_hash().to_string();
 
     if config.remote_provider == Some(RemoteProviderType::None) {
         config.remote_provider = None;
     }
 
     let remote = RemoteFactory::build_from_config(&config, &repo_hash)?;
-    let bundle_remote = RemoteFactory::build_bundle_store(&config, &repo_hash)?;
 
     if remote.is_none() {
         return Err(anyhow!(
@@ -854,13 +823,7 @@ fn build_remote_stores(remote_flag: bool, path: &Path) -> Result<RemoteStorePair
         ));
     }
 
-    if bundle_remote.is_none() {
-        return Err(anyhow!(
-            "--remote requested but bundle storage could not be built. Check remote configuration."
-        ));
-    }
-
-    Ok((remote, bundle_remote))
+    Ok(remote)
 }
 
 fn handle_watch(
@@ -873,14 +836,14 @@ fn handle_watch(
     remote_embedding: bool,
 ) -> Result<()> {
     let path = resolve_repo_path(path)?;
-    let (remote_store, bundle_store) = if remote_flag {
+    let remote_store = if remote_flag {
         if let Some(override_store) = remote_override {
-            (Some(override_store.clone()), Some(override_store))
+            Some(override_store)
         } else {
-            build_remote_stores(true, &path)?
+            build_remote_store(true, &path)?
         }
     } else {
-        (None, None)
+        None
     };
     let indexer = if remote_embedding {
         indexer::Indexer::with_remote_embedding(embedder.clone(), true)
@@ -892,7 +855,6 @@ fn handle_watch(
         Duration::from_millis(debounce_ms),
         batch_size,
         remote_store,
-        bundle_store,
     );
     watcher.run(&path)
 }
@@ -1428,23 +1390,18 @@ mod tests {
             })
             .unwrap();
 
-        let parts = remote::bundle::build_bundle(repo.as_path(), Some(8 * 1024)).unwrap();
-        let chunks = remote::bundle::encode_parts_for_upload(&parts, embedder.dimension());
-        let hits: Vec<RemoteSearchHit> = chunks
-            .into_iter()
-            .map(|c| RemoteSearchHit {
-                id: c.id,
-                score: 1.0,
-                path: c.path,
-                start_line: c.start_line,
-                end_line: c.end_line,
-                content: c.content,
-                language: c.language,
-            })
-            .collect();
+        let hits = vec![RemoteSearchHit {
+            id: "test-chunk-1".to_string(),
+            score: 0.95,
+            path: "lib.rs".to_string(),
+            start_line: 1,
+            end_line: 1,
+            content: "pub fn hi() {}".to_string(),
+            language: "rust".to_string(),
+            symbols: Vec::new(),
+        }];
 
-        let bundle_remote = Arc::new(MockRemoteStore::with_hits(hits));
-        let remote = Arc::new(MockRemoteStore::default());
+        let remote = Arc::new(MockRemoteStore::with_hits(hits));
 
         handle_search(
             embedder,
@@ -1458,12 +1415,11 @@ mod tests {
                 json: true,
                 debug: false,
                 remote: Some(remote.clone()),
-                remote_bundle: Some(bundle_remote.clone()),
             },
         )
         .unwrap();
 
-        assert!(bundle_remote.query_called());
+        assert!(remote.query_called());
         std::fs::remove_dir_all(&repo).ok();
         env::remove_var("SGREP_HOME");
     }
@@ -1498,7 +1454,6 @@ mod tests {
                 json: true,
                 debug: false,
                 remote: None,
-                remote_bundle: None,
             },
         )
         .unwrap();
@@ -1902,7 +1857,6 @@ mod tests {
     fn search_params_consolidates_parameters() {
         use std::path::Path;
 
-        // Test that SearchParams correctly holds all the search parameters
         let params = super::SearchParams {
             query: "test query",
             path: Path::new("/test/path"),
@@ -1913,7 +1867,6 @@ mod tests {
             json: false,
             debug: true,
             remote: None,
-            remote_bundle: None,
         };
 
         assert_eq!(params.query, "test query");

@@ -10,7 +10,6 @@ mod graph;
 mod indexer;
 mod modal;
 mod output;
-mod query_expander;
 mod remote;
 mod search;
 mod store;
