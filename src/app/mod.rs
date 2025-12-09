@@ -3,13 +3,14 @@ use std::env;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use console::{style, Term};
 use indicatif::HumanDuration;
+use tracing_subscriber::EnvFilter;
 
 fn format_info(msg: &str) -> String {
     format!("{} {}", style("[info]").blue().bold(), msg)
@@ -24,19 +25,30 @@ fn format_warn(msg: &str) -> String {
 }
 
 pub fn log_info(msg: &str) {
-    eprintln!("{}", format_info(msg));
+    if ui().verbosity.is_quiet() {
+        return;
+    }
+    if ui().verbosity.is_verbose() {
+        eprintln!("{}", format_info(msg));
+    }
 }
 
 pub fn log_ok(msg: &str) {
+    if ui().verbosity.is_quiet() {
+        return;
+    }
     println!("{}", format_ok(msg));
 }
 
 pub fn log_warn(msg: &str) {
+    if ui().verbosity.is_quiet() {
+        return;
+    }
     eprintln!("{}", format_warn(msg));
 }
 
 use crate::chunker;
-use crate::cli::{resolve_repo_path, Cli, Commands};
+use crate::cli::{resolve_repo_path, Cli, ColorChoice, Commands, ProgressChoice};
 use crate::config::{Config, EmbeddingProviderType, RemoteProviderType};
 use crate::embedding::{self, Embedder, EmbeddingModel, PooledEmbedder};
 use crate::fts;
@@ -59,6 +71,40 @@ pub struct SearchParams<'a> {
     pub remote: Option<Arc<dyn RemoteVectorStore>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verbosity {
+    Quiet,
+    Normal,
+    Verbose(u8),
+}
+
+impl Verbosity {
+    fn is_quiet(self) -> bool {
+        matches!(self, Verbosity::Quiet)
+    }
+
+    fn is_verbose(self) -> bool {
+        matches!(self, Verbosity::Verbose(_))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UiOptions {
+    verbosity: Verbosity,
+    color_enabled: bool,
+    progress_enabled: bool,
+}
+
+static UI_OPTIONS: RwLock<UiOptions> = RwLock::new(UiOptions {
+    verbosity: Verbosity::Normal,
+    color_enabled: false,
+    progress_enabled: false,
+});
+
+fn ui() -> UiOptions {
+    *UI_OPTIONS.read().unwrap()
+}
+
 #[allow(dead_code)]
 struct ProgressLine {
     term: Term,
@@ -69,27 +115,25 @@ struct ProgressLine {
 impl ProgressLine {
     fn stderr() -> Self {
         let term = Term::stderr();
-        let enabled = term.is_term();
+        let enabled = term.is_term() && ui().progress_enabled;
         Self { term, enabled }
     }
 
     fn set(&self, message: &str) {
-        if self.enabled {
-            let _ = self.term.clear_line();
-            let _ = self.term.write_str(&format!("\r{message}"));
-            let _ = self.term.flush();
-        } else {
-            eprintln!("{message}");
+        if !self.enabled {
+            return;
         }
+        let _ = self.term.clear_line();
+        let _ = self.term.write_str(&format!("\r{message}"));
+        let _ = self.term.flush();
     }
 
     fn finish(&self, message: &str) {
-        if self.enabled {
-            let _ = self.term.clear_line();
-            let _ = self.term.write_line(&format!("\r{message}"));
-        } else {
-            eprintln!("{message}");
+        if !self.enabled {
+            return;
         }
+        let _ = self.term.clear_line();
+        let _ = self.term.write_line(&format!("\r{message}"));
     }
 }
 
@@ -173,13 +217,94 @@ fn resolve_remote_provider(config: &Config, remote_flag: Option<bool>) -> bool {
     }
 }
 
-pub fn run() -> Result<()> {
-    setup_tracing();
+fn command_uses_json(cli: &Cli) -> bool {
+    match &cli.command {
+        Commands::Search { json, .. } => *json,
+        Commands::Index { json, stats, .. } => *json && *stats,
+        _ => false,
+    }
+}
+
+fn resolve_verbosity(cli: &Cli) -> Verbosity {
+    if cli.quiet {
+        Verbosity::Quiet
+    } else if cli.verbose > 0 {
+        Verbosity::Verbose(cli.verbose)
+    } else {
+        Verbosity::Normal
+    }
+}
+
+fn init_ui_options(cli: &Cli, json_mode: bool) -> UiOptions {
+    let stdout_tty = Term::stdout().is_term();
+    let stderr_tty = Term::stderr().is_term();
+
+    let color_choice = if cli.no_color {
+        ColorChoice::Never
+    } else {
+        cli.color
+    };
+    let color_enabled = match color_choice {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => stdout_tty || stderr_tty,
+    } && !json_mode;
+
+    let progress_choice = if cli.no_progress {
+        ProgressChoice::Never
+    } else {
+        cli.progress
+    };
+    let progress_enabled = match progress_choice {
+        ProgressChoice::Always => true,
+        ProgressChoice::Never => false,
+        ProgressChoice::Auto => stderr_tty,
+    } && !json_mode;
+
+    let verbosity = resolve_verbosity(cli);
+    let options = UiOptions {
+        verbosity,
+        color_enabled,
+        progress_enabled,
+    };
+
+    if let Ok(mut guard) = UI_OPTIONS.write() {
+        *guard = options;
+    }
+    console::set_colors_enabled(options.color_enabled);
+    options
+}
+
+fn setup_tracing(ui: &UiOptions) {
+    let filter = match env::var("RUST_LOG") {
+        Ok(val) => val,
+        Err(_) => match ui.verbosity {
+            Verbosity::Quiet => "error".to_string(),
+            Verbosity::Normal => "warn".to_string(),
+            Verbosity::Verbose(1) => "info".to_string(),
+            Verbosity::Verbose(_) => "debug".to_string(),
+        },
+    };
+
+    let env_filter = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("warn"));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(false)
+        .with_ansi(ui.color_enabled)
+        .try_init();
+}
+
+pub fn run() -> Result<i32> {
     let cli = parse_cli();
     run_with_cli(cli)
 }
 
-pub fn run_with_cli(cli: Cli) -> Result<()> {
+pub fn run_with_cli(cli: Cli) -> Result<i32> {
+    let json_mode = command_uses_json(&cli);
+    let ui = init_ui_options(&cli, json_mode);
+    setup_tracing(&ui);
+
     let preset = cli.cpu_preset.as_ref().and_then(|s| CpuPreset::from_str(s));
     ThreadConfig::init(cli.max_threads, preset);
     ThreadConfig::get().apply();
@@ -190,12 +315,12 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
         verify_model,
     } = &cli.command
     {
-        return handle_config(*init, *show_model_dir, *verify_model);
+        return handle_config(*init, *show_model_dir, *verify_model).map(|_| 0);
     }
 
     if let Some((command, pid)) = maybe_detach(&cli)? {
         println!("Detached {command} (pid {pid})");
-        return Ok(());
+        return Ok(0);
     }
 
     let offload_flag = match &cli.command {
@@ -231,12 +356,13 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             detach: _,
         } => {
             if stats {
-                return handle_index_stats(path, json);
+                return handle_index_stats(path, json).map(|_| 0);
             }
             let use_remote = resolve_remote_provider(&config, remote);
             handle_index(
                 embedder, path, force, batch_size, profile, use_remote, None, offload,
-            )
+            )?;
+            Ok(0)
         }
         Commands::Search {
             query,
@@ -252,7 +378,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
         } => {
             let use_remote = resolve_remote_provider(&config, remote);
             let remote_store = build_remote_store(use_remote, &path)?;
-            handle_search(
+            let matched = handle_search(
                 embedder,
                 SearchParams {
                     query: &query,
@@ -265,7 +391,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                     debug,
                     remote: remote_store,
                 },
-            )
+            )?;
+            Ok(if matched { 0 } else { 1 })
         }
         Commands::Watch {
             path,
@@ -284,7 +411,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                 use_remote,
                 None,
                 offload,
-            )
+            )?;
+            Ok(0)
         }
         Commands::Config { .. } => unreachable!(), // Handled above
     }
@@ -669,7 +797,7 @@ fn handle_index(
 fn handle_search(
     embedder: Arc<dyn embedding::BatchEmbedder>,
     params: SearchParams<'_>,
-) -> Result<()> {
+) -> Result<bool> {
     let start = Instant::now();
 
     if let Some(remote) = params.remote.clone() {
@@ -680,12 +808,19 @@ fn handle_search(
 
     let store_result = store::IndexStore::new(params.path)?;
     match store_result.build_state() {
-        store::BuildState::InProgress(_) => {
+        store::BuildState::InProgress(marker) => {
             return Err(anyhow!(
-                "Index is currently building. Wait for `sgrep index` to finish."
+                "Index is currently building (pid {}, started {}). Wait for `sgrep index` to finish.",
+                marker.pid, marker.started_at
             ));
         }
-        store::BuildState::Interrupted(_) => {
+        store::BuildState::Interrupted(Some(marker)) => {
+            return Err(anyhow!(
+                "Indexing was interrupted (pid {}, started {}). Rerun `sgrep index --force` to rebuild.",
+                marker.pid, marker.started_at
+            ));
+        }
+        store::BuildState::Interrupted(None) => {
             return Err(anyhow!(
                 "Indexing was interrupted; rerun `sgrep index --force` to rebuild."
             ));
@@ -720,7 +855,7 @@ fn handle_search(
                 glob: params.glob.clone(),
                 filters: params.filters.clone(),
                 dedup: search::DedupOptions::default(),
-                file_type_priority: search::FileTypePriority::default(),
+                file_type_priority: search::FileTypePriority,
             },
         )?;
         let elapsed = start.elapsed();
@@ -746,7 +881,7 @@ fn handle_search(
             glob: params.glob,
             filters: params.filters,
             dedup: search::DedupOptions::default(),
-            file_type_priority: search::FileTypePriority::default(),
+            file_type_priority: search::FileTypePriority,
         },
     )?;
     let elapsed = start.elapsed();
@@ -767,7 +902,7 @@ fn handle_remote_search(
     params: SearchParams<'_>,
     remote: Arc<dyn RemoteVectorStore>,
     start: Instant,
-) -> Result<()> {
+) -> Result<bool> {
     let graph = remote::graph_blob::fetch_graph_blob(remote.as_ref(), embedder.dimension())?;
 
     let query_vec = embedder.embed(params.query)?;
@@ -863,7 +998,7 @@ fn handle_remote_search(
         });
     }
 
-    let file_type_priority = search::FileTypePriority::default();
+    let file_type_priority = search::FileTypePriority;
     for result in &mut results {
         let multiplier = file_type_priority.multiplier(search::classify_path(&result.chunk.path));
         result.score *= multiplier;
@@ -1021,49 +1156,47 @@ fn parse_cli() -> Cli {
     Cli::parse()
 }
 
-fn render_results(ctx: RenderContext<'_>) -> Result<()> {
+fn render_results(ctx: RenderContext<'_>) -> Result<bool> {
     if ctx.json {
         let payload =
             JsonResponse::from_results(ctx.query, ctx.limit, ctx.results, ctx.index, ctx.elapsed);
         println!("{}", serde_json::to_string_pretty(&payload)?);
-    } else if ctx.results.is_empty() {
-        log_warn("No matches found");
-    } else {
-        for (idx, result) in ctx.results.iter().enumerate() {
-            let header = format!(
-                "{}. {}:{}-{}",
-                idx + 1,
-                result.chunk.path.display(),
-                result.chunk.start_line,
-                result.chunk.end_line,
-            );
-            println!("-> {}", style(header).bold());
-            if ctx.debug {
-                println!(
-                    "    score: {:.2} | semantic: {:.2} | bm25: {:.2}",
-                    result.score, result.semantic_score, result.bm25_score
-                );
-            }
-            println!("{}", result.render_snippet());
-            println!();
-        }
-        if ctx.debug {
-            log_info(&format!(
-                "{} results in {:?}",
-                ctx.results.len(),
-                ctx.elapsed
-            ));
-        }
+        return Ok(!payload.results.is_empty());
     }
-    Ok(())
-}
 
-fn setup_tracing() {
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "sgrep=info".into());
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
+    if ctx.results.is_empty() {
+        log_warn("No matches found");
+        return Ok(false);
+    }
+
+    for (idx, result) in ctx.results.iter().enumerate() {
+        let header = format!(
+            "{}. {}:{}-{}",
+            idx + 1,
+            result.chunk.path.display(),
+            result.chunk.start_line,
+            result.chunk.end_line,
+        );
+        println!("-> {}", style(header).bold());
+        if ctx.debug {
+            println!(
+                "    score: {:.2} | semantic: {:.2} | bm25: {:.2}",
+                result.score, result.semantic_score, result.bm25_score
+            );
+        }
+        println!("{}", result.render_snippet());
+        println!();
+    }
+
+    if ctx.debug {
+        log_info(&format!(
+            "{} results in {:?}",
+            ctx.results.len(),
+            ctx.elapsed
+        ));
+    }
+
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -1125,6 +1258,12 @@ mod tests {
 
     fn cli_for_index_detach(detach: bool, stats: bool) -> Cli {
         Cli {
+            quiet: false,
+            verbose: 0,
+            color: ColorChoice::Auto,
+            no_color: false,
+            progress: ProgressChoice::Auto,
+            no_progress: false,
             device: None,
             offline: false,
             max_threads: None,
@@ -1582,7 +1721,7 @@ mod tests {
     fn render_results_handles_empty_and_json() {
         let repo_root = Path::new("/tmp/render");
         let index = sample_index(repo_root);
-        render_results(RenderContext {
+        assert!(!render_results(RenderContext {
             results: Vec::new(),
             query: "hello",
             limit: 5,
@@ -1591,7 +1730,7 @@ mod tests {
             json: false,
             debug: false,
         })
-        .unwrap();
+        .unwrap());
 
         let chunk = CodeChunk {
             id: Uuid::new_v4(),
@@ -1610,7 +1749,7 @@ mod tests {
             bm25_score: 0.0,
             show_full_context: false,
         };
-        render_results(RenderContext {
+        assert!(render_results(RenderContext {
             results: vec![result],
             query: "hello",
             limit: 5,
@@ -1619,7 +1758,7 @@ mod tests {
             json: true,
             debug: false,
         })
-        .unwrap();
+        .unwrap());
     }
 
     #[test]
@@ -1643,7 +1782,7 @@ mod tests {
             bm25_score: 0.0,
             show_full_context: false,
         };
-        render_results(RenderContext {
+        assert!(render_results(RenderContext {
             results: vec![result],
             query: "hello world",
             limit: 3,
@@ -1652,7 +1791,7 @@ mod tests {
             json: false,
             debug: false,
         })
-        .unwrap();
+        .unwrap());
     }
 
     #[test]
@@ -1827,10 +1966,39 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            format!("{err}")
-                .contains("Indexing was interrupted; rerun `sgrep index --force` to rebuild."),
+            format!("{err}").contains("Indexing was interrupted"),
             "expected interrupted message, got: {err}"
         );
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn handle_remote_search_returns_no_matches() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let remote = Arc::new(MockRemoteStore::default());
+
+        let matched = handle_remote_search(
+            embedder,
+            SearchParams {
+                query: "missing",
+                path: repo.as_path(),
+                limit: 5,
+                context: false,
+                glob: vec![],
+                filters: vec![],
+                json: false,
+                debug: false,
+                remote: None,
+            },
+            remote,
+            Instant::now(),
+        )
+        .unwrap();
+
+        assert!(!matched);
         std::fs::remove_dir_all(&repo).ok();
     }
 
@@ -1840,6 +2008,12 @@ mod tests {
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
         let cli = Cli {
+            quiet: false,
+            verbose: 0,
+            color: ColorChoice::Auto,
+            no_color: false,
+            progress: ProgressChoice::Auto,
+            no_progress: false,
             device: None,
             offline: false,
             max_threads: None,
@@ -1866,6 +2040,12 @@ mod tests {
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
         let cli = Cli {
+            quiet: false,
+            verbose: 0,
+            color: ColorChoice::Auto,
+            no_color: false,
+            progress: ProgressChoice::Auto,
+            no_progress: false,
             device: None,
             offline: false,
             max_threads: None,
@@ -1902,6 +2082,12 @@ mod tests {
             .unwrap();
 
         let cli = Cli {
+            quiet: false,
+            verbose: 0,
+            color: ColorChoice::Auto,
+            no_color: false,
+            progress: ProgressChoice::Auto,
+            no_progress: false,
             device: None,
             offline: false,
             max_threads: None,
@@ -1937,6 +2123,12 @@ mod tests {
     #[test]
     fn config_show_model_dir_returns_path() {
         let cli = Cli {
+            quiet: false,
+            verbose: 0,
+            color: ColorChoice::Auto,
+            no_color: false,
+            progress: ProgressChoice::Auto,
+            no_progress: false,
             device: None,
             offline: false,
             max_threads: None,
@@ -1954,6 +2146,12 @@ mod tests {
     #[serial]
     fn config_verify_model_checks_files() {
         let cli = Cli {
+            quiet: false,
+            verbose: 0,
+            color: ColorChoice::Auto,
+            no_color: false,
+            progress: ProgressChoice::Auto,
+            no_progress: false,
             device: None,
             offline: false,
             max_threads: None,

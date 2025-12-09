@@ -1,5 +1,3 @@
-use anyhow::Result;
-
 mod app;
 mod chunker;
 mod cli;
@@ -17,6 +15,14 @@ mod threading;
 mod turbopuffer;
 mod watch;
 
-fn main() -> Result<()> {
-    app::run()
+fn main() {
+    let code = match app::run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("error: {err}");
+            2
+        }
+    };
+
+    std::process::exit(code);
 }

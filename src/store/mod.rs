@@ -59,9 +59,9 @@ const BUILDING_FILE: &str = "index.building";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct BuildMarker {
-    pid: u32,
-    started_at: DateTime<Utc>,
-    version: String,
+    pub(crate) pid: u32,
+    pub(crate) started_at: DateTime<Utc>,
+    pub(crate) version: String,
 }
 
 impl BuildMarker {
@@ -165,14 +165,13 @@ impl IndexStore {
     }
 
     pub fn start_build_guard(&self) -> Result<BuildGuard> {
-        match self.build_state() {
-            BuildState::InProgress(_) => {
-                return Err(anyhow!(
-                    "Index build already in progress for {}",
-                    self.repo_path.display()
-                ));
-            }
-            _ => {}
+        if let BuildState::InProgress(marker) = self.build_state() {
+            return Err(anyhow!(
+                "Index build already in progress for {} (pid {}, started {})",
+                self.repo_path.display(),
+                marker.pid,
+                marker.started_at
+            ));
         }
 
         let path = self.root.join(BUILDING_FILE);

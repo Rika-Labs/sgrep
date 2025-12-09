@@ -8,6 +8,7 @@ mod results;
 mod scoring;
 
 pub use dedup::{suppress_near_duplicates, DedupOptions};
+#[allow(unused_imports)]
 pub use file_type::{classify_path, FileType, FileTypePriority};
 pub use results::{DirectorySearchResult, FileSearchResult, SearchResult};
 pub use scoring::cosine_similarity;
@@ -79,7 +80,7 @@ impl Default for SearchOptions {
             glob: vec![],
             filters: vec![],
             dedup: DedupOptions::default(),
-            file_type_priority: FileTypePriority::default(),
+            file_type_priority: FileTypePriority,
         }
     }
 }

@@ -1,7 +1,21 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueHint};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum, ValueHint};
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ProgressChoice {
+    Auto,
+    Always,
+    Never,
+}
 
 /// Parse bool from string, accepting "1", "true", "0", "false" (case-insensitive)
 fn parse_bool_flexible(s: &str) -> Result<bool, String> {
@@ -23,6 +37,30 @@ fn parse_optional_bool_flexible(s: &str) -> Result<bool, String> {
 #[derive(Parser, Debug, Clone)]
 #[command(name = "sgrep", version, about = "Lightning-fast semantic code search")]
 pub struct Cli {
+    /// Reduce output to errors only
+    #[arg(global = true, short = 'q', long, default_value_t = false)]
+    pub quiet: bool,
+
+    /// Increase verbosity (repeatable)
+    #[arg(global = true, short = 'v', long, action = ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Control color output
+    #[arg(global = true, long, value_enum, default_value_t = ColorChoice::Auto)]
+    pub color: ColorChoice,
+
+    /// Disable color output (alias)
+    #[arg(global = true, long = "no-color", conflicts_with = "color")]
+    pub no_color: bool,
+
+    /// Control progress display
+    #[arg(global = true, long, value_enum, default_value_t = ProgressChoice::Auto)]
+    pub progress: ProgressChoice,
+
+    /// Disable progress display (alias)
+    #[arg(global = true, long = "no-progress", conflicts_with = "progress")]
+    pub no_progress: bool,
+
     /// Preferred device for embeddings (cpu|cuda|coreml). Also reads SGREP_DEVICE.
     #[arg(global = true, long, env = "SGREP_DEVICE")]
     pub device: Option<String>,
@@ -432,5 +470,34 @@ mod tests {
             }
             _ => panic!("Expected Index command"),
         }
+    }
+
+    #[test]
+    fn cli_parses_quiet_and_verbose() {
+        let quiet_cli = Cli::parse_from(["sgrep", "-q", "index", "."]);
+        assert!(quiet_cli.quiet);
+        assert_eq!(quiet_cli.verbose, 0);
+
+        let verbose_cli = Cli::parse_from(["sgrep", "-vv", "search", "q"]);
+        assert!(!verbose_cli.quiet);
+        assert_eq!(verbose_cli.verbose, 2);
+    }
+
+    #[test]
+    fn cli_parses_color_and_no_color() {
+        let color_cli = Cli::parse_from(["sgrep", "--color", "never", "index", "."]);
+        assert_eq!(color_cli.color, ColorChoice::Never);
+
+        let no_color_cli = Cli::parse_from(["sgrep", "--no-color", "index", "."]);
+        assert!(no_color_cli.no_color);
+    }
+
+    #[test]
+    fn cli_parses_progress_flags() {
+        let progress_cli = Cli::parse_from(["sgrep", "--progress", "always", "index", "."]);
+        assert_eq!(progress_cli.progress, ProgressChoice::Always);
+
+        let no_progress_cli = Cli::parse_from(["sgrep", "--no-progress", "index", "."]);
+        assert!(no_progress_cli.no_progress);
     }
 }

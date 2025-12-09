@@ -150,6 +150,7 @@ pub fn classify_path(path: &Path) -> FileType {
 }
 
 /// Apply file type prioritization to a score
+#[allow(dead_code)]
 pub fn apply_priority(score: f32, path: &Path, priority: &FileTypePriority) -> f32 {
     let file_type = classify_path(path);
     score * priority.multiplier(file_type)
@@ -287,7 +288,7 @@ mod tests {
 
     #[test]
     fn priority_applies_correct_multipliers() {
-        let priority = FileTypePriority::default();
+        let priority = FileTypePriority;
 
         let impl_score = apply_priority(1.0, Path::new("src/auth.rs"), &priority);
         assert!((impl_score - 1.0).abs() < 1e-6);
