@@ -4,7 +4,7 @@ mod mmap;
 pub mod utils;
 
 pub use hierarchy::HierarchicalIndex;
-pub use index::{IndexMetadata, PartialIndex, RepositoryIndex};
+pub use index::{validate_index_model, IndexMetadata, PartialIndex, RepositoryIndex};
 pub use mmap::{HnswHeader, MmapIndex};
 pub use utils::quantize_to_binary;
 
@@ -595,6 +595,7 @@ mod tests {
             indexed_at: Utc::now(),
             total_files: 1,
             total_chunks: 1,
+            embedding_model: "jina-embeddings-v2-base-code".to_string(),
         }
     }
 

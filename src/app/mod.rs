@@ -38,7 +38,7 @@ pub fn log_warn(msg: &str) {
 use crate::chunker;
 use crate::cli::{resolve_repo_path, Cli, Commands};
 use crate::config::{Config, EmbeddingProviderType, RemoteProviderType};
-use crate::embedding::{self, Embedder, PooledEmbedder};
+use crate::embedding::{self, Embedder, EmbeddingModel, PooledEmbedder};
 use crate::fts;
 use crate::modal::{ModalDeployer, ModalEmbedder};
 use crate::output::JsonResponse;
@@ -147,16 +147,30 @@ fn maybe_detach(cli: &Cli) -> Result<Option<(&'static str, u32)>> {
     Ok(None)
 }
 
+fn resolve_embedding_model(config: &Config, _cli_model: Option<&str>) -> EmbeddingModel {
+    config.embedding.model
+}
+
 fn resolve_embedding_provider(
+    config: &Config,
     offload_flag: Option<bool>,
-) -> Result<(Config, EmbeddingProviderType)> {
-    let config = Config::load().unwrap_or_default();
-    let provider = match offload_flag {
+) -> EmbeddingProviderType {
+    match offload_flag {
         Some(true) => EmbeddingProviderType::Modal,
         Some(false) => EmbeddingProviderType::Local,
         None => config.embedding.provider.clone(),
-    };
-    Ok((config, provider))
+    }
+}
+
+fn resolve_remote_provider(config: &Config, remote_flag: Option<bool>) -> bool {
+    match remote_flag {
+        Some(true) => true,
+        Some(false) => false,
+        None => match &config.remote_provider {
+            Some(RemoteProviderType::Turbopuffer) | Some(RemoteProviderType::Pinecone) => true,
+            Some(RemoteProviderType::None) | None => false,
+        },
+    }
 }
 
 pub fn run() -> Result<()> {
@@ -184,7 +198,6 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    // Extract offload flag (optional) from command to determine embedder type
     let offload_flag = match &cli.command {
         Commands::Index { offload, .. } => *offload,
         Commands::Search { offload, .. } => *offload,
@@ -192,10 +205,18 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
         Commands::Config { .. } => None,
     };
 
-    let (config, provider) = resolve_embedding_provider(offload_flag)?;
+    let config = Config::load().unwrap_or_default();
+    let model = resolve_embedding_model(&config, None);
+    let provider = resolve_embedding_provider(&config, offload_flag);
     let offload = matches!(provider, EmbeddingProviderType::Modal);
 
-    let embedder = build_embedder(cli.offline, cli.device.clone(), provider.clone(), &config)?;
+    let embedder = build_embedder(
+        model,
+        cli.offline,
+        cli.device.clone(),
+        provider.clone(),
+        &config,
+    )?;
 
     match cli.command {
         Commands::Index {
@@ -212,8 +233,9 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             if stats {
                 return handle_index_stats(path, json);
             }
+            let use_remote = resolve_remote_provider(&config, remote);
             handle_index(
-                embedder, path, force, batch_size, profile, remote, None, offload,
+                embedder, path, force, batch_size, profile, use_remote, None, offload,
             )
         }
         Commands::Search {
@@ -228,7 +250,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             offload: _offload,
             remote,
         } => {
-            let remote_store = build_remote_store(remote, &path)?;
+            let use_remote = resolve_remote_provider(&config, remote);
+            let remote_store = build_remote_store(use_remote, &path)?;
             handle_search(
                 embedder,
                 SearchParams {
@@ -251,20 +274,24 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             offload: _offload,
             remote,
             detach: _,
-        } => handle_watch(
-            embedder,
-            path,
-            debounce_ms,
-            batch_size,
-            remote,
-            None,
-            offload,
-        ),
+        } => {
+            let use_remote = resolve_remote_provider(&config, remote);
+            handle_watch(
+                embedder,
+                path,
+                debounce_ms,
+                batch_size,
+                use_remote,
+                None,
+                offload,
+            )
+        }
         Commands::Config { .. } => unreachable!(), // Handled above
     }
 }
 
 fn build_embedder(
+    model: EmbeddingModel,
     offline: bool,
     device: Option<String>,
     provider: EmbeddingProviderType,
@@ -285,7 +312,7 @@ fn build_embedder(
     }
 
     if matches!(provider, EmbeddingProviderType::Modal) {
-        return build_modal_embedder(config);
+        return build_modal_embedder(model, config);
     }
 
     embedding::configure_offline_env(offline)?;
@@ -294,6 +321,14 @@ fn build_embedder(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
 
+    #[cfg(not(test))]
+    let embedder: Arc<dyn embedding::BatchEmbedder> = if use_pooled {
+        Arc::new(PooledEmbedder::new(model, 1, 100_000))
+    } else {
+        Arc::new(Embedder::new(model, 100_000))
+    };
+
+    #[cfg(test)]
     let embedder: Arc<dyn embedding::BatchEmbedder> = if use_pooled {
         Arc::new(PooledEmbedder::default())
     } else {
@@ -303,8 +338,6 @@ fn build_embedder(
     Ok(embedder)
 }
 
-/// Fixed dimension for local/remote compatibility - do not change
-const MODAL_DIMENSION: usize = 384;
 const MODAL_MAX_TEXTS_PER_REQUEST: usize = 1000;
 
 static MODAL_ENDPOINTS: OnceCell<(String, bool)> = OnceCell::new();
@@ -333,7 +366,12 @@ fn resolve_modal_endpoints(config: &Config, json_mode: bool) -> Result<(String, 
     Ok((embed_url, cached))
 }
 
-fn build_modal_embedder(config: &Config) -> Result<Arc<dyn embedding::BatchEmbedder>> {
+fn build_modal_embedder(
+    model: EmbeddingModel,
+    config: &Config,
+) -> Result<Arc<dyn embedding::BatchEmbedder>> {
+    let model_config = model.config();
+    let dimension = model_config.output_dim;
     let batch_size = resolve_modal_batch_size(config);
     let concurrency = resolve_modal_concurrency(config);
     let use_gzip = env::var("SGREP_MODAL_GZIP")
@@ -345,8 +383,8 @@ fn build_modal_embedder(config: &Config) -> Result<Arc<dyn embedding::BatchEmbed
         resolve_modal_endpoints(config, false).context("Modal embedder unavailable")?;
 
     log_info(&format!(
-        "Using Modal embedder (GPU: A10G, dim: {}, batch: {}, concurrency: {})",
-        MODAL_DIMENSION, batch_size, concurrency
+        "Using Modal embedder (model: {}, GPU: A10G, dim: {}, batch: {}, concurrency: {})",
+        model_config.display_name, dimension, batch_size, concurrency
     ));
 
     let endpoint = if let Some(endpoint) = config.modal.endpoint.clone() {
@@ -358,7 +396,7 @@ fn build_modal_embedder(config: &Config) -> Result<Arc<dyn embedding::BatchEmbed
 
     let embedder = ModalEmbedder::new(
         endpoint,
-        MODAL_DIMENSION,
+        dimension,
         config.modal.proxy_token_id.clone(),
         config.modal.proxy_token_secret.clone(),
     )
@@ -402,7 +440,7 @@ fn default_modal_concurrency() -> usize {
 
 fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result<()> {
     if show_model_dir {
-        let model_dir = embedding::get_fastembed_cache_dir().join(embedding::MODEL_NAME);
+        let model_dir = embedding::get_fastembed_cache_dir().join(embedding::EmbeddingModel::default().config().name);
         println!("{}", model_dir.display());
         return Ok(());
     }
@@ -431,13 +469,13 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
     if config_path.exists() {
         println!(
             "  Provider: {}",
-            style(format!("local ({})", embedding::MODEL_NAME)).bold()
+            style(format!("local ({})", embedding::EmbeddingModel::default().config().name)).bold()
         );
     } else {
         println!("  No config file found (using defaults)");
         println!(
             "  Provider: {}",
-            style(format!("local ({})", embedding::MODEL_NAME)).bold()
+            style(format!("local ({})", embedding::EmbeddingModel::default().config().name)).bold()
         );
         println!();
         println!("  Run 'sgrep config --init' to create a config file");
@@ -447,20 +485,21 @@ fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result
 }
 
 fn verify_model_files() -> Result<()> {
-    let model_dir = embedding::get_fastembed_cache_dir().join(embedding::MODEL_NAME);
+    let model_dir = embedding::get_fastembed_cache_dir().join(embedding::EmbeddingModel::default().config().name);
 
     log_info(&format!("Model directory: {}\n", model_dir.display()));
 
+    let config = embedding::EmbeddingModel::default().config();
     let mut all_ok = true;
-    for file in embedding::MODEL_FILES {
-        let exists = model_dir.join(file).exists();
+    for (_, local_name) in config.files {
+        let exists = model_dir.join(local_name).exists();
         let status = if exists {
             "OK"
         } else {
             all_ok = false;
             "MISSING"
         };
-        println!("  [{}] {}", status, file);
+        println!("  [{}] {}", status, local_name);
     }
 
     println!();
@@ -469,7 +508,7 @@ fn verify_model_files() -> Result<()> {
         Ok(())
     } else {
         println!("[error] Some model files are missing.\n");
-        println!("Download from: {}", embedding::MODEL_DOWNLOAD_URL);
+        println!("Download from: {}", config.download_base_url);
         println!("Place files in: {}", model_dir.display());
         Err(anyhow!("Model files incomplete"))
     }
@@ -651,6 +690,12 @@ fn handle_search(
             ));
         }
 
+        // Validate embedding model matches
+        store::validate_index_model(
+            &mmap_index.metadata.embedding_model,
+            embedding::EmbeddingModel::default().config().name,
+        )?;
+
         let results = engine.search_mmap(
             &mmap_index,
             params.query,
@@ -722,6 +767,7 @@ fn handle_remote_search(
             indexed_at: chrono::Utc::now(),
             total_files: 0,
             total_chunks: 0,
+            embedding_model: embedding::EmbeddingModel::default().config().name.to_string(),
         };
         let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
         return render_results(RenderContext {
@@ -808,6 +854,7 @@ fn handle_remote_search(
         indexed_at: chrono::Utc::now(),
         total_files: 0,
         total_chunks: results.len(),
+        embedding_model: embedding::EmbeddingModel::default().config().name.to_string(),
     };
     let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
 
@@ -823,10 +870,10 @@ fn handle_remote_search(
 }
 
 fn build_remote_store(
-    remote_flag: bool,
+    use_remote: bool,
     path: &Path,
 ) -> Result<Option<Arc<dyn RemoteVectorStore>>> {
-    if !remote_flag {
+    if !use_remote {
         return Ok(None);
     }
 
@@ -843,7 +890,12 @@ fn build_remote_store(
 
     if remote.is_none() {
         return Err(anyhow!(
-            "--remote requested but no provider configured. Configure [turbopuffer] or [pinecone], or set remote_provider."
+            "Remote storage requested but no provider configured.\n\
+             Add to config.toml:\n\n\
+             remote_provider = \"turbopuffer\"  # or \"pinecone\"\n\n\
+             [turbopuffer]\n\
+             api_key = \"your-api-key\"\n\n\
+             Or use --remote=false to disable."
         ));
     }
 
@@ -911,6 +963,9 @@ fn load_index_for_search(
             embedder.dimension()
         ));
     }
+
+    // Validate embedding model matches
+    store::validate_index_model(&index.metadata.embedding_model, embedding::EmbeddingModel::default().config().name)?;
 
     if index.chunks.len() != index.vectors.len() {
         return Err(anyhow!(
@@ -1047,7 +1102,7 @@ mod tests {
                 stats,
                 json: false,
                 offload: Some(false),
-                remote: false,
+                remote: None,
                 detach,
             },
         }
@@ -1145,6 +1200,7 @@ mod tests {
             indexed_at: Utc::now(),
             total_files: 1,
             total_chunks: 1,
+            embedding_model: embedding::EmbeddingModel::default().config().name.to_string(),
         };
         RepositoryIndex::new(meta, vec![chunk], vec![vec![1.0, 2.0, 3.0]])
     }
@@ -1211,6 +1267,7 @@ mod tests {
         // Use non-existent config to force local provider
         env::set_var("SGREP_CONFIG", "/nonexistent/config.toml");
         let _ = build_embedder(
+            EmbeddingModel::default(),
             true,
             Some("cpu".into()),
             EmbeddingProviderType::Local,
@@ -1246,6 +1303,7 @@ mod tests {
     fn build_embedder_respects_use_pooled_flag() {
         env::set_var("SGREP_USE_POOLED_EMBEDDER", "false");
         let embedder = build_embedder(
+            EmbeddingModel::default(),
             false,
             None,
             EmbeddingProviderType::Local,
@@ -1714,7 +1772,7 @@ mod tests {
                 stats: false,
                 json: false,
                 offload: Some(false),
-                remote: false,
+                remote: None,
                 detach: false,
             },
         };
@@ -1737,7 +1795,7 @@ mod tests {
                 debounce_ms: 50,
                 batch_size: Some(16),
                 offload: Some(false),
-                remote: false,
+                remote: None,
                 detach: false,
             },
         };
@@ -1778,7 +1836,7 @@ mod tests {
                 json: true,
                 debug: false,
                 offload: Some(false),
-                remote: false,
+                remote: None,
             },
         };
         run_with_cli(cli).unwrap();
@@ -1848,11 +1906,12 @@ mod tests {
     fn verify_model_files_returns_ok_when_present() {
         let temp_cache =
             std::env::temp_dir().join(format!("sgrep_verify_ok_test_{}", Uuid::new_v4()));
-        let model_dir = temp_cache.join(embedding::MODEL_NAME);
+        let model_dir = temp_cache.join(embedding::EmbeddingModel::default().config().name);
         std::fs::create_dir_all(&model_dir).unwrap();
 
-        for file in embedding::MODEL_FILES {
-            std::fs::write(model_dir.join(file), b"mock").unwrap();
+        let config = embedding::EmbeddingModel::default().config();
+        for (_, local_name) in config.files {
+            std::fs::write(model_dir.join(local_name), b"mock").unwrap();
         }
 
         env::set_var("FASTEMBED_CACHE_DIR", &temp_cache);
@@ -1981,5 +2040,46 @@ mod tests {
         assert!(info.contains("[info]") && info.contains(msg));
         assert!(ok.contains("[ok]") && ok.contains(msg));
         assert!(warn.contains("[warn]") && warn.contains(msg));
+    }
+
+    #[test]
+    fn resolve_remote_provider_flag_true_overrides_config() {
+        let mut config = Config::default();
+        config.remote_provider = Some(RemoteProviderType::None);
+        assert!(resolve_remote_provider(&config, Some(true)));
+    }
+
+    #[test]
+    fn resolve_remote_provider_flag_false_overrides_config() {
+        let mut config = Config::default();
+        config.remote_provider = Some(RemoteProviderType::Turbopuffer);
+        assert!(!resolve_remote_provider(&config, Some(false)));
+    }
+
+    #[test]
+    fn resolve_remote_provider_uses_config_turbopuffer() {
+        let mut config = Config::default();
+        config.remote_provider = Some(RemoteProviderType::Turbopuffer);
+        assert!(resolve_remote_provider(&config, None));
+    }
+
+    #[test]
+    fn resolve_remote_provider_uses_config_pinecone() {
+        let mut config = Config::default();
+        config.remote_provider = Some(RemoteProviderType::Pinecone);
+        assert!(resolve_remote_provider(&config, None));
+    }
+
+    #[test]
+    fn resolve_remote_provider_config_none_returns_false() {
+        let mut config = Config::default();
+        config.remote_provider = Some(RemoteProviderType::None);
+        assert!(!resolve_remote_provider(&config, None));
+    }
+
+    #[test]
+    fn resolve_remote_provider_missing_returns_false() {
+        let config = Config::default();
+        assert!(!resolve_remote_provider(&config, None));
     }
 }

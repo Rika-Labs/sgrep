@@ -61,9 +61,14 @@ pub enum Commands {
             default_missing_value = "true"
         )]
         offload: Option<bool>,
-        /// Store/query index from Turbopuffer (serverless vector DB)
-        #[arg(long, env = "SGREP_REMOTE")]
-        remote: bool,
+        /// Store/query index from remote vector DB (turbopuffer/pinecone)
+        #[arg(
+            long,
+            env = "SGREP_REMOTE",
+            num_args = 0..=1,
+            default_missing_value = "true"
+        )]
+        remote: Option<bool>,
     },
     /// Index a repository for semantic search
     Index {
@@ -98,9 +103,14 @@ pub enum Commands {
             default_missing_value = "true"
         )]
         offload: Option<bool>,
-        /// Store index in Turbopuffer (serverless vector DB)
-        #[arg(long, env = "SGREP_REMOTE")]
-        remote: bool,
+        /// Store index in remote vector DB (turbopuffer/pinecone)
+        #[arg(
+            long,
+            env = "SGREP_REMOTE",
+            num_args = 0..=1,
+            default_missing_value = "true"
+        )]
+        remote: Option<bool>,
         /// Run index in detached/background mode
         #[arg(short = 'd', long, default_value_t = false)]
         detach: bool,
@@ -129,9 +139,14 @@ pub enum Commands {
             default_missing_value = "true"
         )]
         offload: Option<bool>,
-        /// Store index in Turbopuffer (serverless vector DB)
-        #[arg(long, env = "SGREP_REMOTE")]
-        remote: bool,
+        /// Store index in remote vector DB (turbopuffer/pinecone)
+        #[arg(
+            long,
+            env = "SGREP_REMOTE",
+            num_args = 0..=1,
+            default_missing_value = "true"
+        )]
+        remote: Option<bool>,
         /// Run watch in detached/background mode
         #[arg(short = 'd', long, default_value_t = false)]
         detach: bool,
@@ -310,18 +325,29 @@ mod tests {
         let cli = Cli::parse_from(["sgrep", "index", "--remote"]);
         match cli.command {
             Commands::Index { remote, .. } => {
-                assert!(remote, "Expected --remote flag to be true");
+                assert_eq!(remote, Some(true), "Expected --remote flag to be Some(true)");
             }
             _ => panic!("Expected Index command"),
         }
     }
 
     #[test]
-    fn cli_index_remote_default_is_false() {
+    fn cli_parses_index_remote_false() {
+        let cli = Cli::parse_from(["sgrep", "index", "--remote=false"]);
+        match cli.command {
+            Commands::Index { remote, .. } => {
+                assert_eq!(remote, Some(false), "Expected --remote=false to be Some(false)");
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[test]
+    fn cli_index_remote_default_is_none() {
         let cli = Cli::parse_from(["sgrep", "index", "."]);
         match cli.command {
             Commands::Index { remote, .. } => {
-                assert!(!remote, "Expected remote to be false by default");
+                assert!(remote.is_none(), "Expected remote to be None by default");
             }
             _ => panic!("Expected Index command"),
         }
@@ -332,7 +358,7 @@ mod tests {
         let cli = Cli::parse_from(["sgrep", "watch", "--remote"]);
         match cli.command {
             Commands::Watch { remote, .. } => {
-                assert!(remote, "Expected --remote flag to be true");
+                assert_eq!(remote, Some(true), "Expected --remote flag to be Some(true)");
             }
             _ => panic!("Expected Watch command"),
         }
@@ -343,7 +369,7 @@ mod tests {
         let cli = Cli::parse_from(["sgrep", "search", "query", "--remote"]);
         match cli.command {
             Commands::Search { remote, .. } => {
-                assert!(remote, "Expected --remote flag to be true");
+                assert_eq!(remote, Some(true), "Expected --remote flag to be Some(true)");
             }
             _ => panic!("Expected Search command"),
         }
@@ -362,7 +388,7 @@ mod tests {
                     Some(true),
                     "Expected --offload flag to be Some(true)"
                 );
-                assert!(remote, "Expected --remote flag to be true");
+                assert_eq!(remote, Some(true), "Expected --remote flag to be Some(true)");
             }
             _ => panic!("Expected Index command"),
         }

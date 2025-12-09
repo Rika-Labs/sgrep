@@ -101,6 +101,7 @@ mod tests {
             indexed_at: Utc::now(),
             total_files: 1,
             total_chunks: 1,
+            embedding_model: "jina-embeddings-v2-base-code".to_string(),
         };
         RepositoryIndex::new(meta, vec![chunk], vec![vec![1.0, 2.0, 3.0]])
     }

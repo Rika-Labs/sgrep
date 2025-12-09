@@ -20,9 +20,10 @@ pub fn configure_offline_env(offline: bool) -> Result<()> {
     })?;
 
     if offline && !cache_has_model(&cache_dir) {
-        let files_list = super::MODEL_FILES
+        let config = super::EmbeddingModel::default().config();
+        let files_list = config.files
             .iter()
-            .map(|f| format!("  - {}", f))
+            .map(|(_, local)| format!("  - {}", local))
             .collect::<Vec<_>>()
             .join("\n");
         return Err(anyhow!(
@@ -32,9 +33,9 @@ pub fn configure_offline_env(offline: bool) -> Result<()> {
             Run 'sgrep config --show-model-dir' for the exact path.\n\
             Download from: {}",
             cache_dir.display(),
-            super::MODEL_NAME,
+            config.name,
             files_list,
-            super::MODEL_DOWNLOAD_URL
+            config.download_base_url
         ));
     }
 

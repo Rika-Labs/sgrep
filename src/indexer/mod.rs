@@ -447,6 +447,7 @@ impl Indexer {
             indexed_at: chrono::Utc::now(),
             total_files: files.len(),
             total_chunks: chunks.len(),
+            embedding_model: crate::embedding::EmbeddingModel::default().config().name.to_string(),
         };
 
         let repository_index = RepositoryIndex::new(metadata, chunks, vectors);
@@ -775,6 +776,7 @@ impl Indexer {
                 .collect::<HashSet<_>>()
                 .len(),
             total_chunks: chunks.len(),
+            embedding_model: crate::embedding::EmbeddingModel::default().config().name.to_string(),
         };
 
         let repository_index = RepositoryIndex::new(metadata, chunks, vectors);

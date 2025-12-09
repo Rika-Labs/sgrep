@@ -1,11 +1,30 @@
 import modal
+import os
 import socket
 import subprocess
 import time
 from pydantic import BaseModel
 from typing import List
 
-MODEL_ID = "jinaai/jina-embeddings-v2-base-code"
+# Model configuration
+MODELS = {
+    "mxbai": {
+        "id": "mixedbread-ai/mxbai-embed-xsmall-v1",
+        "native_dim": 384,
+    },
+    "jina": {
+        "id": "jinaai/jina-embeddings-v2-base-code",
+        "native_dim": 768,
+    },
+}
+
+MODEL_KEY = os.getenv("SGREP_MODAL_MODEL", "mxbai")
+if MODEL_KEY not in MODELS:
+    MODEL_KEY = "mxbai"
+MODEL_CONFIG = MODELS[MODEL_KEY]
+MODEL_ID = MODEL_CONFIG["id"]
+NATIVE_DIM = MODEL_CONFIG["native_dim"]
+
 GPU = "A10G"
 PORT = 8000
 MAX_CONCURRENT = 64
@@ -68,7 +87,7 @@ tei_image = (
 
 class EmbedRequest(BaseModel):
     texts: List[str]
-    dimension: int = 768
+    dimension: int = 384
 
 
 class EmbedResponse(BaseModel):
@@ -107,7 +126,7 @@ def embed(request: EmbedRequest) -> EmbedResponse:
     embedder = Embedder()
     embeddings = embedder.embed.remote(request.texts)
     dim = request.dimension
-    if dim != 768:
+    if NATIVE_DIM > dim:
         embeddings = [emb[:dim] for emb in embeddings]
     return EmbedResponse(
         embeddings=embeddings,
@@ -122,5 +141,7 @@ def health():
     return {
         "status": "ok",
         "model": MODEL_ID,
+        "model_key": MODEL_KEY,
+        "native_dim": NATIVE_DIM,
         "gpu": GPU,
     }

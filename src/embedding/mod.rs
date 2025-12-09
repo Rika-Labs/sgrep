@@ -6,19 +6,76 @@ pub use cache::{configure_offline_env, get_fastembed_cache_dir};
 pub use local::{Embedder, PooledEmbedder};
 
 use anyhow::Result;
+use serde::Deserialize;
 
-pub const MODEL_NAME: &str = "jina-embeddings-v2-base-code";
-pub const MODEL_DOWNLOAD_URL: &str =
-    "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/tree/main";
-pub const MODEL_FILES: &[&str] = &[
-    "model_quantized.onnx",
-    "tokenizer.json",
-    "config.json",
-    "special_tokens_map.json",
-    "tokenizer_config.json",
-];
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmbeddingModel {
+    #[default]
+    Mxbai,
+    Jina,
+}
+
+pub struct ModelConfig {
+    pub name: &'static str,
+    pub display_name: &'static str,
+    pub download_base_url: &'static str,
+    pub files: &'static [(&'static str, &'static str)],
+    pub native_dim: usize,
+    pub output_dim: usize,
+}
+
+pub const MXBAI_CONFIG: ModelConfig = ModelConfig {
+    name: "mxbai-embed-xsmall-v1",
+    display_name: "Mixedbread mxbai-embed-xsmall-v1",
+    download_base_url: "https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/resolve/main",
+    files: &[
+        ("onnx/model.onnx", "model.onnx"),
+        ("tokenizer.json", "tokenizer.json"),
+        ("config.json", "config.json"),
+        ("special_tokens_map.json", "special_tokens_map.json"),
+        ("tokenizer_config.json", "tokenizer_config.json"),
+    ],
+    native_dim: 384,
+    output_dim: 384,
+};
+
+pub const JINA_CONFIG: ModelConfig = ModelConfig {
+    name: "jina-embeddings-v2-base-code",
+    display_name: "Jina Embeddings v2 Base Code",
+    download_base_url: "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/main",
+    files: &[
+        ("onnx/model_quantized.onnx", "model_quantized.onnx"),
+        ("tokenizer.json", "tokenizer.json"),
+        ("config.json", "config.json"),
+        ("special_tokens_map.json", "special_tokens_map.json"),
+        ("tokenizer_config.json", "tokenizer_config.json"),
+    ],
+    native_dim: 768,
+    output_dim: 384,
+};
+
+impl EmbeddingModel {
+    pub fn config(&self) -> &'static ModelConfig {
+        match self {
+            EmbeddingModel::Mxbai => &MXBAI_CONFIG,
+            EmbeddingModel::Jina => &JINA_CONFIG,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "mxbai" | "mixedbread" | "mxbai-embed-xsmall-v1" => Some(EmbeddingModel::Mxbai),
+            "jina" | "jina-embeddings-v2-base-code" => Some(EmbeddingModel::Jina),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(not(test))]
 pub const DEFAULT_INIT_TIMEOUT_SECS: u64 = 120;
+#[cfg(test)]
 pub const DEFAULT_VECTOR_DIM: usize = 384;
 
 #[derive(Debug, Clone)]

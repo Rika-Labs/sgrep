@@ -4,6 +4,8 @@ use std::{env, fs};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::embedding::EmbeddingModel;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EmbeddingProviderType {
@@ -15,6 +17,8 @@ pub enum EmbeddingProviderType {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
 pub struct EmbeddingConfig {
+    #[serde(default)]
+    pub model: EmbeddingModel,
     #[serde(default)]
     pub provider: EmbeddingProviderType,
 }
@@ -152,7 +156,14 @@ impl Config {
         }
 
         let default_config = r#"[embedding]
+model = "mxbai"
 provider = "local"
+
+# Uncomment to enable remote vector storage by default:
+# remote_provider = "turbopuffer"  # or "pinecone"
+
+# [turbopuffer]
+# api_key = "your-api-key"
 "#;
 
         fs::write(&config_path, default_config)
@@ -172,6 +183,7 @@ mod tests {
     fn default_config_uses_local_provider() {
         let config = Config::default();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
+        assert_eq!(config.embedding.model, crate::embedding::EmbeddingModel::Mxbai);
     }
 
     #[test]
@@ -182,6 +194,31 @@ provider = "local"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
+        assert_eq!(config.embedding.model, crate::embedding::EmbeddingModel::Mxbai);
+    }
+
+    #[test]
+    fn parse_embedding_model_mxbai() {
+        let toml = r#"
+[embedding]
+model = "mxbai"
+provider = "local"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.embedding.model, crate::embedding::EmbeddingModel::Mxbai);
+        assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
+    }
+
+    #[test]
+    fn parse_embedding_model_jina() {
+        let toml = r#"
+[embedding]
+model = "jina"
+provider = "modal"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.embedding.model, crate::embedding::EmbeddingModel::Jina);
+        assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
     }
 
     #[test]
@@ -189,6 +226,7 @@ provider = "local"
         let toml = "";
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
+        assert_eq!(config.embedding.model, crate::embedding::EmbeddingModel::Mxbai);
     }
 
     #[test]
@@ -198,6 +236,7 @@ provider = "local"
         env::set_var("SGREP_CONFIG", temp.join("nonexistent.toml"));
         let config = Config::load().unwrap();
         assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
+        assert_eq!(config.embedding.model, crate::embedding::EmbeddingModel::Mxbai);
         env::remove_var("SGREP_CONFIG");
     }
 
@@ -250,6 +289,7 @@ provider = "local"
         assert!(path.exists());
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("local"));
+        assert!(contents.contains("mxbai"));
 
         env::remove_var("SGREP_CONFIG");
         std::fs::remove_dir_all(&temp).ok();
@@ -379,5 +419,33 @@ namespace = "ns"
             config.remote_provider,
             Some(RemoteProviderType::Turbopuffer)
         );
+    }
+
+    #[test]
+    fn parse_remote_provider_none() {
+        let toml = r#"
+remote_provider = "none"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.remote_provider, Some(RemoteProviderType::None));
+    }
+
+    #[test]
+    fn parse_remote_provider_pinecone() {
+        let toml = r#"
+remote_provider = "pinecone"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.remote_provider, Some(RemoteProviderType::Pinecone));
+    }
+
+    #[test]
+    fn remote_provider_defaults_to_none_when_missing() {
+        let toml = r#"
+[embedding]
+model = "mxbai"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.remote_provider, None);
     }
 }

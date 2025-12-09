@@ -31,12 +31,11 @@ use ureq::{Agent, AgentBuilder, Proxy};
 use super::cache::{get_fastembed_cache_dir, setup_fastembed_cache_dir};
 #[cfg(not(test))]
 use super::providers::select_execution_providers;
-use super::BatchEmbedder;
-use super::DEFAULT_VECTOR_DIM;
-
 #[cfg(not(test))]
-const JINA_CODE_BASE_URL: &str =
-    "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/main";
+use super::EmbeddingModel;
+use super::BatchEmbedder;
+#[cfg(test)]
+use super::DEFAULT_VECTOR_DIM;
 
 #[cfg(not(test))]
 const DEFAULT_MAX_CACHE: u64 = 100_000;
@@ -67,25 +66,31 @@ fn create_http_agent() -> Agent {
 #[cfg_attr(test, derive(Clone, Default))]
 pub struct Embedder {
     #[cfg(not(test))]
+    model: EmbeddingModel,
+    #[cfg(not(test))]
     cache: Cache<String, Arc<Vec<f32>>>,
     #[cfg(not(test))]
-    model: Arc<std::sync::Mutex<TextEmbedding>>,
+    inner: Arc<std::sync::Mutex<TextEmbedding>>,
 }
 
 #[cfg(not(test))]
 impl Default for Embedder {
     fn default() -> Self {
-        Self::new(DEFAULT_MAX_CACHE)
+        Self::with_default_model(DEFAULT_MAX_CACHE)
     }
 }
 
 #[cfg(not(test))]
 impl Embedder {
-    pub fn new(max_cache: u64) -> Self {
-        Self::with_options(max_cache, true)
+    pub fn new(model: EmbeddingModel, max_cache: u64) -> Self {
+        Self::with_options(model, max_cache, true)
     }
 
-    fn with_options(max_cache: u64, show_download_progress: bool) -> Self {
+    pub fn with_default_model(max_cache: u64) -> Self {
+        Self::new(EmbeddingModel::default(), max_cache)
+    }
+
+    fn with_options(model: EmbeddingModel, max_cache: u64, show_download_progress: bool) -> Self {
         let _init_guard = INIT_LOCK.lock().unwrap();
 
         let _cache_guard = setup_fastembed_cache_dir();
@@ -98,16 +103,17 @@ impl Embedder {
                 .unwrap_or(super::DEFAULT_INIT_TIMEOUT_SECS),
         );
 
-        let model =
-            init_model_with_timeout(execution_providers, show_download_progress, init_timeout)
+        let text_embedding =
+            init_model_with_timeout(model, execution_providers, show_download_progress, init_timeout)
                 .expect(
                     "Failed to initialize embedding model (try increasing SGREP_INIT_TIMEOUT_SECS)",
                 );
         drop(_cache_guard);
 
         Self {
+            model,
             cache: Cache::builder().max_capacity(max_cache).build(),
-            model: Arc::new(std::sync::Mutex::new(model)),
+            inner: Arc::new(std::sync::Mutex::new(text_embedding)),
         }
     }
 
@@ -115,13 +121,18 @@ impl Embedder {
         if let Some(vec) = self.cache.get(text) {
             return Ok(vec.as_ref().clone());
         }
-        let mut model = self.model.lock().unwrap();
-        let embeddings = model.embed(vec![text], None)?;
+        let mut inner = self.inner.lock().unwrap();
+        let embeddings = inner.embed(vec![text], None)?;
         let mut vector = embeddings
             .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("No embedding generated"))?;
-        vector.truncate(DEFAULT_VECTOR_DIM);
+
+        let config = self.model.config();
+        if config.native_dim != config.output_dim {
+            vector.truncate(config.output_dim);
+        }
+
         self.cache
             .insert(text.to_string(), Arc::new(vector.clone()));
         Ok(vector)
@@ -142,12 +153,15 @@ impl Embedder {
         }
 
         if !uncached.is_empty() {
-            let mut model = self.model.lock().unwrap();
-            let embeddings = model.embed(uncached.clone(), None)?;
+            let mut inner = self.inner.lock().unwrap();
+            let embeddings = inner.embed(uncached.clone(), None)?;
 
+            let config = self.model.config();
             for (embedding, &idx) in embeddings.iter().zip(&uncached_indices) {
                 let mut truncated = embedding.clone();
-                truncated.truncate(DEFAULT_VECTOR_DIM);
+                if config.native_dim != config.output_dim {
+                    truncated.truncate(config.output_dim);
+                }
                 results[idx] = truncated.clone();
                 self.cache.insert(texts[idx].clone(), Arc::new(truncated));
             }
@@ -185,7 +199,7 @@ impl Embedder {
     }
 
     pub fn dimension(&self) -> usize {
-        DEFAULT_VECTOR_DIM
+        self.model.config().output_dim
     }
 }
 
@@ -265,7 +279,7 @@ impl Clone for PooledEmbedder {
 
 #[cfg(not(test))]
 impl PooledEmbedder {
-    pub fn new(pool_size: usize, max_cache: u64) -> Self {
+    pub fn new(model: EmbeddingModel, pool_size: usize, max_cache: u64) -> Self {
         let execution_providers = select_execution_providers();
         let show_progress = pool_size == 1;
 
@@ -283,7 +297,8 @@ impl PooledEmbedder {
             let _init_guard = INIT_LOCK.lock().unwrap();
             let _cache_guard = setup_fastembed_cache_dir();
 
-            let model = init_model_with_timeout(
+            let text_embedding = init_model_with_timeout(
+                model,
                 execution_providers.clone(),
                 show_progress && i == 0,
                 init_timeout,
@@ -294,8 +309,9 @@ impl PooledEmbedder {
             drop(_cache_guard);
 
             let embedder = Embedder {
+                model,
                 cache: cache.clone(),
-                model: Arc::new(Mutex::new(model)),
+                inner: Arc::new(Mutex::new(text_embedding)),
             };
             pool.push(embedder);
         }
@@ -305,6 +321,10 @@ impl PooledEmbedder {
             counter: AtomicUsize::new(0),
             _cache: cache,
         }
+    }
+
+    pub fn with_default_model(pool_size: usize, max_cache: u64) -> Self {
+        Self::new(EmbeddingModel::default(), pool_size, max_cache)
     }
 
     fn get_embedder(&self) -> &Embedder {
@@ -333,14 +353,14 @@ impl BatchEmbedder for PooledEmbedder {
     }
 
     fn dimension(&self) -> usize {
-        DEFAULT_VECTOR_DIM
+        self.get_embedder().dimension()
     }
 }
 
 #[cfg(not(test))]
 impl Default for PooledEmbedder {
     fn default() -> Self {
-        Self::new(1, DEFAULT_MAX_CACHE)
+        Self::with_default_model(1, DEFAULT_MAX_CACHE)
     }
 }
 
@@ -374,8 +394,8 @@ impl Default for PooledEmbedder {
 }
 
 #[cfg(not(test))]
-fn get_jina_code_cache_dir() -> PathBuf {
-    get_fastembed_cache_dir().join(super::MODEL_NAME)
+fn get_model_cache_dir(model: EmbeddingModel) -> PathBuf {
+    get_fastembed_cache_dir().join(model.config().name)
 }
 
 #[cfg(not(test))]
@@ -398,24 +418,7 @@ fn download_file(url: &str, path: &std::path::Path, show_progress: bool) -> Resu
     }
 
     let agent = create_http_agent();
-    let response = agent.get(url).call().map_err(|e| {
-        let cache_dir = get_jina_code_cache_dir();
-        let files_list = super::MODEL_FILES.join(", ");
-        anyhow!(
-            "Failed to download {}: {}\n\n\
-                If HuggingFace is blocked in your region:\n\
-                1. Use proxy: export HTTPS_PROXY=http://proxy:port\n\
-                2. Manual download: Place files in {}\n\
-                   Required: {}\n\n\
-                Run 'sgrep config --show-model-dir' to see the exact path.\n\
-                Download from: {}",
-            url,
-            e,
-            cache_dir.display(),
-            files_list,
-            super::MODEL_DOWNLOAD_URL
-        )
-    })?;
+    let response = agent.get(url).call()?;
 
     let mut bytes = Vec::new();
     response.into_reader().read_to_end(&mut bytes)?;
@@ -427,40 +430,40 @@ fn download_file(url: &str, path: &std::path::Path, show_progress: bool) -> Resu
 }
 
 #[cfg(not(test))]
-fn load_jina_code_model(show_download_progress: bool) -> Result<UserDefinedEmbeddingModel> {
-    let cache_dir = get_jina_code_cache_dir();
+fn load_model(model: EmbeddingModel, show_download_progress: bool) -> Result<UserDefinedEmbeddingModel> {
+    let config = model.config();
+    let cache_dir = get_model_cache_dir(model);
 
-    let onnx_path = cache_dir.join("model_quantized.onnx");
+    for (remote_path, local_name) in config.files {
+        let url = format!("{}/{}", config.download_base_url, remote_path);
+        let local_path = cache_dir.join(local_name);
+        download_file(&url, &local_path, show_download_progress).with_context(|| {
+            let files_list: Vec<&str> = config.files.iter().map(|(_, local)| *local).collect();
+            format!(
+                "Failed to download {}\n\n\
+                If HuggingFace is blocked in your region:\n\
+                1. Use proxy: export HTTPS_PROXY=http://proxy:port\n\
+                2. Manual download: Place files in {}\n\
+                   Required: {}\n\n\
+                Run 'sgrep config --show-model-dir' to see the exact path.\n\
+                Download from: {}",
+                url,
+                cache_dir.display(),
+                files_list.join(", "),
+                config.download_base_url
+            )
+        })?;
+    }
+
+    let onnx_local_name = config.files.iter()
+        .find(|(remote, _)| remote.ends_with(".onnx"))
+        .map(|(_, local)| *local)
+        .expect("ModelConfig must have an ONNX file");
+    let onnx_path = cache_dir.join(onnx_local_name);
     let tokenizer_path = cache_dir.join("tokenizer.json");
     let config_path = cache_dir.join("config.json");
     let special_tokens_path = cache_dir.join("special_tokens_map.json");
     let tokenizer_config_path = cache_dir.join("tokenizer_config.json");
-
-    download_file(
-        &format!("{}/onnx/model_quantized.onnx", JINA_CODE_BASE_URL),
-        &onnx_path,
-        show_download_progress,
-    )?;
-    download_file(
-        &format!("{}/tokenizer.json", JINA_CODE_BASE_URL),
-        &tokenizer_path,
-        show_download_progress,
-    )?;
-    download_file(
-        &format!("{}/config.json", JINA_CODE_BASE_URL),
-        &config_path,
-        show_download_progress,
-    )?;
-    download_file(
-        &format!("{}/special_tokens_map.json", JINA_CODE_BASE_URL),
-        &special_tokens_path,
-        show_download_progress,
-    )?;
-    download_file(
-        &format!("{}/tokenizer_config.json", JINA_CODE_BASE_URL),
-        &tokenizer_config_path,
-        show_download_progress,
-    )?;
 
     let onnx_file =
         fs::read(&onnx_path).with_context(|| format!("Failed to read {}", onnx_path.display()))?;
@@ -486,6 +489,7 @@ fn load_jina_code_model(show_download_progress: bool) -> Result<UserDefinedEmbed
 
 #[cfg(not(test))]
 fn init_model_with_timeout(
+    model: EmbeddingModel,
     execution_providers: Vec<ExecutionProviderDispatch>,
     show_download_progress: bool,
     timeout: Duration,
@@ -497,7 +501,7 @@ fn init_model_with_timeout(
 
     thread::spawn(move || {
         let result = (|| {
-            let model_data = load_jina_code_model(show_download_progress)?;
+            let model_data = load_model(model, show_download_progress)?;
             TextEmbedding::try_new_from_user_defined(
                 model_data,
                 InitOptionsUserDefined::default().with_execution_providers(execution_providers),
