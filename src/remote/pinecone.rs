@@ -62,6 +62,7 @@ impl RemoteVectorStore for PineconeStore {
             end_line: usize,
             content: &'a str,
             language: &'a str,
+            symbols: &'a [String],
         }
 
         #[derive(Serialize)]
@@ -91,6 +92,7 @@ impl RemoteVectorStore for PineconeStore {
                         end_line: c.end_line,
                         content: &c.content,
                         language: &c.language,
+                        symbols: &c.symbols,
                     },
                 })
                 .collect();
@@ -243,6 +245,8 @@ impl RemoteVectorStore for PineconeStore {
             end_line: Option<usize>,
             content: Option<String>,
             language: Option<String>,
+            #[serde(default)]
+            symbols: Vec<String>,
         }
 
         #[derive(Deserialize)]
@@ -286,6 +290,7 @@ impl RemoteVectorStore for PineconeStore {
                     end_line: meta.end_line.unwrap_or(0),
                     content: meta.content.unwrap_or_default(),
                     language: meta.language.unwrap_or_else(|| "plain".to_string()),
+                    symbols: meta.symbols,
                 })
             })
             .collect();
@@ -364,6 +369,7 @@ mod tests {
             end_line: 10,
             content: format!("content {}", id),
             language: "rust".to_string(),
+            symbols: Vec::new(),
         }
     }
 

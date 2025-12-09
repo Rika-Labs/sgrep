@@ -30,7 +30,7 @@ pub struct IndexStats {
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use memmap2::Mmap;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
@@ -54,11 +54,23 @@ const GRAPH_FILE: &str = "graph.bin.zst";
 const HNSW_FILE: &str = "hnsw.usearch";
 const HNSW_HEADER_FILE: &str = "hnsw_header.bin";
 const INDEX_FORMAT_VERSION: u32 = 6;
+const BUILDING_FILE: &str = "index.building";
 
 #[derive(Debug, Clone)]
 pub struct IndexStore {
     root: PathBuf,
     repo_hash: String,
+    repo_path: PathBuf,
+}
+
+pub struct BuildGuard {
+    path: PathBuf,
+}
+
+impl Drop for BuildGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 #[allow(dead_code)]
@@ -89,7 +101,30 @@ impl IndexStore {
 
         fs::create_dir_all(&root)
             .with_context(|| format!("Failed to create {}", root.display()))?;
-        Ok(Self { root, repo_hash })
+        Ok(Self {
+            root,
+            repo_hash,
+            repo_path: absolute,
+        })
+    }
+
+    pub fn is_building(&self) -> bool {
+        self.root.join(BUILDING_FILE).exists()
+    }
+
+    pub fn start_build_guard(&self) -> Result<BuildGuard> {
+        let path = self.root.join(BUILDING_FILE);
+        if path.exists() {
+            return Err(anyhow!(
+                "Index build already in progress for {}",
+                self.repo_path.display()
+            ));
+        }
+
+        fs::write(&path, b"building")
+            .with_context(|| format!("Failed to create {}", path.display()))?;
+
+        Ok(BuildGuard { path })
     }
 
     pub fn load(&self) -> Result<Option<RepositoryIndex>> {

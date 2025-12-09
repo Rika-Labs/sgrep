@@ -8,14 +8,13 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use crate::config::{Config, RemoteProviderType};
 use crate::store::IndexStore;
 
-pub mod bundle;
+pub mod graph_blob;
 
 const UPLOAD_TEMPLATE: &str = "{prefix} Uploading vectors to {msg} ({pos}/{len}, {percent}%)";
 
 pub mod pinecone;
 pub mod turbopuffer;
 
-/// Minimal chunk representation for remote providers.
 #[derive(Clone, Debug)]
 pub struct RemoteChunk {
     pub id: String,
@@ -25,6 +24,7 @@ pub struct RemoteChunk {
     pub end_line: usize,
     pub content: String,
     pub language: String,
+    pub symbols: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +37,7 @@ pub struct RemoteSearchHit {
     pub end_line: usize,
     pub content: String,
     pub language: String,
+    pub symbols: Vec<String>,
 }
 
 pub trait RemoteVectorStore: Send + Sync {
@@ -136,86 +137,6 @@ impl RemoteFactory {
             RemoteProviderType::None => Ok(None),
         }
     }
-
-    pub fn build_bundle_store(
-        cfg: &Config,
-        repo_hash: &str,
-    ) -> Result<Option<Arc<dyn RemoteVectorStore>>> {
-        let mut cfg = cfg.clone();
-        if cfg.remote_provider == Some(RemoteProviderType::None) {
-            cfg.remote_provider = None;
-        }
-
-        // Reuse the same inference rules as build_from_config
-        let provider = cfg
-            .remote_provider
-            .clone()
-            .unwrap_or(RemoteProviderType::None);
-
-        let inferred = if provider == RemoteProviderType::None {
-            if cfg.pinecone.api_key.is_some() && cfg.pinecone.endpoint.is_some() {
-                Some(RemoteProviderType::Pinecone)
-            } else if cfg.turbopuffer.api_key.is_some() {
-                Some(RemoteProviderType::Turbopuffer)
-            } else {
-                None
-            }
-        } else {
-            Some(provider)
-        };
-
-        let bundle_suffix = "-bundle";
-
-        match inferred {
-            Some(RemoteProviderType::Turbopuffer) => {
-                let api_key = cfg
-                    .turbopuffer
-                    .api_key
-                    .clone()
-                    .or_else(|| std::env::var("TURBOPUFFER_API_KEY").ok())
-                    .ok_or_else(|| {
-                        anyhow!("Turbopuffer API key missing (set config or TURBOPUFFER_API_KEY)")
-                    })?;
-                let namespace = format!(
-                    "{}-{}{}",
-                    cfg.turbopuffer.namespace_prefix, repo_hash, bundle_suffix
-                );
-                let store = turbopuffer::TurbopufferStore::new(
-                    api_key,
-                    namespace,
-                    cfg.turbopuffer.region.clone(),
-                    cfg.turbopuffer.timeout_secs,
-                );
-                Ok(Some(Arc::new(store)))
-            }
-            Some(RemoteProviderType::Pinecone) => {
-                let api_key = cfg
-                    .pinecone
-                    .api_key
-                    .clone()
-                    .or_else(|| std::env::var("PINECONE_API_KEY").ok())
-                    .ok_or_else(|| {
-                        anyhow!("Pinecone API key missing (set config or PINECONE_API_KEY)")
-                    })?;
-                let endpoint = cfg.pinecone.endpoint.clone().ok_or_else(|| {
-                    anyhow!("Pinecone endpoint missing (set remote.pinecone.endpoint)")
-                })?;
-                let namespace = cfg
-                    .pinecone
-                    .namespace
-                    .clone()
-                    .unwrap_or_else(|| repo_hash.to_string());
-                let store = pinecone::PineconeStore::new(
-                    api_key,
-                    endpoint,
-                    format!("{}{}", namespace, bundle_suffix),
-                    cfg.pinecone.timeout_secs,
-                );
-                Ok(Some(Arc::new(store)))
-            }
-            _ => Ok(None),
-        }
-    }
 }
 
 pub fn push_remote_index(
@@ -247,6 +168,7 @@ pub fn push_remote_index(
             end_line: chunk.end_line,
             content: chunk.text.clone(),
             language: chunk.language.clone(),
+            symbols: Vec::new(),
         })
         .collect();
 
@@ -267,22 +189,6 @@ pub fn push_remote_index(
 
     pb.finish_with_message(remote.name().to_string());
     Ok(())
-}
-
-pub fn push_remote_bundle(
-    path: &Path,
-    remote: &Arc<dyn RemoteVectorStore>,
-    vector_dim: usize,
-    reset_namespace: bool,
-) -> Result<bundle::BundleManifest> {
-    let parts = bundle::build_bundle(path, None)?;
-
-    if reset_namespace {
-        bundle::delete_bundle_namespace(remote.as_ref())?;
-    }
-
-    bundle::upload_bundle(remote.as_ref(), &parts, vector_dim)?;
-    Ok(parts.manifest)
 }
 
 #[cfg(test)]
@@ -386,6 +292,7 @@ mod tests {
                 end_line: 2,
                 content: "code".to_string(),
                 language: "rust".to_string(),
+                symbols: Vec::new(),
             }
         }
 

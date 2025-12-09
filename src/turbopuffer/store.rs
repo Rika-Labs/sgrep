@@ -14,6 +14,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 const MAX_RETRIES: usize = 3;
 const MAX_VECTORS_PER_REQUEST: usize = 1000;
 const TP_ATTR_LIMIT_BYTES: usize = 3800; // under 4KB filterable attribute limit
+const GRAPH_BLOB_ID: &str = "__sgrep_graph__";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchResult {
@@ -25,6 +26,8 @@ pub struct SearchResult {
     pub end_line: Option<usize>,
     pub content: Option<String>,
     pub language: Option<String>,
+    #[serde(default)]
+    pub symbols: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -36,6 +39,7 @@ struct UpsertRow {
     end_line: usize,
     content: String,
     language: String,
+    symbols: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -228,8 +232,13 @@ impl RemoteVectorStore for TurbopufferStore {
                         path: c.path.clone(),
                         start_line: c.start_line,
                         end_line: c.end_line,
-                        content: Self::truncate_attr(&c.content),
+                        content: if c.id == GRAPH_BLOB_ID {
+                            c.content.clone()
+                        } else {
+                            Self::truncate_attr(&c.content)
+                        },
                         language: c.language.clone(),
+                        symbols: c.symbols.clone(),
                     })
                     .collect(),
             );
@@ -267,8 +276,13 @@ impl RemoteVectorStore for TurbopufferStore {
                         path: c.path.clone(),
                         start_line: c.start_line,
                         end_line: c.end_line,
-                        content: Self::truncate_attr(&c.content),
+                        content: if c.id == GRAPH_BLOB_ID {
+                            c.content.clone()
+                        } else {
+                            Self::truncate_attr(&c.content)
+                        },
                         language: c.language.clone(),
+                        symbols: c.symbols.clone(),
                     })
                     .collect(),
             );
@@ -303,6 +317,7 @@ impl RemoteVectorStore for TurbopufferStore {
                 "end_line".to_string(),
                 "content".to_string(),
                 "language".to_string(),
+                "symbols".to_string(),
             ],
         };
 
@@ -318,6 +333,7 @@ impl RemoteVectorStore for TurbopufferStore {
                 end_line: r.end_line.unwrap_or(0),
                 content: r.content.unwrap_or_default(),
                 language: r.language.unwrap_or_else(|| "plain".to_string()),
+                symbols: r.symbols,
             })
             .collect();
         Ok(hits)
@@ -465,6 +481,7 @@ mod tests {
                 end_line: 1,
                 content: "c".into(),
                 language: "rust".into(),
+                symbols: Vec::new(),
             },
             UpsertRow {
                 id: "a".into(),
@@ -474,6 +491,7 @@ mod tests {
                 end_line: 2,
                 content: "c2".into(),
                 language: "rust".into(),
+                symbols: Vec::new(),
             },
         ];
         let deduped = TurbopufferStore::dedup_rows(rows);
@@ -496,6 +514,7 @@ mod tests {
             end_line: 10,
             content: format!("content {}", id),
             language: "rust".to_string(),
+            symbols: Vec::new(),
         }
     }
 

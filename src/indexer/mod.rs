@@ -133,6 +133,13 @@ impl Indexer {
             debug!("Indexing: {}", root.display());
         }
         let store = IndexStore::new(&root)?;
+        if store.is_building() {
+            return Err(anyhow!(
+                "Index build already in progress for {}",
+                root.display()
+            ));
+        }
+        let _build_guard = store.start_build_guard()?;
         let existing_index = if request.force {
             None
         } else {

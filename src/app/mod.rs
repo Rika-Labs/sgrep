@@ -10,7 +10,6 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use console::{style, Term};
 use indicatif::HumanDuration;
-use tracing::{info, warn};
 
 fn format_info(msg: &str) -> String {
     format!("{} {}", style("[info]").blue().bold(), msg)
@@ -631,38 +630,52 @@ fn handle_search(
     let mut engine = search::SearchEngine::new(embedder.clone());
 
     let store_result = store::IndexStore::new(params.path)?;
+
+    if store_result.is_building() {
+        return Err(anyhow!(
+            "Index build in progress for {}. Wait for `sgrep index` to finish.",
+            params.path.display()
+        ));
+    }
+
     if let Ok(Some(graph)) = store_result.load_graph() {
         engine.set_graph(graph);
     }
 
-    if let Ok(Some(mmap_index)) = store_result.load_mmap() {
-        if mmap_index.metadata.vector_dim == embedder.dimension() {
-            let results = engine.search_mmap(
-                &mmap_index,
-                params.query,
-                search::SearchOptions {
-                    limit: params.limit,
-                    include_context: params.context,
-                    glob: params.glob.clone(),
-                    filters: params.filters.clone(),
-                    dedup: search::DedupOptions::default(),
-                },
-            )?;
-            let elapsed = start.elapsed();
-            let repo_index = mmap_index.to_repository_index();
-            return render_results(RenderContext {
-                results,
-                query: params.query,
-                limit: params.limit,
-                index: &repo_index,
-                elapsed,
-                json: params.json,
-                debug: params.debug,
-            });
+    if let Some(mmap_index) = store_result.load_mmap()? {
+        if mmap_index.metadata.vector_dim != embedder.dimension() {
+            return Err(anyhow!(
+                "Index vector dimension {} does not match embedder {}. Re-run `sgrep index --force`.",
+                mmap_index.metadata.vector_dim,
+                embedder.dimension()
+            ));
         }
+
+        let results = engine.search_mmap(
+            &mmap_index,
+            params.query,
+            search::SearchOptions {
+                limit: params.limit,
+                include_context: params.context,
+                glob: params.glob.clone(),
+                filters: params.filters.clone(),
+                dedup: search::DedupOptions::default(),
+            },
+        )?;
+        let elapsed = start.elapsed();
+        let repo_index = mmap_index.to_repository_index();
+        return render_results(RenderContext {
+            results,
+            query: params.query,
+            limit: params.limit,
+            index: &repo_index,
+            elapsed,
+            json: params.json,
+            debug: params.debug,
+        });
     }
 
-    let index = load_or_index(params.path, embedder.clone())?;
+    let index = load_index_for_search(params.path, &store_result, embedder.clone())?;
     let results = engine.search(
         &index,
         params.query,
@@ -759,7 +772,11 @@ fn handle_remote_search(
         })
         .collect();
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     if let Some(ref g) = graph {
         for result in &mut results {
@@ -773,7 +790,11 @@ fn handle_remote_search(
                 }
             }
         }
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     results.truncate(params.limit);
@@ -801,7 +822,10 @@ fn handle_remote_search(
     })
 }
 
-fn build_remote_store(remote_flag: bool, path: &Path) -> Result<Option<Arc<dyn RemoteVectorStore>>> {
+fn build_remote_store(
+    remote_flag: bool,
+    path: &Path,
+) -> Result<Option<Arc<dyn RemoteVectorStore>>> {
     if !remote_flag {
         return Ok(None);
     }
@@ -859,89 +883,40 @@ fn handle_watch(
     watcher.run(&path)
 }
 
-fn load_or_index(
+fn load_index_for_search(
     path: &Path,
+    store: &store::IndexStore,
     embedder: Arc<dyn embedding::BatchEmbedder>,
 ) -> Result<store::RepositoryIndex> {
-    let store = store::IndexStore::new(path)?;
-    match store.load() {
-        Ok(Some(index)) => {
-            if index.metadata.vector_dim != embedder.dimension() {
-                warn!(
-                    "msg" = "index vector dim mismatch, rebuilding",
-                    "index_dim" = index.metadata.vector_dim,
-                    "embedder_dim" = embedder.dimension()
-                );
-                return rebuild_index(path, embedder);
-            }
-            if index.chunks.len() != index.vectors.len() {
-                warn!(
-                    "msg" = "index chunk/vector length mismatch, rebuilding",
-                    "chunks" = index.chunks.len(),
-                    "vectors" = index.vectors.len()
-                );
-                return rebuild_index(path, embedder);
-            }
-            Ok(index)
-        }
+    let index = match store.load() {
+        Ok(Some(index)) => index,
         Ok(None) => {
-            info!("msg" = "no index found, building", "path" = %path.display());
-            rebuild_index(path, embedder)
+            return Err(anyhow!(
+                "No index found for {}. Run `sgrep index` first.",
+                path.display()
+            ))
         }
         Err(err) => {
-            warn!("error" = %err, "msg" = "failed to load index, rebuilding");
-            rebuild_index(path, embedder)
+            return Err(anyhow!(
+                "Failed to load index for {}: {err}. Re-run `sgrep index --force`.",
+                path.display()
+            ))
         }
-    }
-}
-
-fn rebuild_index(
-    path: &Path,
-    embedder: Arc<dyn embedding::BatchEmbedder>,
-) -> Result<store::RepositoryIndex> {
-    eprintln!(
-        "[info] Building index for {} (this happens once per repo)",
-        path.display()
-    );
-
-    let indexer = indexer::Indexer::new(embedder.clone());
-    let report = indexer
-        .build_index(indexer::IndexRequest {
-            path: path.to_path_buf(),
-            force: true,
-            batch_size: None,
-            profile: false,
-            dirty: None,
-        })
-        .with_context(|| format!("Index build failed for {}", path.display()))?;
-
-    eprintln!(
-        "[ok] Indexed {} files ({} chunks) in {}",
-        report.files_indexed,
-        report.chunks_indexed,
-        HumanDuration(report.duration)
-    );
-
-    if report.graph_symbols > 0 {
-        eprintln!(
-            "  {} symbols extracted, {} relationships",
-            report.graph_symbols, report.graph_edges
-        );
-    }
-
-    let store = store::IndexStore::new(path)?;
-    let index = store.load()?.ok_or_else(|| {
-        anyhow!(
-            "Index build finished but no index was saved. Try deleting ~/.sgrep/indexes/{} and re-running.",
-            store.repo_hash()
-        )
-    })?;
+    };
 
     if index.metadata.vector_dim != embedder.dimension() {
         return Err(anyhow!(
-            "Index vector dimension {} does not match embedder {}. Try setting SGREP_DEVICE=cpu and rerun `sgrep search`.",
+            "Index vector dimension {} does not match embedder {}. Re-run `sgrep index --force`.",
             index.metadata.vector_dim,
             embedder.dimension()
+        ));
+    }
+
+    if index.chunks.len() != index.vectors.len() {
+        return Err(anyhow!(
+            "Index chunks ({}) do not match vectors ({}). Re-run `sgrep index --force`.",
+            index.chunks.len(),
+            index.vectors.len()
         ));
     }
 
@@ -1008,7 +983,6 @@ mod tests {
     use crate::chunker::CodeChunk;
     use crate::remote::{RemoteChunk, RemoteSearchHit};
     use crate::store::{IndexMetadata, RepositoryIndex};
-    use base64::Engine;
     use chrono::Utc;
     use serial_test::serial;
     use std::any::type_name_of_val;
@@ -1030,6 +1004,19 @@ mod tests {
 
         fn dimension(&self) -> usize {
             4
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct WideTestEmbedder;
+
+    impl embedding::BatchEmbedder for WideTestEmbedder {
+        fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
+        }
+
+        fn dimension(&self) -> usize {
+            384
         }
     }
 
@@ -1188,10 +1175,6 @@ mod tests {
         fn query_called(&self) -> bool {
             !self.queries.lock().unwrap().is_empty()
         }
-
-        fn last_query_top_k(&self) -> Option<usize> {
-            self.queries.lock().unwrap().last().map(|(_, k)| *k)
-        }
     }
 
     impl RemoteVectorStore for MockRemoteStore {
@@ -1257,21 +1240,6 @@ mod tests {
         } else {
             env::remove_var("SGREP_CONFIG");
         }
-    }
-
-    #[test]
-    #[serial]
-    fn load_or_index_rebuilds_on_dim_mismatch() {
-        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
-        let repo = temp_repo();
-        std::env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
-        let store = store::IndexStore::new(&repo).unwrap();
-        let bad_index = sample_index(&repo);
-        store.save(&bad_index).unwrap();
-
-        let index = load_or_index(&repo, embedder.clone()).unwrap();
-        assert_eq!(index.metadata.vector_dim, embedder.dimension());
-        std::fs::remove_dir_all(&repo).ok();
     }
 
     #[test]
@@ -1593,23 +1561,53 @@ mod tests {
 
     #[test]
     #[serial]
-    fn load_or_index_rebuilds_on_length_mismatch() {
+    fn load_index_for_search_errors_on_missing_index() {
         let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
         let store = store::IndexStore::new(&repo).unwrap();
-        let mut index = sample_index(&repo);
-        index.vectors.clear(); // mismatch lengths
-        store.save(&index).unwrap();
 
-        let rebuilt = load_or_index(&repo, embedder.clone()).unwrap();
-        assert_eq!(rebuilt.metadata.vector_dim, embedder.dimension());
+        let err = load_index_for_search(&repo, &store, embedder.clone()).unwrap_err();
+        assert!(format!("{err}").contains("No index found"));
+
         std::fs::remove_dir_all(&repo).ok();
     }
 
     #[test]
     #[serial]
-    fn load_or_index_recovers_from_corrupt_index() {
+    fn load_index_for_search_errors_on_dim_mismatch() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let store = store::IndexStore::new(&repo).unwrap();
+        let bad_index = sample_index(&repo);
+        store.save(&bad_index).unwrap();
+
+        let err = load_index_for_search(&repo, &store, embedder.clone()).unwrap_err();
+        assert!(format!("{err}").contains("vector dimension"));
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn load_index_for_search_errors_on_length_mismatch() {
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let repo = temp_repo();
+        env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
+        let store = store::IndexStore::new(&repo).unwrap();
+        let mut index = sample_index(&repo);
+        index.vectors.clear();
+        index.metadata.vector_dim = embedder.dimension();
+        store.save(&index).unwrap();
+
+        let err = load_index_for_search(&repo, &store, embedder.clone()).unwrap_err();
+        assert!(format!("{err}").contains("Re-run `sgrep index --force`"));
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn load_index_for_search_errors_on_corrupt_index() {
         let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
@@ -1622,8 +1620,8 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"not a valid index").unwrap();
 
-        let rebuilt = load_or_index(&repo, embedder.clone()).unwrap();
-        assert_eq!(rebuilt.metadata.vector_dim, embedder.dimension());
+        let err = load_index_for_search(&repo, &store, embedder.clone()).unwrap_err();
+        assert!(format!("{err}").contains("Failed to load index"));
         std::fs::remove_dir_all(&repo).ok();
     }
 
@@ -1671,17 +1669,30 @@ mod tests {
 
     #[test]
     #[serial]
-    fn load_or_index_rebuilds_on_chunk_vector_mismatch() {
+    fn handle_search_errors_when_build_in_progress() {
         let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
         let store = store::IndexStore::new(&repo).unwrap();
-        let mut index = sample_index(&repo);
-        index.vectors.pop();
-        store.save(&index).unwrap();
+        let _guard = store.start_build_guard().unwrap();
 
-        let rebuilt = load_or_index(&repo, embedder.clone()).unwrap();
-        assert_eq!(rebuilt.metadata.vector_dim, embedder.dimension());
+        let err = handle_search(
+            embedder,
+            SearchParams {
+                query: "hi",
+                path: repo.as_path(),
+                limit: 1,
+                context: false,
+                glob: vec![],
+                filters: vec![],
+                json: false,
+                debug: false,
+                remote: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(format!("{err}").contains("Index build in progress"));
         std::fs::remove_dir_all(&repo).ok();
     }
 
@@ -1740,7 +1751,7 @@ mod tests {
         let repo = temp_repo();
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
         // ensure index exists
-        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(TestEmbedder::default());
+        let embedder: Arc<dyn embedding::BatchEmbedder> = Arc::new(WideTestEmbedder::default());
         let indexer = indexer::Indexer::new(embedder.clone());
         indexer
             .build_index(indexer::IndexRequest {
