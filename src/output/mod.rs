@@ -39,7 +39,7 @@ impl JsonResponse {
         query: &str,
         limit: usize,
         results: Vec<search::SearchResult>,
-        index: &store::RepositoryIndex,
+        index_meta: &store::IndexMetadata,
         duration: Duration,
     ) -> Self {
         let matches = results
@@ -55,7 +55,6 @@ impl JsonResponse {
             })
             .collect();
 
-        let index_meta = &index.metadata;
         Self {
             query: query.to_string(),
             limit,
@@ -77,23 +76,13 @@ impl JsonResponse {
 mod tests {
     use super::*;
     use crate::chunker::CodeChunk;
-    use crate::store::{IndexMetadata, RepositoryIndex};
+    use crate::store::IndexMetadata;
     use chrono::Utc;
     use std::path::Path;
     use uuid::Uuid;
 
-    fn sample_index(root: &Path) -> RepositoryIndex {
-        let chunk = CodeChunk {
-            id: Uuid::new_v4(),
-            path: root.join("lib.rs"),
-            language: "rust".into(),
-            start_line: 1,
-            end_line: 1,
-            text: "pub fn hi() {}".into(),
-            hash: "hash".into(),
-            modified_at: Utc::now(),
-        };
-        let meta = IndexMetadata {
+    fn sample_index_meta(root: &Path) -> IndexMetadata {
+        IndexMetadata {
             version: env!("CARGO_PKG_VERSION").into(),
             repo_path: root.to_path_buf(),
             repo_hash: "hash".into(),
@@ -102,8 +91,7 @@ mod tests {
             total_files: 1,
             total_chunks: 1,
             embedding_model: "jina-embeddings-v2-base-code".to_string(),
-        };
-        RepositoryIndex::new(meta, vec![chunk], vec![vec![1.0, 2.0, 3.0]])
+        }
     }
 
     #[test]
@@ -118,7 +106,7 @@ mod tests {
             hash: "h".into(),
             modified_at: Utc::now(),
         };
-        let index = sample_index(Path::new("/tmp/test"));
+        let index_meta = sample_index_meta(Path::new("/tmp/test"));
         let result = search::SearchResult {
             chunk,
             score: 0.5,
@@ -126,8 +114,13 @@ mod tests {
             bm25_score: 0.0,
             show_full_context: false,
         };
-        let json =
-            JsonResponse::from_results("hi", 5, vec![result], &index, Duration::from_millis(10));
+        let json = JsonResponse::from_results(
+            "hi",
+            5,
+            vec![result],
+            &index_meta,
+            Duration::from_millis(10),
+        );
         assert_eq!(json.query, "hi");
         assert_eq!(json.results.len(), 1);
         assert_eq!(json.index.total_chunks, 1);

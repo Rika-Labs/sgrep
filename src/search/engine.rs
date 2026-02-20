@@ -38,12 +38,17 @@ fn build_bm25f_from_chunks(chunks: &[CodeChunk], graph: Option<&CodeGraph>) -> B
             // Extract symbol names from the graph if available
             if let Some(g) = graph {
                 let symbols: Vec<String> = g
-                    .symbols_in_file(&chunk.path)
-                    .iter()
+                    .file_symbols
+                    .get(&chunk.path)
+                    .into_iter()
+                    .flat_map(|ids| ids.iter())
+                    .filter_map(|id| g.symbols.get(id))
                     .filter(|s| s.start_line >= chunk.start_line && s.end_line <= chunk.end_line)
                     .map(|s| s.name.clone())
                     .collect();
-                doc = doc.with_symbols(symbols);
+                if !symbols.is_empty() {
+                    doc = doc.with_symbols(symbols);
+                }
             }
 
             doc

@@ -141,7 +141,7 @@ pub struct RenderContext<'a> {
     pub results: Vec<search::SearchResult>,
     pub query: &'a str,
     pub limit: usize,
-    pub index: &'a store::RepositoryIndex,
+    pub index_meta: &'a store::IndexMetadata,
     pub elapsed: Duration,
     pub json: bool,
     pub debug: bool,
@@ -859,12 +859,11 @@ fn handle_search(
             },
         )?;
         let elapsed = start.elapsed();
-        let repo_index = mmap_index.to_repository_index();
         return render_results(RenderContext {
             results,
             query: params.query,
             limit: params.limit,
-            index: &repo_index,
+            index_meta: &mmap_index.metadata,
             elapsed,
             json: params.json,
             debug: params.debug,
@@ -890,7 +889,7 @@ fn handle_search(
         results,
         query: params.query,
         limit: params.limit,
-        index: &index,
+        index_meta: &index.metadata,
         elapsed,
         json: params.json,
         debug: params.debug,
@@ -924,12 +923,11 @@ fn handle_remote_search(
                 .name
                 .to_string(),
         };
-        let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
         return render_results(RenderContext {
             results: Vec::new(),
             query: params.query,
             limit: params.limit,
-            index: &index,
+            index_meta: &metadata,
             elapsed: start.elapsed(),
             json: params.json,
             debug: params.debug,
@@ -1025,13 +1023,12 @@ fn handle_remote_search(
             .name
             .to_string(),
     };
-    let index = store::RepositoryIndex::new(metadata, Vec::new(), Vec::new());
 
     render_results(RenderContext {
         results,
         query: params.query,
         limit: params.limit,
-        index: &index,
+        index_meta: &metadata,
         elapsed: start.elapsed(),
         json: params.json,
         debug: params.debug,
@@ -1159,7 +1156,7 @@ fn parse_cli() -> Cli {
 fn render_results(ctx: RenderContext<'_>) -> Result<bool> {
     if ctx.json {
         let payload =
-            JsonResponse::from_results(ctx.query, ctx.limit, ctx.results, ctx.index, ctx.elapsed);
+            JsonResponse::from_results(ctx.query, ctx.limit, ctx.results, ctx.index_meta, ctx.elapsed);
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(!payload.results.is_empty());
     }
@@ -1725,7 +1722,7 @@ mod tests {
             results: Vec::new(),
             query: "hello",
             limit: 5,
-            index: &index,
+            index_meta: &index.metadata,
             elapsed: Duration::from_millis(1),
             json: false,
             debug: false,
@@ -1753,7 +1750,7 @@ mod tests {
             results: vec![result],
             query: "hello",
             limit: 5,
-            index: &index,
+            index_meta: &index.metadata,
             elapsed: Duration::from_millis(2),
             json: true,
             debug: false,
@@ -1786,7 +1783,7 @@ mod tests {
             results: vec![result],
             query: "hello world",
             limit: 3,
-            index: &index,
+            index_meta: &index.metadata,
             elapsed: Duration::from_millis(3),
             json: false,
             debug: false,
@@ -2236,7 +2233,7 @@ mod tests {
             results: vec![],
             query: "test",
             limit: 5,
-            index: &index,
+            index_meta: &index.metadata,
             elapsed: Duration::from_millis(100),
             json: true,
             debug: false,

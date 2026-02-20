@@ -766,6 +766,13 @@ impl Indexer {
         let graph_stats = graph.stats();
         let graph_duration = graph_start.elapsed();
 
+        let hierarchy = build_hierarchical_index(&chunks, &vectors);
+        let hier_stats = hierarchy.stats();
+        debug!(
+            "Built hierarchical index: {} files, {} directories",
+            hier_stats.file_count, hier_stats.directory_count
+        );
+
         let write_start = Instant::now();
         let metadata = IndexMetadata {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -788,6 +795,7 @@ impl Indexer {
         let repository_index = RepositoryIndex::new(metadata, chunks, vectors);
         store.save(&repository_index)?;
         store.save_graph(&graph)?;
+        store.save_hierarchy(&hierarchy)?;
         let write_duration = write_start.elapsed();
 
         Ok(IndexReport {
@@ -1080,6 +1088,54 @@ mod tests {
             .find(|c| c.path.ends_with(std::path::Path::new("test.rs")))
             .unwrap();
         assert!(rust_chunk.text.contains("hello_updated"));
+
+        fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn incremental_rebuilds_hierarchy_after_deletion() {
+        let embedder = Arc::new(StubEmbedder::default());
+        let indexer = Indexer::new(embedder);
+
+        let _home = set_test_home();
+        let repo = create_test_repo();
+        let deleted = repo.join("test.py");
+
+        indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: true,
+                batch_size: None,
+                profile: false,
+                dirty: None,
+            })
+            .unwrap();
+
+        std::fs::remove_file(&deleted).unwrap();
+
+        indexer
+            .build_index(IndexRequest {
+                path: repo.clone(),
+                force: false,
+                batch_size: None,
+                profile: false,
+                dirty: Some(DirtySet {
+                    touched: Vec::new(),
+                    deleted: vec![deleted.clone()],
+                }),
+            })
+            .unwrap();
+
+        let store = IndexStore::new(&repo).unwrap();
+        let hierarchy = store.load_hierarchy().unwrap().unwrap();
+
+        assert!(
+            hierarchy
+                .find_file_by_path(std::path::Path::new("test.py"))
+                .is_none(),
+            "deleted files must be removed from hierarchy after incremental reindex"
+        );
 
         fs::remove_dir_all(&repo).ok();
     }

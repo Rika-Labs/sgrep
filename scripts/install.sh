@@ -64,8 +64,13 @@ download_and_install() {
     mkdir -p "$INSTALL_DIR"
   fi
 
-  echo "Installing to $INSTALL_DIR (may require sudo)..."
-  install -m 0755 "$TMP_DIR/sgrep" "$INSTALL_DIR/sgrep"
+  echo "Installing to $INSTALL_DIR..."
+  if [ -w "$INSTALL_DIR" ]; then
+    install -m 0755 "$TMP_DIR/sgrep" "$INSTALL_DIR/sgrep"
+  else
+    echo "Elevated permissions required. You may be prompted for your password."
+    sudo install -m 0755 "$TMP_DIR/sgrep" "$INSTALL_DIR/sgrep"
+  fi
 
   echo "sgrep installed at $(command -v sgrep)"
   sgrep --version || :

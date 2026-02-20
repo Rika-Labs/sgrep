@@ -26,6 +26,29 @@ pub fn mean_pool_vectors(vectors: &[Vec<f32>]) -> Vec<f32> {
     result
 }
 
+fn mean_pool_vectors_by_indices(vectors: &[Vec<f32>], indices: &[usize]) -> Vec<f32> {
+    if indices.is_empty() {
+        return Vec::new();
+    }
+
+    let dim = vectors[indices[0]].len();
+    let count = indices.len() as f32;
+
+    let mut result = vec![0.0_f32; dim];
+    for &idx in indices {
+        let vec = &vectors[idx];
+        for (i, &val) in vec.iter().enumerate() {
+            result[i] += val;
+        }
+    }
+
+    for val in &mut result {
+        *val /= count;
+    }
+
+    result
+}
+
 pub fn l2_normalize(vector: &mut [f32]) {
     let magnitude: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
     if magnitude > 1e-10 {
@@ -51,12 +74,7 @@ pub fn compute_file_embeddings(chunks: &[CodeChunk], vectors: &[Vec<f32>]) -> Hi
 
     for file_path in file_paths {
         let chunk_indices = file_to_chunks.get(&file_path).unwrap();
-
-        let file_chunk_vectors: Vec<&Vec<f32>> =
-            chunk_indices.iter().map(|&idx| &vectors[idx]).collect();
-
-        let refs: Vec<Vec<f32>> = file_chunk_vectors.iter().map(|v| (*v).clone()).collect();
-        let mut file_vector = mean_pool_vectors(&refs);
+        let mut file_vector = mean_pool_vectors_by_indices(vectors, chunk_indices);
         l2_normalize(&mut file_vector);
 
         hier.add_file(file_path, chunk_indices.clone(), file_vector);
@@ -86,16 +104,11 @@ pub fn compute_directory_embeddings(hier: &mut HierarchicalIndex) {
     for dir_path in dir_paths {
         let file_indices = dir_to_files.get(&dir_path).unwrap();
 
-        let dir_file_vectors: Vec<Vec<f32>> = file_indices
-            .iter()
-            .filter_map(|&idx| hier.get_file_vector(idx).cloned())
-            .collect();
-
-        if dir_file_vectors.is_empty() {
+        if file_indices.is_empty() {
             continue;
         }
 
-        let mut dir_vector = mean_pool_vectors(&dir_file_vectors);
+        let mut dir_vector = mean_pool_vectors_by_indices(&hier.file_vectors, file_indices);
         l2_normalize(&mut dir_vector);
 
         hier.add_directory(dir_path, file_indices.clone(), vec![], dir_vector);
