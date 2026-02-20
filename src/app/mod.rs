@@ -1155,8 +1155,13 @@ fn parse_cli() -> Cli {
 
 fn render_results(ctx: RenderContext<'_>) -> Result<bool> {
     if ctx.json {
-        let payload =
-            JsonResponse::from_results(ctx.query, ctx.limit, ctx.results, ctx.index_meta, ctx.elapsed);
+        let payload = JsonResponse::from_results(
+            ctx.query,
+            ctx.limit,
+            ctx.results,
+            ctx.index_meta,
+            ctx.elapsed,
+        );
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(!payload.results.is_empty());
     }
@@ -1430,27 +1435,35 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn build_embedder_sets_env_flags() {
         let prev_token = env::var("TOKENIZERS_PARALLELISM").ok();
         let prev_offline = env::var("SGREP_OFFLINE").ok();
         let prev_device = env::var("SGREP_DEVICE").ok();
         let prev_config = env::var("SGREP_CONFIG").ok();
+        let prev_cache_dir = env::var("FASTEMBED_CACHE_DIR").ok();
+
+        let temp_cache = std::env::temp_dir().join(format!("sgrep_app_cache_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_cache).unwrap();
+        std::fs::write(temp_cache.join("dummy.onnx"), b"onnx").unwrap();
+        env::set_var("FASTEMBED_CACHE_DIR", &temp_cache);
+
         env::remove_var("TOKENIZERS_PARALLELISM");
         env::remove_var("SGREP_OFFLINE");
         env::remove_var("SGREP_DEVICE");
         // Use non-existent config to force local provider
         env::set_var("SGREP_CONFIG", "/nonexistent/config.toml");
-        let _ = build_embedder(
+        let build_result = build_embedder(
             EmbeddingModel::default(),
             true,
             Some("cpu".into()),
             EmbeddingProviderType::Local,
             &Config::default(),
-        )
-        .unwrap();
-        assert_eq!(env::var("TOKENIZERS_PARALLELISM").unwrap(), "true");
-        assert_eq!(env::var("SGREP_OFFLINE").unwrap(), "1");
-        assert_eq!(env::var("SGREP_DEVICE").unwrap(), "cpu");
+        );
+        let token_parallelism = env::var("TOKENIZERS_PARALLELISM").ok();
+        let sgrep_offline = env::var("SGREP_OFFLINE").ok();
+        let sgrep_device = env::var("SGREP_DEVICE").ok();
+
         if let Some(val) = prev_token {
             env::set_var("TOKENIZERS_PARALLELISM", val);
         } else {
@@ -1471,6 +1484,20 @@ mod tests {
         } else {
             env::remove_var("SGREP_CONFIG");
         }
+        if let Some(val) = prev_cache_dir {
+            env::set_var("FASTEMBED_CACHE_DIR", val);
+        } else {
+            env::remove_var("FASTEMBED_CACHE_DIR");
+        }
+        std::fs::remove_dir_all(&temp_cache).ok();
+
+        assert!(
+            build_result.is_ok(),
+            "build_embedder should succeed in offline mode with a cached ONNX file"
+        );
+        assert_eq!(token_parallelism.as_deref(), Some("true"));
+        assert_eq!(sgrep_offline.as_deref(), Some("1"));
+        assert_eq!(sgrep_device.as_deref(), Some("cpu"));
     }
 
     #[test]
@@ -2110,11 +2137,48 @@ mod tests {
     #[serial]
     fn run_uses_test_args_override() {
         let repo = temp_repo();
+        let prev_home = env::var("SGREP_HOME").ok();
+        let prev_test_args = env::var("SGREP_TEST_ARGS").ok();
+        let prev_offline = env::var("SGREP_OFFLINE").ok();
+        let prev_cache_dir = env::var("FASTEMBED_CACHE_DIR").ok();
+
+        let temp_cache = std::env::temp_dir().join(format!("sgrep_app_cache_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_cache).unwrap();
+        std::fs::write(temp_cache.join("dummy.onnx"), b"onnx").unwrap();
+
+        env::set_var("FASTEMBED_CACHE_DIR", &temp_cache);
+        env::set_var("SGREP_OFFLINE", "0");
         env::set_var("SGREP_HOME", repo.join(".sgrep_home"));
         env::set_var("SGREP_TEST_ARGS", format!("index {}", repo.display()));
-        run().unwrap();
-        env::remove_var("SGREP_TEST_ARGS");
+        let run_result = run();
+
+        if let Some(val) = prev_home {
+            env::set_var("SGREP_HOME", val);
+        } else {
+            env::remove_var("SGREP_HOME");
+        }
+        if let Some(val) = prev_test_args {
+            env::set_var("SGREP_TEST_ARGS", val);
+        } else {
+            env::remove_var("SGREP_TEST_ARGS");
+        }
+        if let Some(val) = prev_offline {
+            env::set_var("SGREP_OFFLINE", val);
+        } else {
+            env::remove_var("SGREP_OFFLINE");
+        }
+        if let Some(val) = prev_cache_dir {
+            env::set_var("FASTEMBED_CACHE_DIR", val);
+        } else {
+            env::remove_var("FASTEMBED_CACHE_DIR");
+        }
+        std::fs::remove_dir_all(&temp_cache).ok();
         std::fs::remove_dir_all(&repo).ok();
+
+        assert!(
+            run_result.is_ok(),
+            "run() should honor SGREP_TEST_ARGS for indexing"
+        );
     }
 
     #[test]

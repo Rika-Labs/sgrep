@@ -1,5 +1,4 @@
 mod extractor;
-mod query;
 mod symbols;
 
 pub use extractor::SymbolExtractor;

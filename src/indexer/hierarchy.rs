@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::chunker::CodeChunk;
 use crate::store::HierarchicalIndex;
 
+#[cfg(test)]
 pub fn mean_pool_vectors(vectors: &[Vec<f32>]) -> Vec<f32> {
     if vectors.is_empty() {
         return Vec::new();

@@ -342,15 +342,13 @@ impl Indexer {
             }
         }
 
-        let mut completed_files: HashSet<PathBuf> = HashSet::new();
         let mut files_completed = 0usize;
 
-        for (file_path, chunk_indices) in &file_to_chunks {
+        for chunk_indices in file_to_chunks.values() {
             if chunk_indices
                 .iter()
                 .all(|idx| embedded_chunks.contains(idx))
             {
-                completed_files.insert(file_path.clone());
                 files_completed += 1;
             }
         }
@@ -396,13 +394,6 @@ impl Indexer {
                 let idx = indices[i];
                 vectors[idx] = Some(vec);
                 embedded_chunks.insert(idx);
-            }
-
-            for (file_path, chunk_indices) in &file_to_chunks {
-                if chunk_indices.iter().all(|&i| embedded_chunks.contains(&i)) {
-                    completed_files.insert(file_path.clone());
-                    files_completed += 1;
-                }
             }
 
             pb.set_position(total_pending as u64);
@@ -989,14 +980,12 @@ mod tests {
 
         callback(EmbedProgress {
             completed: 3,
-            total: 10,
             message: None,
         });
         assert_eq!(pb.position(), 7);
 
         callback(EmbedProgress {
             completed: 20,
-            total: 10,
             message: None,
         });
         assert_eq!(pb.position(), 10);

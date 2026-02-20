@@ -191,7 +191,6 @@ impl Embedder {
             if let Some(callback) = on_progress {
                 callback(super::EmbedProgress {
                     completed: i + 1,
-                    total,
                     message: None,
                 });
             }
@@ -247,7 +246,6 @@ impl BatchEmbedder for Embedder {
             if let Some(callback) = on_progress {
                 callback(super::EmbedProgress {
                     completed: i + 1,
-                    total,
                     message: Some(format!("{}/{}", i + 1, total)),
                 });
             }

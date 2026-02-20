@@ -786,28 +786,6 @@ mod tests {
 
     #[test]
     #[serial]
-    fn mmap_index_converts_to_repository_index() {
-        let _home = set_test_home();
-        let temp_dir = temp_dir_with_name("convert");
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        let store = IndexStore::new(&temp_dir).unwrap();
-        let chunk = make_chunk();
-        let vector = vec![1.5, 2.5, 3.5];
-        let metadata = make_metadata(temp_dir.clone(), store.repo_hash().to_string(), 3);
-        let original = RepositoryIndex::new(metadata, vec![chunk], vec![vector.clone()]);
-
-        store.save(&original).unwrap();
-        let mmap_index = store.load_mmap().unwrap().unwrap();
-        let converted = mmap_index.to_repository_index();
-
-        assert_eq!(converted.vectors[0], vector);
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    #[test]
-    #[serial]
     fn mmap_returns_none_for_missing_index() {
         let _home = set_test_home();
         let temp_dir = temp_dir_with_name("mmap_missing");

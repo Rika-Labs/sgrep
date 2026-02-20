@@ -62,15 +62,6 @@ impl EmbeddingModel {
             EmbeddingModel::Jina => &JINA_CONFIG,
         }
     }
-
-    #[allow(dead_code)]
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name.to_lowercase().as_str() {
-            "mxbai" | "mixedbread" | "mxbai-embed-xsmall-v1" => Some(EmbeddingModel::Mxbai),
-            "jina" | "jina-embeddings-v2-base-code" => Some(EmbeddingModel::Jina),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(not(test))]
@@ -81,9 +72,6 @@ pub const DEFAULT_VECTOR_DIM: usize = 384;
 #[derive(Debug, Clone)]
 pub struct EmbedProgress {
     pub completed: usize,
-    #[allow(dead_code)]
-    pub total: usize,
-    #[allow(dead_code)]
     pub message: Option<String>,
 }
 
@@ -110,7 +98,6 @@ pub trait BatchEmbedder: Send + Sync {
         if let Some(callback) = on_progress {
             callback(EmbedProgress {
                 completed: texts.len(),
-                total: texts.len(),
                 message: Some("complete".to_string()),
             });
         }
@@ -162,5 +149,14 @@ mod tests {
         let embedder = EmptyEmbedder;
         let result = embedder.embed("hi");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn model_config_dimensions_are_exposed() {
+        let mxbai = EmbeddingModel::Mxbai.config();
+        let jina = EmbeddingModel::Jina.config();
+
+        assert!(mxbai.native_dim >= mxbai.output_dim);
+        assert!(jina.native_dim >= jina.output_dim);
     }
 }

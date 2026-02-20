@@ -256,7 +256,6 @@ impl BatchEmbedder for ModalEmbedder {
                 if let Some(callback) = on_progress {
                     callback(crate::embedding::EmbedProgress {
                         completed: done,
-                        total,
                         message: Some(format!("received batch {}/{}", batch_done, total_batches)),
                     });
                 }

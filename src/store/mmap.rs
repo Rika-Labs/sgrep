@@ -2,7 +2,6 @@ use memmap2::Mmap;
 use usearch::Index;
 
 use super::index::IndexMetadata;
-use super::RepositoryIndex;
 use crate::chunker::CodeChunk;
 
 pub const VECTOR_HEADER_SIZE: usize = 8;
@@ -103,17 +102,6 @@ impl MmapIndex {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty()
-    }
-
-    pub fn to_repository_index(&self) -> RepositoryIndex {
-        let vectors: Vec<Vec<f32>> = (0..self.len())
-            .map(|i| self.get_vector(i).to_vec())
-            .collect();
-        RepositoryIndex {
-            metadata: self.metadata.clone(),
-            chunks: self.chunks.clone(),
-            vectors,
-        }
     }
 }
 
