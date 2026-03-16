@@ -40,7 +40,11 @@ sgrep search "where do we handle authentication?"
 - **[Pi Plugin](plugins/pi/README.md)** — extension with full session lifecycle
 - **[OpenCode Plugin](plugins/opencode/README.md)** — MCP tool integration
 
-Install all at once: `./scripts/install-agents.sh all`
+Install any agent with one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-agents.sh | sh -s claude
+```
 
 ## License
 

@@ -4,21 +4,20 @@ set -euo pipefail
 # install-agents.sh
 #
 # Installs the sgrep skill + watch lifecycle for one or more coding agents.
+# Works both from a local clone and via curl:
 #
-# Usage: ./scripts/install-agents.sh <agent>
-#   claude   — skill + SessionStart/Stop hooks in ~/.claude/settings.json
-#   codex    — skill + session-start hook + wrapper script
-#   pi       — skill (no YAML frontmatter) + extension
-#   opencode — prints plugin registration instructions
-#   all      — all of the above
+#   curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-agents.sh | sh -s claude
+#   curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-agents.sh | sh -s all
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CANONICAL="$REPO_ROOT/.factory/skills/sgrep/SKILL.md"
+REPO="rika-labs/sgrep"
+BRANCH="main"
+RAW="https://raw.githubusercontent.com/$REPO/$BRANCH"
 
-if [ ! -f "$CANONICAL" ]; then
-  echo "error: canonical skill not found at $CANONICAL" >&2
-  exit 1
+# Detect if running from a local clone
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
+REPO_ROOT=""
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/../.factory/skills/sgrep/SKILL.md" ]; then
+  REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 fi
 
 usage() {
@@ -26,22 +25,56 @@ usage() {
   echo ""
   echo "Agents:"
   echo "  claude    Claude Code — skill + SessionStart/Stop hooks"
-  echo "  codex     Codex CLI   — skill + session-start hook + wrapper script"
+  echo "  codex     Codex CLI   — skill + session-start hook"
   echo "  pi        Pi          — skill (no frontmatter) + extension"
-  echo "  opencode  OpenCode    — prints plugin registration instructions"
+  echo "  opencode  OpenCode    — prints plugin config instructions"
   echo "  all       Install all agents"
+  echo ""
+  echo "Remote install:"
+  echo "  curl -fsSL $RAW/scripts/install-agents.sh | sh -s claude"
   exit 1
 }
 
-strip_frontmatter() {
-  awk 'BEGIN{skip=0} /^---$/{skip++; next} skip<2{next} {print}' "$1"
+download() {
+  local url="$1" dest="$2"
+  if command -v curl &> /dev/null; then
+    curl -fsSL "$url" -o "$dest"
+  elif command -v wget &> /dev/null; then
+    wget -q "$url" -O "$dest"
+  else
+    echo "error: curl or wget required" >&2
+    exit 1
+  fi
+}
+
+# Copy from local clone or download from GitHub
+fetch_file() {
+  local repo_path="$1" dest="$2"
+  if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/$repo_path" ]; then
+    cp "$REPO_ROOT/$repo_path" "$dest"
+  else
+    download "$RAW/$repo_path" "$dest"
+  fi
+}
+
+fetch_skill() {
+  fetch_file ".factory/skills/sgrep/SKILL.md" "$1"
+}
+
+fetch_skill_no_frontmatter() {
+  local dest="$1"
+  local tmp
+  tmp=$(mktemp)
+  fetch_skill "$tmp"
+  awk 'BEGIN{skip=0} /^---$/{skip++; next} skip<2{next} {print}' "$tmp" > "$dest"
+  rm -f "$tmp"
 }
 
 install_claude() {
   echo "=== Claude Code ==="
 
   mkdir -p "$HOME/.claude/skills/sgrep"
-  cp "$CANONICAL" "$HOME/.claude/skills/sgrep/SKILL.md"
+  fetch_skill "$HOME/.claude/skills/sgrep/SKILL.md"
   echo "  skill: ~/.claude/skills/sgrep/SKILL.md"
 
   local settings="$HOME/.claude/settings.json"
@@ -104,16 +137,13 @@ install_codex() {
   echo "=== Codex CLI ==="
 
   mkdir -p "$HOME/.agents/skills/sgrep"
-  cp "$CANONICAL" "$HOME/.agents/skills/sgrep/SKILL.md"
+  fetch_skill "$HOME/.agents/skills/sgrep/SKILL.md"
   echo "  skill: ~/.agents/skills/sgrep/SKILL.md"
 
   mkdir -p "$HOME/.codex/hooks"
-  cp "$REPO_ROOT/plugins/codex/hooks/session-start.sh" "$HOME/.codex/hooks/session-start.sh"
+  fetch_file "plugins/codex/hooks/session-start.sh" "$HOME/.codex/hooks/session-start.sh"
   chmod +x "$HOME/.codex/hooks/session-start.sh"
   echo "  hook:  ~/.codex/hooks/session-start.sh"
-
-  echo "  watch: use the wrapper for full lifecycle:"
-  echo "         $REPO_ROOT/plugins/codex/sgrep-watch.sh [codex args...]"
   echo ""
 }
 
@@ -121,24 +151,20 @@ install_pi() {
   echo "=== Pi ==="
 
   mkdir -p "$HOME/.pi/agent/skills/sgrep"
-  strip_frontmatter "$CANONICAL" > "$HOME/.pi/agent/skills/sgrep/README.md"
+  fetch_skill_no_frontmatter "$HOME/.pi/agent/skills/sgrep/README.md"
   echo "  skill: ~/.pi/agent/skills/sgrep/README.md (no frontmatter)"
 
   mkdir -p "$HOME/.pi/extensions"
-  cp "$REPO_ROOT/plugins/pi/extensions/sgrep-watch.ts" "$HOME/.pi/extensions/sgrep-watch.ts"
+  fetch_file "plugins/pi/extensions/sgrep-watch.ts" "$HOME/.pi/extensions/sgrep-watch.ts"
   echo "  ext:   ~/.pi/extensions/sgrep-watch.ts"
   echo ""
 }
 
 install_opencode() {
   echo "=== OpenCode ==="
-  echo "  OpenCode uses a TypeScript plugin. Add to your config:"
+  echo "  Add to your OpenCode config:"
   echo ""
   echo '    { "plugins": ["sgrep-opencode"] }'
-  echo ""
-  echo "  Or for local dev:"
-  echo ""
-  echo "    { \"plugins\": [\"file://$REPO_ROOT/plugins/opencode\"] }"
   echo ""
 }
 

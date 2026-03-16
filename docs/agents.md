@@ -4,12 +4,19 @@
 
 ## Quick install
 
+No repo clone needed — install via curl:
+
 ```bash
-./scripts/install-agents.sh claude     # Claude Code
-./scripts/install-agents.sh codex      # Codex CLI
-./scripts/install-agents.sh pi         # Pi
-./scripts/install-agents.sh opencode   # OpenCode (prints config instructions)
-./scripts/install-agents.sh all        # all agents
+curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-agents.sh | sh -s claude
+curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-agents.sh | sh -s codex
+curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-agents.sh | sh -s pi
+curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-agents.sh | sh -s all
+```
+
+Or from a local clone:
+
+```bash
+./scripts/install-agents.sh claude
 ```
 
 ## What gets installed
@@ -33,7 +40,7 @@ The plugin manages `sgrep watch` and surfaces local search results to the agent.
 ## Codex CLI plugin
 
 ```bash
-./scripts/install-agents.sh codex
+curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-agents.sh | sh -s codex
 ```
 
 Codex has no session-end event, so watch cleanup requires a wrapper script:
@@ -47,7 +54,7 @@ Details: [plugins/codex/README.md](../plugins/codex/README.md).
 ## Pi plugin
 
 ```bash
-./scripts/install-agents.sh pi
+curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-agents.sh | sh -s pi
 ```
 
 Pi has full lifecycle via extensions (`session_start` + `session_shutdown`). Details: [plugins/pi/README.md](../plugins/pi/README.md).
