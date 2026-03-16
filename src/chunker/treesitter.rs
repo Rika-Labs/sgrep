@@ -5,7 +5,7 @@ use tree_sitter::Tree;
 
 use super::{build_chunk, CodeChunk, MAX_CONTEXT_LINES};
 
-const TARGET_CHUNK_LINES: usize = 50;
+const TARGET_CHUNK_LINES: usize = 120;
 const MAX_CHUNK_LINES: usize = 200;
 
 #[derive(Debug, Clone)]

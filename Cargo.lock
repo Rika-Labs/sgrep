@@ -2998,7 +2998,6 @@ dependencies = [
  "ctrlc",
  "dashmap",
  "fastembed",
- "flate2",
  "globset",
  "ignore",
  "indicatif",

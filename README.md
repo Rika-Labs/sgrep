@@ -26,8 +26,6 @@ sgrep adapts to your privacy, performance, and scale needs:
 │ Process Locally │ ✓ Fully Private   │ ✓ Scale Storage       │
 │ (default)       │   Zero Cloud      │   Private Embeddings  │
 ├─────────────────┼───────────────────┼───────────────────────┤
-│ Offload to GPU  │ ✓ Fast Indexing   │ ✓ Full Cloud Scale    │
-│ (Modal.dev)     │   Data Stays Local│   Maximum Speed       │
 └─────────────────┴───────────────────┴───────────────────────┘
 ```
 
@@ -47,7 +45,6 @@ Start local and private. Scale up when you need to. [Learn more →](docs/deploy
 
 - **[Claude Code Plugin](plugins/sgrep/README.md)** — Automatic index management and search skill
 - **[OpenCode Plugin](plugins/opencode/README.md)** — MCP tool integration
-- **[Modal.dev](https://modal.com)** — GPU-accelerated embeddings (Qwen3-Embedding-8B)
 - **[Turbopuffer](https://turbopuffer.com) / [Pinecone](https://pinecone.io)** — Serverless vector storage
 
 ## License

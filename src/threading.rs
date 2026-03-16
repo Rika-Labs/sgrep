@@ -41,7 +41,7 @@ impl ThreadConfig {
 
         let preset = preset.unwrap_or_default();
         let percent = match preset {
-            CpuPreset::Auto => 75,
+            CpuPreset::Auto => 100,
             CpuPreset::Low | CpuPreset::Background => 25,
             CpuPreset::Medium => 50,
             CpuPreset::High => 100,
@@ -52,8 +52,8 @@ impl ThreadConfig {
             .unwrap_or((total_cores * percent) / 100)
             .max(1);
 
-        let onnx_threads = (budget / 4).clamp(1, 4);
-        let rayon_threads = budget.saturating_sub(onnx_threads / 2).max(1);
+        let onnx_threads = budget.div_ceil(3).clamp(1, 4);
+        let rayon_threads = budget.max(1);
         let walker_threads = rayon_threads.min(8);
 
         Self {

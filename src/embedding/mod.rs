@@ -18,7 +18,6 @@ pub enum EmbeddingModel {
 
 pub struct ModelConfig {
     pub name: &'static str,
-    pub display_name: &'static str,
     pub download_base_url: &'static str,
     pub files: &'static [(&'static str, &'static str)],
     pub native_dim: usize,
@@ -27,7 +26,6 @@ pub struct ModelConfig {
 
 pub const MXBAI_CONFIG: ModelConfig = ModelConfig {
     name: "mxbai-embed-xsmall-v1",
-    display_name: "Mixedbread mxbai-embed-xsmall-v1",
     download_base_url: "https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/resolve/main",
     files: &[
         ("onnx/model.onnx", "model.onnx"),
@@ -42,7 +40,6 @@ pub const MXBAI_CONFIG: ModelConfig = ModelConfig {
 
 pub const JINA_CONFIG: ModelConfig = ModelConfig {
     name: "jina-embeddings-v2-base-code",
-    display_name: "Jina Embeddings v2 Base Code",
     download_base_url: "https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/main",
     files: &[
         ("onnx/model_quantized.onnx", "model_quantized.onnx"),

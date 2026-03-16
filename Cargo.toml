@@ -67,7 +67,6 @@ usearch = "2"
 memmap2 = "0.9"
 dashmap = "6"
 num_cpus = "1.16"
-flate2 = "1.0"
 
 tempfile = "3.20"
 
