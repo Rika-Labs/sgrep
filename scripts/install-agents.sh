@@ -68,7 +68,7 @@ d = json.load(open(f))
 hooks = d.setdefault('hooks', {})
 hooks.setdefault('SessionStart', []).append({
     'matcher': '',
-    'hooks': [{'type': 'command', 'command': 'sgrep index > /dev/null 2>&1 || true', 'timeout': 60}]
+    'hooks': [{'type': 'command', 'command': 'sgrep index > /dev/null 2>&1 || true; sgrep watch --detach > /dev/null 2>&1 || true', 'timeout': 60}]
 })
 hooks.setdefault('Stop', []).append({
     'matcher': '',
@@ -85,7 +85,7 @@ d = {
     'hooks': {
         'SessionStart': [{
             'matcher': '',
-            'hooks': [{'type': 'command', 'command': 'sgrep index > /dev/null 2>&1 || true', 'timeout': 60}]
+            'hooks': [{'type': 'command', 'command': 'sgrep index > /dev/null 2>&1 || true; sgrep watch --detach > /dev/null 2>&1 || true', 'timeout': 60}]
         }],
         'Stop': [{
             'matcher': '',
