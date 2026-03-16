@@ -645,6 +645,23 @@ fn cosine_similarity_opposite_vectors() {
 }
 
 #[test]
+fn should_expand_with_prf_skips_precise_queries() {
+    assert!(!SearchEngine::should_expand_with_prf(
+        "where is the JSON output for BM25 results?"
+    ));
+    assert!(!SearchEngine::should_expand_with_prf(
+        "find MmapIndex in src/store/mmap.rs"
+    ));
+}
+
+#[test]
+fn should_expand_with_prf_allows_broad_queries() {
+    assert!(SearchEngine::should_expand_with_prf(
+        "where do we handle authentication for users"
+    ));
+}
+
+#[test]
 fn search_with_include_context() {
     let embedder = Arc::new(MockEmbedder);
     let engine = SearchEngine::new(embedder.clone());

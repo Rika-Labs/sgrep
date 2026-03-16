@@ -217,7 +217,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, PRF_TOP_K.max(fetch_limit));
 
-        let expanded_query = self.expand_query_with_prf(query, &matches);
+        let expanded_query = self.maybe_expand_query_with_prf(query, &matches);
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
 
@@ -304,7 +304,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, PRF_TOP_K.max(fetch_limit));
 
-        let expanded_query = self.expand_query_with_prf(query, &matches);
+        let expanded_query = self.maybe_expand_query_with_prf(query, &matches);
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_binary = quantize_to_binary(&expanded_vec);
@@ -391,7 +391,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, PRF_TOP_K.max(fetch_limit));
 
-        let expanded_query = self.expand_query_with_prf(query, &matches);
+        let expanded_query = self.maybe_expand_query_with_prf(query, &matches);
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_candidates = search_hnsw_candidates(
@@ -480,7 +480,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, PRF_TOP_K.max(fetch_limit));
 
-        let expanded_query = self.expand_query_with_prf(query, &matches);
+        let expanded_query = self.maybe_expand_query_with_prf(query, &matches);
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
 
@@ -578,7 +578,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, PRF_TOP_K.max(fetch_limit));
 
-        let expanded_query = self.expand_query_with_prf(query, &matches);
+        let expanded_query = self.maybe_expand_query_with_prf(query, &matches);
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_candidates = search_hnsw_candidates(
@@ -672,7 +672,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, PRF_TOP_K.max(fetch_limit));
 
-        let expanded_query = self.expand_query_with_prf(query, &matches);
+        let expanded_query = self.maybe_expand_query_with_prf(query, &matches);
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_binary = quantize_to_binary(&expanded_vec);
@@ -764,6 +764,34 @@ impl SearchEngine {
             let multiplier = priority.multiplier(file_type::classify_path(&result.chunk.path));
             result.score *= multiplier;
         }
+    }
+
+    fn maybe_expand_query_with_prf(
+        &self,
+        original_query: &str,
+        top_results: &[SearchResult],
+    ) -> String {
+        if !Self::should_expand_with_prf(original_query) {
+            return original_query.to_string();
+        }
+
+        self.expand_query_with_prf(original_query, top_results)
+    }
+
+    pub(crate) fn should_expand_with_prf(query: &str) -> bool {
+        let has_precise_token =
+            query
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|token| {
+                    token.len() >= 2
+                        && (token
+                            .chars()
+                            .any(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                            || token.contains('_'))
+                });
+        let has_literal_marker = query.chars().any(|c| matches!(c, '"' | '\'' | '/' | '.'));
+
+        !has_precise_token && !has_literal_marker
     }
 
     fn expand_query_with_prf(&self, original_query: &str, top_results: &[SearchResult]) -> String {
