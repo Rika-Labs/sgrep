@@ -25,7 +25,7 @@ fi
 
 sgrep index > /dev/null 2>&1 || true
 
-WATCH_OUTPUT=$(sgrep watch 2>/dev/null)
+WATCH_OUTPUT=$(sgrep watch --detach 2>/dev/null)
 WATCH_PID=$(echo "$WATCH_OUTPUT" | grep -oE '[0-9]+')
 
 if [ -z "$WATCH_PID" ]; then

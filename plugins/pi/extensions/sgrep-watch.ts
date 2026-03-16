@@ -1,6 +1,6 @@
-import { spawn, execSync, type ChildProcess } from "node:child_process";
+import { execSync } from "node:child_process";
 
-let watchProcess: ChildProcess | null = null;
+let watchPid: number | null = null;
 
 function isSgrepInstalled(): boolean {
   try {
@@ -20,21 +20,25 @@ function runIndex(): void {
 }
 
 function startWatch(): void {
-  watchProcess = spawn("sgrep", ["watch"], {
-    detached: true,
-    stdio: "ignore",
-  });
-  watchProcess.unref();
+  try {
+    const output = execSync("sgrep watch --detach", { encoding: "utf-8" });
+    const match = output.match(/\d+/);
+    if (match) {
+      watchPid = parseInt(match[0], 10);
+    }
+  } catch {
+    // Watch failure is non-fatal
+  }
 }
 
 function stopWatch(): void {
-  if (watchProcess?.pid) {
+  if (watchPid !== null) {
     try {
-      process.kill(watchProcess.pid);
+      process.kill(watchPid);
     } catch {
       // Already exited
     }
-    watchProcess = null;
+    watchPid = null;
   }
 }
 
