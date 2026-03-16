@@ -2,6 +2,20 @@
 
 All notable changes to `sgrep` will be documented in this file.
 
+## 2.0.8 - 2026-03-16
+
+### Added
+- Added a checked-in `benchmarks/search_quality` evaluation harness so search-quality work can be measured against a stable set of code and documentation queries.
+
+### Changed
+- Improved local search ranking quality for natural-language code search with safer PRF expansion gating, candidate-driven file-type intent inference, and cleaner lexical query tokenization.
+- Improved exact file/module/symbol retrieval with high-signal BM25F identifier tokenization, chunk-local symbol overlap, lexical confirmation, rare path/symbol bonuses, and documentation heading bonuses.
+- Fixed two review-driven ranking edge cases: restored query stem variants are now re-filtered against query stopwords, and prose queries ending in sentence punctuation no longer disable PRF expansion.
+
+### Performance
+- Search-quality benchmark improved from the corrected baseline `quality_mrr=71.1111` to `quality_mrr=89.3333`.
+- Final kept benchmark also reached `hit_at_1=88.0`, `hit_at_3=92.0`, `hit_at_10=92.0`, `code_mrr=87.8788`, and `docs_mrr=100.0`.
+
 ## 2.0.7 - 2026-03-16
 
 ### Added
