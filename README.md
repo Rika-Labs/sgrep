@@ -1,7 +1,7 @@
 <div align="center">
 
   <h1>sgrep</h1>
-  <p><em>Fast local semantic code search for private repositories</em></p>
+  <p><em>Local lightning-fast semantic code search</em></p>
   <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0" /></a>
 
 </div>
