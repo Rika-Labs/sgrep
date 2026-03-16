@@ -749,7 +749,11 @@ impl SearchEngine {
     ) -> SearchResult {
         let semantic = cosine_similarity(query_vec, vector);
         let symbol_overlap = self.local_symbol_overlap_score(chunk, query);
-        let score = weights.semantic * semantic + weights.bm25 * bm25_normalized + symbol_overlap;
+        let symbol_lexical_bonus = 0.08 * bm25_normalized * (symbol_overlap / 0.06).clamp(0.0, 1.0);
+        let score = weights.semantic * semantic
+            + weights.bm25 * bm25_normalized
+            + symbol_overlap
+            + symbol_lexical_bonus;
 
         SearchResult {
             chunk: chunk.clone(),
