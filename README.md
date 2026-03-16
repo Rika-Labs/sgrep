@@ -28,7 +28,7 @@ sgrep search "where do we handle authentication?"
 | [Quick Start](docs/quickstart.md) | Get searching in a few minutes |
 | [Deployment](docs/deployment.md) | Running `sgrep` locally |
 | [Configuration](docs/configuration.md) | Flags, env vars, and config files |
-| [Agent Integrations](docs/agents.md) | Claude Code, Factory, OpenCode |
+| [Agent Integrations](docs/agents.md) | Claude Code, Codex CLI, Pi, OpenCode, Factory |
 | [Offline Mode](docs/offline.md) | Airgapped and proxy environments |
 | [Architecture](docs/architecture.md) | How indexing and search work |
 | [Troubleshooting](docs/troubleshooting.md) | Common local issues |
@@ -36,7 +36,15 @@ sgrep search "where do we handle authentication?"
 ## Integrations
 
 - **[Claude Code Plugin](plugins/sgrep/README.md)** — automatic index management and search skill
+- **[Codex CLI Plugin](plugins/codex/README.md)** — session hook and watch wrapper
+- **[Pi Plugin](plugins/pi/README.md)** — extension with full session lifecycle
 - **[OpenCode Plugin](plugins/opencode/README.md)** — MCP tool integration
+
+Install any agent with one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-agents.sh | sh -s claude
+```
 
 ## License
 
