@@ -693,6 +693,10 @@ fn should_expand_with_prf_skips_precise_queries() {
         "find MmapIndex in src/store/mmap.rs",
         &top_results,
     ));
+    assert!(SearchEngine::should_expand_with_prf(
+        "where is retry logic implemented.",
+        &top_results,
+    ));
 }
 
 #[test]

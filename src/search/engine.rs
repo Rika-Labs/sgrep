@@ -979,7 +979,11 @@ impl SearchEngine {
                             .any(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
                             || token.contains('_'))
                 });
-        let has_literal_marker = query.chars().any(|c| matches!(c, '"' | '\'' | '/' | '.'));
+        let trimmed_query = query.trim_end_matches(|c: char| {
+            matches!(c, '.' | '!' | '?' | ',' | ';' | ':') || c.is_whitespace()
+        });
+        let has_literal_marker = trimmed_query.chars().any(|c| matches!(c, '"' | '\'' | '/'))
+            || trimmed_query.contains('.');
         if has_precise_token || has_literal_marker {
             return false;
         }

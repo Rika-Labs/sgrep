@@ -232,13 +232,26 @@ fn query_stem_variants(token: &str) -> Vec<String> {
     variants
 }
 
+fn is_query_noise_token(token: &str) -> bool {
+    if STOPWORDS.contains(token) || QUERY_STOPWORDS.contains(token) {
+        return true;
+    }
+
+    let stem = stem_word(token);
+    if QUERY_STOPWORDS.contains(stem.as_str()) {
+        return true;
+    }
+
+    token
+        .strip_suffix('e')
+        .is_some_and(|trimmed| QUERY_STOPWORDS.contains(trimmed))
+}
+
 pub fn tokenize_query_stemmed_base(text: &str) -> Vec<String> {
     tokenize(text)
         .into_iter()
         .map(|t| stem_word(&t))
-        .filter(|token| {
-            !STOPWORDS.contains(token.as_str()) && !QUERY_STOPWORDS.contains(token.as_str())
-        })
+        .filter(|token| !is_query_noise_token(token))
         .collect()
 }
 
@@ -247,9 +260,7 @@ pub fn tokenize_query_stemmed(text: &str) -> Vec<String> {
     tokenize(text)
         .into_iter()
         .flat_map(|t| query_stem_variants(&t))
-        .filter(|token| {
-            !STOPWORDS.contains(token.as_str()) && !QUERY_STOPWORDS.contains(token.as_str())
-        })
+        .filter(|token| !is_query_noise_token(token))
         .collect()
 }
 
@@ -993,6 +1004,7 @@ mod tests {
         assert!(tokens.contains(&"json".to_string()));
         assert!(tokens.contains(&"output".to_string()));
         assert!(!tokens.contains(&"serializ".to_string()));
+        assert!(!tokens.contains(&"serialize".to_string()));
         assert!(!tokens.contains(&"file".to_string()));
     }
 
