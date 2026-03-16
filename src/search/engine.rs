@@ -852,7 +852,7 @@ impl SearchEngine {
             return false;
         }
 
-        let query_terms = fts::tokenize_query_stemmed(query);
+        let query_terms = fts::tokenize_query_stemmed_base(query);
         let compact_query = query_terms.len() <= 4;
         let top_score = top_results
             .first()

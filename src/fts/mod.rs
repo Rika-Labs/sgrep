@@ -187,11 +187,66 @@ pub fn tokenize_identifier_stemmed(text: &str) -> Vec<String> {
     tokens
 }
 
+fn query_stem_variants(token: &str) -> Vec<String> {
+    let token = token.to_lowercase();
+    let mut variants = Vec::new();
+    let mut seen = HashSet::new();
+
+    let stem = stem_word(&token);
+    if seen.insert(stem.clone()) {
+        variants.push(stem);
+    }
+
+    for suffix_len in [3usize, 2usize] {
+        if token.len() <= suffix_len + 2 {
+            continue;
+        }
+        let suffix = &token[token.len() - suffix_len..];
+        if !matches!(suffix, "ing" | "ed") {
+            continue;
+        }
+
+        let stripped = token[..token.len() - suffix_len].to_string();
+        if seen.insert(stripped.clone()) {
+            variants.push(stripped.clone());
+        }
+
+        if stripped.len() >= 2 {
+            let chars: Vec<char> = stripped.chars().collect();
+            let last = chars[chars.len() - 1];
+            let prev = chars[chars.len() - 2];
+            if last == prev && !matches!(last, 'a' | 'e' | 'i' | 'o' | 'u') {
+                let trimmed = stripped[..stripped.len() - last.len_utf8()].to_string();
+                if seen.insert(trimmed.clone()) {
+                    variants.push(trimmed);
+                }
+            }
+        }
+
+        let restored = format!("{}e", stripped);
+        if seen.insert(restored.clone()) {
+            variants.push(restored);
+        }
+    }
+
+    variants
+}
+
+pub fn tokenize_query_stemmed_base(text: &str) -> Vec<String> {
+    tokenize(text)
+        .into_iter()
+        .map(|t| stem_word(&t))
+        .filter(|token| {
+            !STOPWORDS.contains(token.as_str()) && !QUERY_STOPWORDS.contains(token.as_str())
+        })
+        .collect()
+}
+
 /// Tokenize a query with stemming and extra filtering for generic action words.
 pub fn tokenize_query_stemmed(text: &str) -> Vec<String> {
     tokenize(text)
         .into_iter()
-        .map(|t| stem_word(&t))
+        .flat_map(|t| query_stem_variants(&t))
         .filter(|token| {
             !STOPWORDS.contains(token.as_str()) && !QUERY_STOPWORDS.contains(token.as_str())
         })
@@ -939,6 +994,16 @@ mod tests {
         assert!(tokens.contains(&"output".to_string()));
         assert!(!tokens.contains(&"serializ".to_string()));
         assert!(!tokens.contains(&"file".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_query_stemmed_adds_useful_suffix_variants() {
+        let tokens = tokenize_query_stemmed("bm25 scoring cached");
+        assert!(tokens.contains(&"bm25".to_string()));
+        assert!(tokens.contains(&"scor".to_string()));
+        assert!(tokens.contains(&"score".to_string()));
+        assert!(tokens.contains(&"cach".to_string()));
+        assert!(tokens.contains(&"cache".to_string()));
     }
 
     #[test]
