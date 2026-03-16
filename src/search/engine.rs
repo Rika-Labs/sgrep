@@ -796,7 +796,16 @@ impl SearchEngine {
                 });
         let has_literal_marker = query.chars().any(|c| matches!(c, '"' | '\'' | '/' | '.'));
 
-        !has_precise_token && !has_literal_marker
+        let lower = query.to_lowercase();
+        let keyword_count = fts::extract_keywords(query).len();
+        let looks_like_locator_query = lower.starts_with("where is")
+            || lower.starts_with("where are")
+            || lower.starts_with("which file")
+            || lower.starts_with("which document");
+
+        !(has_precise_token
+            || has_literal_marker
+            || (looks_like_locator_query && keyword_count <= 6))
     }
 
     fn expand_query_with_prf(&self, original_query: &str, top_results: &[SearchResult]) -> String {

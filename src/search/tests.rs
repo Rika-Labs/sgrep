@@ -652,12 +652,18 @@ fn should_expand_with_prf_skips_precise_queries() {
     assert!(!SearchEngine::should_expand_with_prf(
         "find MmapIndex in src/store/mmap.rs"
     ));
+    assert!(!SearchEngine::should_expand_with_prf(
+        "where are near-duplicate matches suppressed?"
+    ));
 }
 
 #[test]
 fn should_expand_with_prf_allows_broad_queries() {
     assert!(SearchEngine::should_expand_with_prf(
         "where do we handle authentication for users"
+    ));
+    assert!(SearchEngine::should_expand_with_prf(
+        "show me code related to retry logic and background job failures"
     ));
 }
 
