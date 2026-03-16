@@ -17,6 +17,13 @@ const TEST_PENALTY: f32 = 0.8;
 const DOC_PENALTY: f32 = 0.7;
 const GENERATED_PENALTY: f32 = 0.5;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryIntent {
+    Code,
+    Docs,
+    Neutral,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileTypePriority;
 
@@ -34,6 +41,42 @@ impl FileTypePriority {
             FileType::Documentation => DOC_PENALTY,
             FileType::Generated => GENERATED_PENALTY,
         }
+    }
+
+    pub fn query_multiplier(&self, file_type: FileType, query: &str) -> f32 {
+        match classify_query_intent(query) {
+            QueryIntent::Code => match file_type {
+                FileType::Implementation => 1.0,
+                FileType::Test => 0.6,
+                FileType::Documentation => 0.6,
+                FileType::Generated => GENERATED_PENALTY,
+            },
+            QueryIntent::Docs => match file_type {
+                FileType::Implementation => 0.95,
+                FileType::Test => 0.65,
+                FileType::Documentation => 1.15,
+                FileType::Generated => GENERATED_PENALTY,
+            },
+            QueryIntent::Neutral => self.multiplier(file_type),
+        }
+    }
+}
+
+pub fn classify_query_intent(query: &str) -> QueryIntent {
+    let lower = query.to_lowercase();
+    let is_docs_query = lower.contains("which document")
+        || lower.contains("readme")
+        || lower.contains("docs")
+        || lower.contains("guide")
+        || lower.contains("document ")
+        || lower.contains("documents ");
+
+    if is_docs_query {
+        QueryIntent::Docs
+    } else if lower.starts_with("where is") || lower.starts_with("where are") {
+        QueryIntent::Code
+    } else {
+        QueryIntent::Neutral
     }
 }
 
@@ -301,6 +344,45 @@ mod tests {
 
         let gen_score = apply_priority(1.0, Path::new("vendor/lib.rs"), &priority);
         assert!((gen_score - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn classify_query_intent_detects_docs_queries() {
+        assert_eq!(
+            classify_query_intent("which document explains offline mode?"),
+            QueryIntent::Docs
+        );
+    }
+
+    #[test]
+    fn classify_query_intent_detects_code_queries() {
+        assert_eq!(
+            classify_query_intent("where is the json output serialized?"),
+            QueryIntent::Code
+        );
+    }
+
+    #[test]
+    fn query_multiplier_prefers_docs_for_docs_queries() {
+        let priority = FileTypePriority;
+        assert!(
+            priority.query_multiplier(
+                FileType::Documentation,
+                "which document explains offline mode?"
+            ) > priority.query_multiplier(
+                FileType::Implementation,
+                "which document explains offline mode?"
+            )
+        );
+    }
+
+    #[test]
+    fn query_multiplier_penalizes_tests_for_code_queries() {
+        let priority = FileTypePriority;
+        assert!(
+            priority.query_multiplier(FileType::Implementation, "where is dedup implemented?")
+                > priority.query_multiplier(FileType::Test, "where is dedup implemented?")
+        );
     }
 
     #[test]

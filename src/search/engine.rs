@@ -253,7 +253,7 @@ impl SearchEngine {
             }
         }
 
-        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority, query);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
@@ -332,7 +332,7 @@ impl SearchEngine {
             }
         }
 
-        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority, query);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
@@ -427,7 +427,7 @@ impl SearchEngine {
             }
         }
 
-        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority, query);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
@@ -516,7 +516,7 @@ impl SearchEngine {
             }
         }
 
-        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority, query);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
@@ -614,7 +614,7 @@ impl SearchEngine {
             }
         }
 
-        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority, query);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
@@ -706,7 +706,7 @@ impl SearchEngine {
             }
         }
 
-        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority, query);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
@@ -759,9 +759,14 @@ impl SearchEngine {
         }
     }
 
-    fn apply_file_type_priority(results: &mut [SearchResult], priority: &FileTypePriority) {
+    fn apply_file_type_priority(
+        results: &mut [SearchResult],
+        priority: &FileTypePriority,
+        query: &str,
+    ) {
         for result in results.iter_mut() {
-            let multiplier = priority.multiplier(file_type::classify_path(&result.chunk.path));
+            let multiplier =
+                priority.query_multiplier(file_type::classify_path(&result.chunk.path), query);
             result.score *= multiplier;
         }
     }
