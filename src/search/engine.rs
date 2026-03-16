@@ -6,7 +6,7 @@ use super::scoring::{
 };
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -741,14 +741,15 @@ impl SearchEngine {
         chunk: &CodeChunk,
         vector: &[f32],
         query_vec: &[f32],
-        _query: &str,
+        query: &str,
         bm25_raw: f32,
         bm25_normalized: f32,
         include_context: bool,
         weights: &Weights,
     ) -> SearchResult {
         let semantic = cosine_similarity(query_vec, vector);
-        let score = weights.semantic * semantic + weights.bm25 * bm25_normalized;
+        let symbol_overlap = self.local_symbol_overlap_score(chunk, query);
+        let score = weights.semantic * semantic + weights.bm25 * bm25_normalized + symbol_overlap;
 
         SearchResult {
             chunk: chunk.clone(),
@@ -756,6 +757,37 @@ impl SearchEngine {
             semantic_score: semantic,
             bm25_score: bm25_raw,
             show_full_context: include_context,
+        }
+    }
+
+    pub(crate) fn local_symbol_overlap_score(&self, chunk: &CodeChunk, query: &str) -> f32 {
+        let graph = match self.graph.as_ref() {
+            Some(graph) => graph,
+            None => return 0.0,
+        };
+
+        let query_terms: HashSet<String> = fts::tokenize_query_stemmed(query).into_iter().collect();
+        if query_terms.is_empty() {
+            return 0.0;
+        }
+
+        let matched_terms: HashSet<String> = graph
+            .file_symbols
+            .get(&chunk.path)
+            .into_iter()
+            .flat_map(|ids| ids.iter())
+            .filter_map(|id| graph.symbols.get(id))
+            .filter(|symbol| {
+                symbol.start_line >= chunk.start_line && symbol.end_line <= chunk.end_line
+            })
+            .flat_map(|symbol| fts::tokenize_identifier_stemmed(&symbol.name).into_iter())
+            .filter(|term| query_terms.contains(term))
+            .collect();
+
+        if matched_terms.is_empty() {
+            0.0
+        } else {
+            0.06 * (matched_terms.len() as f32 / query_terms.len() as f32)
         }
     }
 

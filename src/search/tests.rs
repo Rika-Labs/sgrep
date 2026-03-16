@@ -622,6 +622,37 @@ fn graph_stats_with_graph() {
 }
 
 #[test]
+fn local_symbol_overlap_score_uses_chunk_local_symbols() {
+    use crate::graph::{CodeGraph, Symbol, SymbolKind};
+
+    let embedder = Arc::new(MockEmbedder);
+    let mut engine = SearchEngine::new(embedder);
+    let chunk = make_chunk("fn render_json() {}", "rust", "src/output/mod.rs");
+
+    let mut graph = CodeGraph::new();
+    graph.add_symbol(Symbol {
+        id: Uuid::new_v4(),
+        name: "JsonResponse".to_string(),
+        qualified_name: "output::JsonResponse".to_string(),
+        kind: SymbolKind::Struct,
+        file_path: PathBuf::from("src/output/mod.rs"),
+        start_line: 1,
+        end_line: 10,
+        language: "rust".to_string(),
+        signature: "struct JsonResponse".to_string(),
+        parent_id: None,
+        chunk_id: None,
+    });
+    engine.set_graph(graph);
+
+    assert!(engine.local_symbol_overlap_score(&chunk, "json response") > 0.0);
+    assert_eq!(
+        engine.local_symbol_overlap_score(&chunk, "authentication cache"),
+        0.0
+    );
+}
+
+#[test]
 fn cosine_similarity_identical_vectors() {
     let v1 = vec![1.0, 0.0, 0.0, 0.0];
     let similarity = cosine_similarity(&v1, &v1);
