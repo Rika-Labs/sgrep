@@ -253,6 +253,7 @@ impl SearchEngine {
             }
         }
 
+        self.apply_high_signal_field_bonus(&mut matches, query, &bm25f_index);
         Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
@@ -332,6 +333,7 @@ impl SearchEngine {
             }
         }
 
+        self.apply_high_signal_field_bonus(&mut matches, query, &bm25f_index);
         Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
@@ -427,6 +429,7 @@ impl SearchEngine {
             }
         }
 
+        self.apply_high_signal_field_bonus(&mut matches, query, &bm25f_index);
         Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
@@ -516,6 +519,7 @@ impl SearchEngine {
             }
         }
 
+        self.apply_high_signal_field_bonus(&mut matches, query, &bm25f_index);
         Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
@@ -614,6 +618,7 @@ impl SearchEngine {
             }
         }
 
+        self.apply_high_signal_field_bonus(&mut matches, query, &bm25f_index);
         Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
@@ -706,6 +711,7 @@ impl SearchEngine {
             }
         }
 
+        self.apply_high_signal_field_bonus(&mut matches, query, &bm25f_index);
         Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
@@ -793,6 +799,72 @@ impl SearchEngine {
         } else {
             0.06 * (matched_terms.len() as f32 / query_terms.len() as f32)
         }
+    }
+
+    fn apply_high_signal_field_bonus(
+        &self,
+        results: &mut [SearchResult],
+        query: &str,
+        bm25f_index: &Bm25FIndex,
+    ) {
+        for result in results.iter_mut() {
+            result.score += self.high_signal_field_bonus(&result.chunk, query, bm25f_index);
+        }
+    }
+
+    fn high_signal_field_bonus(
+        &self,
+        chunk: &CodeChunk,
+        query: &str,
+        bm25f_index: &Bm25FIndex,
+    ) -> f32 {
+        let query_terms: HashSet<String> = fts::tokenize_query_stemmed(query).into_iter().collect();
+        if query_terms.is_empty() || bm25f_index.num_docs == 0 {
+            return 0.0;
+        }
+
+        let mut field_terms: HashSet<String> =
+            fts::tokenize_identifier_stemmed(&chunk.path.to_string_lossy())
+                .into_iter()
+                .collect();
+        if let Some(graph) = self.graph.as_ref() {
+            for term in graph
+                .file_symbols
+                .get(&chunk.path)
+                .into_iter()
+                .flat_map(|ids| ids.iter())
+                .filter_map(|id| graph.symbols.get(id))
+                .filter(|symbol| {
+                    symbol.start_line >= chunk.start_line && symbol.end_line <= chunk.end_line
+                })
+                .flat_map(|symbol| fts::tokenize_identifier_stemmed(&symbol.name).into_iter())
+            {
+                field_terms.insert(term);
+            }
+        }
+
+        let mut idf_sum = 0.0;
+        let mut matched = 0usize;
+        for term in query_terms
+            .iter()
+            .filter(|term| field_terms.contains(*term))
+        {
+            let df = *bm25f_index.doc_freq.get(term.as_str()).unwrap_or(&0) as f32;
+            if df <= 0.0 {
+                continue;
+            }
+            let idf = ((bm25f_index.num_docs as f32 - df + 0.5) / (df + 0.5) + 1.0).ln();
+            idf_sum += idf;
+            matched += 1;
+        }
+
+        if matched == 0 {
+            return 0.0;
+        }
+
+        let avg_idf = idf_sum / matched as f32;
+        let coverage = matched as f32 / query_terms.len() as f32;
+        (0.025 * avg_idf * coverage).clamp(0.0, 0.08)
     }
 
     fn infer_query_intent(results: &[SearchResult]) -> file_type::QueryIntent {
