@@ -1,0 +1,2 @@
+{"type":"config","name":"Improving sgrep local semantic search quality","metricName":"quality_mrr","metricUnit":"","bestDirection":"higher"}
+{"run":1,"commit":"5e58a91","metric":56,"metrics":{},"status":"checks_failed","description":"Baseline: added quality benchmark harness for search MRR on the sgrep repo; benchmark scored 56.00 but cargo test failed during checks (needs triage before keeping any code changes).","timestamp":1773675471698,"segment":0}

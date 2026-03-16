@@ -1,0 +1,152 @@
+[
+  {
+    "id": "cli_entrypoint",
+    "intent": "code",
+    "query": "where does the CLI start the app?",
+    "accepted_paths": ["src/main.rs"]
+  },
+  {
+    "id": "cli_flags",
+    "intent": "code",
+    "query": "where are CLI flags and subcommands defined?",
+    "accepted_paths": ["src/cli/mod.rs"]
+  },
+  {
+    "id": "config_parsing",
+    "intent": "code",
+    "query": "where is config.toml parsed and loaded?",
+    "accepted_paths": ["src/config/mod.rs"]
+  },
+  {
+    "id": "embedding_provider",
+    "intent": "code",
+    "query": "where is the local embedding provider selected?",
+    "accepted_paths": ["src/embedding/providers.rs", "src/embedding/mod.rs"]
+  },
+  {
+    "id": "embedding_cache",
+    "intent": "code",
+    "query": "where is the embedding cache implemented?",
+    "accepted_paths": ["src/embedding/cache.rs"]
+  },
+  {
+    "id": "treesitter_chunking",
+    "intent": "code",
+    "query": "where does tree-sitter chunk code?",
+    "accepted_paths": ["src/chunker/treesitter.rs", "src/chunker/mod.rs"]
+  },
+  {
+    "id": "parser_pool",
+    "intent": "code",
+    "query": "where are parsers reused across chunks?",
+    "accepted_paths": ["src/chunker/parser_pool.rs"]
+  },
+  {
+    "id": "index_file_discovery",
+    "intent": "code",
+    "query": "where is file discovery and ignore handling during indexing?",
+    "accepted_paths": ["src/indexer/files.rs"]
+  },
+  {
+    "id": "watch_incremental",
+    "intent": "code",
+    "query": "where does watch mode trigger incremental re-indexing?",
+    "accepted_paths": ["src/watch/mod.rs"]
+  },
+  {
+    "id": "graph_extraction",
+    "intent": "code",
+    "query": "where are code graph symbols extracted from syntax trees?",
+    "accepted_paths": ["src/graph/extractor.rs", "src/graph/symbols.rs"]
+  },
+  {
+    "id": "bm25_keyword",
+    "intent": "code",
+    "query": "where is keyword BM25 scoring implemented?",
+    "accepted_paths": ["src/fts/mod.rs"]
+  },
+  {
+    "id": "search_engine",
+    "intent": "code",
+    "query": "where is the main search engine orchestration?",
+    "accepted_paths": ["src/search/engine.rs", "src/search/mod.rs"]
+  },
+  {
+    "id": "fusion_weights",
+    "intent": "code",
+    "query": "where are search fusion weights computed?",
+    "accepted_paths": ["src/search/scoring.rs"]
+  },
+  {
+    "id": "binary_quantization",
+    "intent": "code",
+    "query": "where is binary quantization search implemented?",
+    "accepted_paths": ["src/search/binary.rs"]
+  },
+  {
+    "id": "hnsw_search",
+    "intent": "code",
+    "query": "where is the HNSW search wrapper implemented?",
+    "accepted_paths": ["src/search/hnsw.rs"]
+  },
+  {
+    "id": "search_thresholds",
+    "intent": "code",
+    "query": "where are search thresholds like HNSW and binary quantization configured?",
+    "accepted_paths": ["src/search/config.rs"]
+  },
+  {
+    "id": "dedup",
+    "intent": "code",
+    "query": "where are near-duplicate matches suppressed?",
+    "accepted_paths": ["src/search/dedup.rs"]
+  },
+  {
+    "id": "file_type_priority",
+    "intent": "code",
+    "query": "where are test, docs, and generated files classified?",
+    "accepted_paths": ["src/search/file_type.rs"]
+  },
+  {
+    "id": "json_output",
+    "intent": "code",
+    "query": "where is JSON output for search results serialized?",
+    "accepted_paths": ["src/output/mod.rs"]
+  },
+  {
+    "id": "mmap_index",
+    "intent": "code",
+    "query": "where is the memory-mapped index implementation?",
+    "accepted_paths": ["src/store/mmap.rs", "src/store/mod.rs"]
+  },
+  {
+    "id": "hierarchy",
+    "intent": "code",
+    "query": "where are hierarchical file and directory indexes stored?",
+    "accepted_paths": ["src/store/hierarchy.rs", "src/indexer/hierarchy.rs"]
+  },
+  {
+    "id": "turbopuffer",
+    "intent": "code",
+    "query": "where is turbopuffer remote search integration?",
+    "accepted_paths": ["src/remote/turbopuffer.rs", "src/turbopuffer/store.rs", "src/remote/mod.rs"]
+  },
+  {
+    "id": "advanced_features_doc",
+    "intent": "docs",
+    "query": "which document explains hybrid ranking and advanced search features?",
+    "accepted_paths": ["docs/advanced-features.md"]
+  },
+  {
+    "id": "offline_doc",
+    "intent": "docs",
+    "query": "which document explains offline mode?",
+    "accepted_paths": ["docs/offline.md"]
+  },
+  {
+    "id": "plugin_doc",
+    "intent": "docs",
+    "query": "which file documents the Claude Code plugin behavior?",
+    "accepted_paths": ["plugins/sgrep/README.md"]
+  }
+]
