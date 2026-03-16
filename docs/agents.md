@@ -1,6 +1,25 @@
 # Agent integrations
 
-`sgrep` is built for local agent workflows: build an index once, search locally, and keep it warm with `sgrep watch`.
+`sgrep` integrates with four coding agents: **Claude Code**, **Codex CLI**, **Pi**, and **OpenCode**. Each integration provides the sgrep skill and watch lifecycle management.
+
+## Quick install
+
+```bash
+./scripts/install-agents.sh claude     # Claude Code
+./scripts/install-agents.sh codex      # Codex CLI
+./scripts/install-agents.sh pi         # Pi
+./scripts/install-agents.sh opencode   # OpenCode (prints config instructions)
+./scripts/install-agents.sh all        # all agents
+```
+
+## What gets installed
+
+| Agent | Skill | Watch Start | Watch Stop |
+|---|---|---|---|
+| Claude Code | `~/.claude/skills/sgrep/SKILL.md` | `SessionStart` hook | `Stop` hook |
+| Codex CLI | `~/.agents/skills/sgrep/SKILL.md` | `~/.codex/hooks/session-start.sh` | Wrapper script (`trap EXIT`) |
+| Pi | `~/.pi/agent/skills/sgrep/README.md` | `~/.pi/extensions/sgrep-watch.ts` | `~/.pi/extensions/sgrep-watch.ts` |
+| OpenCode | TypeScript plugin | Plugin load | `SIGINT`/`SIGTERM` handlers |
 
 ## Claude Code plugin
 
@@ -11,13 +30,27 @@
 
 The plugin manages `sgrep watch` and surfaces local search results to the agent. Details: [plugins/sgrep/README.md](../plugins/sgrep/README.md).
 
-## Factory skill
+## Codex CLI plugin
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-skill.sh | sh
+./scripts/install-agents.sh codex
 ```
 
-Installs to `~/.factory/skills/sgrep/`. Restart Factory after install. Details: [.factory/skills/sgrep/SKILL.md](../.factory/skills/sgrep/SKILL.md).
+Codex has no session-end event, so watch cleanup requires a wrapper script:
+
+```bash
+./plugins/codex/sgrep-watch.sh [codex args...]
+```
+
+Details: [plugins/codex/README.md](../plugins/codex/README.md).
+
+## Pi plugin
+
+```bash
+./scripts/install-agents.sh pi
+```
+
+Pi has full lifecycle via extensions (`session_start` + `session_shutdown`). Details: [plugins/pi/README.md](../plugins/pi/README.md).
 
 ## OpenCode plugin
 
@@ -30,6 +63,14 @@ Add to your OpenCode configuration:
 ```
 
 Details: [plugins/opencode/README.md](../plugins/opencode/README.md).
+
+## Factory skill
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-skill.sh | sh
+```
+
+Installs to `~/.factory/skills/sgrep/`. Restart Factory after install. Details: [.factory/skills/sgrep/SKILL.md](../.factory/skills/sgrep/SKILL.md).
 
 ## Roll your own
 
