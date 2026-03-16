@@ -6,7 +6,7 @@ use super::scoring::{
 };
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -217,7 +217,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, PRF_TOP_K.max(fetch_limit));
 
-        let expanded_query = self.expand_query_with_prf(query, &matches);
+        let expanded_query = self.maybe_expand_query_with_prf(query, &matches);
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
 
@@ -253,6 +253,7 @@ impl SearchEngine {
             }
         }
 
+        self.apply_high_signal_field_bonus(&mut matches, query, &bm25f_index);
         Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
@@ -304,7 +305,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, PRF_TOP_K.max(fetch_limit));
 
-        let expanded_query = self.expand_query_with_prf(query, &matches);
+        let expanded_query = self.maybe_expand_query_with_prf(query, &matches);
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_binary = quantize_to_binary(&expanded_vec);
@@ -332,6 +333,7 @@ impl SearchEngine {
             }
         }
 
+        self.apply_high_signal_field_bonus(&mut matches, query, &bm25f_index);
         Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
@@ -391,7 +393,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, PRF_TOP_K.max(fetch_limit));
 
-        let expanded_query = self.expand_query_with_prf(query, &matches);
+        let expanded_query = self.maybe_expand_query_with_prf(query, &matches);
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_candidates = search_hnsw_candidates(
@@ -427,6 +429,7 @@ impl SearchEngine {
             }
         }
 
+        self.apply_high_signal_field_bonus(&mut matches, query, &bm25f_index);
         Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
@@ -480,7 +483,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, PRF_TOP_K.max(fetch_limit));
 
-        let expanded_query = self.expand_query_with_prf(query, &matches);
+        let expanded_query = self.maybe_expand_query_with_prf(query, &matches);
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
 
@@ -516,6 +519,7 @@ impl SearchEngine {
             }
         }
 
+        self.apply_high_signal_field_bonus(&mut matches, query, &bm25f_index);
         Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
@@ -578,7 +582,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, PRF_TOP_K.max(fetch_limit));
 
-        let expanded_query = self.expand_query_with_prf(query, &matches);
+        let expanded_query = self.maybe_expand_query_with_prf(query, &matches);
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_candidates = search_hnsw_candidates(
@@ -614,6 +618,7 @@ impl SearchEngine {
             }
         }
 
+        self.apply_high_signal_field_bonus(&mut matches, query, &bm25f_index);
         Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
@@ -672,7 +677,7 @@ impl SearchEngine {
 
         select_top_k(&mut matches, PRF_TOP_K.max(fetch_limit));
 
-        let expanded_query = self.expand_query_with_prf(query, &matches);
+        let expanded_query = self.maybe_expand_query_with_prf(query, &matches);
         if expanded_query != query {
             let expanded_vec = self.embedder.embed(&expanded_query)?;
             let expanded_binary = quantize_to_binary(&expanded_vec);
@@ -706,6 +711,7 @@ impl SearchEngine {
             }
         }
 
+        self.apply_high_signal_field_bonus(&mut matches, query, &bm25f_index);
         Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
@@ -741,14 +747,19 @@ impl SearchEngine {
         chunk: &CodeChunk,
         vector: &[f32],
         query_vec: &[f32],
-        _query: &str,
+        query: &str,
         bm25_raw: f32,
         bm25_normalized: f32,
         include_context: bool,
         weights: &Weights,
     ) -> SearchResult {
         let semantic = cosine_similarity(query_vec, vector);
-        let score = weights.semantic * semantic + weights.bm25 * bm25_normalized;
+        let symbol_overlap = self.local_symbol_overlap_score(chunk, query);
+        let symbol_lexical_bonus = 0.08 * bm25_normalized * (symbol_overlap / 0.06).clamp(0.0, 1.0);
+        let score = weights.semantic * semantic
+            + weights.bm25 * bm25_normalized
+            + symbol_overlap
+            + symbol_lexical_bonus;
 
         SearchResult {
             chunk: chunk.clone(),
@@ -759,11 +770,238 @@ impl SearchEngine {
         }
     }
 
-    fn apply_file_type_priority(results: &mut [SearchResult], priority: &FileTypePriority) {
+    pub(crate) fn local_symbol_overlap_score(&self, chunk: &CodeChunk, query: &str) -> f32 {
+        let graph = match self.graph.as_ref() {
+            Some(graph) => graph,
+            None => return 0.0,
+        };
+
+        let query_terms: HashSet<String> = fts::tokenize_query_stemmed(query).into_iter().collect();
+        if query_terms.is_empty() {
+            return 0.0;
+        }
+
+        let matched_terms: HashSet<String> = graph
+            .file_symbols
+            .get(&chunk.path)
+            .into_iter()
+            .flat_map(|ids| ids.iter())
+            .filter_map(|id| graph.symbols.get(id))
+            .filter(|symbol| {
+                symbol.start_line >= chunk.start_line && symbol.end_line <= chunk.end_line
+            })
+            .flat_map(|symbol| fts::tokenize_identifier_stemmed(&symbol.name).into_iter())
+            .filter(|term| query_terms.contains(term))
+            .collect();
+
+        if matched_terms.is_empty() {
+            0.0
+        } else {
+            0.06 * (matched_terms.len() as f32 / query_terms.len() as f32)
+        }
+    }
+
+    fn apply_high_signal_field_bonus(
+        &self,
+        results: &mut [SearchResult],
+        query: &str,
+        bm25f_index: &Bm25FIndex,
+    ) {
         for result in results.iter_mut() {
-            let multiplier = priority.multiplier(file_type::classify_path(&result.chunk.path));
+            result.score += self.high_signal_field_bonus(&result.chunk, query, bm25f_index);
+            result.score += self.doc_heading_bonus(&result.chunk, query, bm25f_index);
+        }
+    }
+
+    fn high_signal_field_bonus(
+        &self,
+        chunk: &CodeChunk,
+        query: &str,
+        bm25f_index: &Bm25FIndex,
+    ) -> f32 {
+        let query_terms: HashSet<String> = fts::tokenize_query_stemmed(query).into_iter().collect();
+        if query_terms.is_empty() || bm25f_index.num_docs == 0 {
+            return 0.0;
+        }
+
+        let mut field_terms: HashSet<String> =
+            fts::tokenize_identifier_stemmed(&chunk.path.to_string_lossy())
+                .into_iter()
+                .collect();
+        if let Some(graph) = self.graph.as_ref() {
+            for term in graph
+                .file_symbols
+                .get(&chunk.path)
+                .into_iter()
+                .flat_map(|ids| ids.iter())
+                .filter_map(|id| graph.symbols.get(id))
+                .filter(|symbol| {
+                    symbol.start_line >= chunk.start_line && symbol.end_line <= chunk.end_line
+                })
+                .flat_map(|symbol| fts::tokenize_identifier_stemmed(&symbol.name).into_iter())
+            {
+                field_terms.insert(term);
+            }
+        }
+
+        let mut idf_sum = 0.0;
+        let mut matched = 0usize;
+        for term in query_terms
+            .iter()
+            .filter(|term| field_terms.contains(*term))
+        {
+            let df = *bm25f_index.doc_freq.get(term.as_str()).unwrap_or(&0) as f32;
+            if df <= 0.0 {
+                continue;
+            }
+            let idf = ((bm25f_index.num_docs as f32 - df + 0.5) / (df + 0.5) + 1.0).ln();
+            idf_sum += idf;
+            matched += 1;
+        }
+
+        if matched == 0 {
+            return 0.0;
+        }
+
+        let avg_idf = idf_sum / matched as f32;
+        let coverage = matched as f32 / query_terms.len() as f32;
+        (0.025 * avg_idf * coverage).clamp(0.0, 0.08)
+    }
+
+    fn doc_heading_bonus(&self, chunk: &CodeChunk, query: &str, bm25f_index: &Bm25FIndex) -> f32 {
+        if file_type::classify_path(&chunk.path) != file_type::FileType::Documentation
+            || bm25f_index.num_docs == 0
+        {
+            return 0.0;
+        }
+
+        let query_terms: HashSet<String> = fts::tokenize_query_stemmed_base(query)
+            .into_iter()
+            .collect();
+        if query_terms.is_empty() {
+            return 0.0;
+        }
+
+        let heading_terms: HashSet<String> = chunk
+            .text
+            .lines()
+            .filter(|line| !line.starts_with("// File:"))
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                trimmed
+                    .strip_prefix('#')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .take(2)
+            .flat_map(|heading| fts::tokenize_stemmed(heading).into_iter())
+            .collect();
+        if heading_terms.is_empty() {
+            return 0.0;
+        }
+
+        let mut idf_sum = 0.0;
+        let mut matched = 0usize;
+        for term in query_terms
+            .iter()
+            .filter(|term| heading_terms.contains(*term))
+        {
+            let df = *bm25f_index.doc_freq.get(term.as_str()).unwrap_or(&0) as f32;
+            if df <= 0.0 {
+                continue;
+            }
+            let idf = ((bm25f_index.num_docs as f32 - df + 0.5) / (df + 0.5) + 1.0).ln();
+            idf_sum += idf;
+            matched += 1;
+        }
+        if matched == 0 {
+            return 0.0;
+        }
+
+        let avg_idf = idf_sum / matched as f32;
+        let coverage = matched as f32 / query_terms.len() as f32;
+        (0.035 * avg_idf * coverage).clamp(0.0, 0.08)
+    }
+
+    fn infer_query_intent(results: &[SearchResult]) -> file_type::QueryIntent {
+        let mut implementation_score = 0.0;
+        let mut documentation_score = 0.0;
+
+        for (rank, result) in results.iter().take(5).enumerate() {
+            let rank_weight = 1.0 / (rank as f32 + 1.0);
+            let score = result.score.max(0.0) * rank_weight;
+            match file_type::classify_path(&result.chunk.path) {
+                file_type::FileType::Implementation => implementation_score += score,
+                file_type::FileType::Test => implementation_score += score * 0.35,
+                file_type::FileType::Documentation => documentation_score += score,
+                file_type::FileType::Generated => {}
+            }
+        }
+
+        if documentation_score > implementation_score * 1.1 {
+            file_type::QueryIntent::Docs
+        } else if implementation_score > documentation_score * 1.05 {
+            file_type::QueryIntent::Code
+        } else {
+            file_type::QueryIntent::Neutral
+        }
+    }
+
+    fn apply_file_type_priority(results: &mut [SearchResult], priority: &FileTypePriority) {
+        let intent = Self::infer_query_intent(results);
+        for result in results.iter_mut() {
+            let multiplier =
+                priority.query_multiplier(file_type::classify_path(&result.chunk.path), intent);
             result.score *= multiplier;
         }
+    }
+
+    fn maybe_expand_query_with_prf(
+        &self,
+        original_query: &str,
+        top_results: &[SearchResult],
+    ) -> String {
+        if !Self::should_expand_with_prf(original_query, top_results) {
+            return original_query.to_string();
+        }
+
+        self.expand_query_with_prf(original_query, top_results)
+    }
+
+    pub(crate) fn should_expand_with_prf(query: &str, top_results: &[SearchResult]) -> bool {
+        let has_precise_token =
+            query
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|token| {
+                    token.len() >= 2
+                        && (token
+                            .chars()
+                            .any(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                            || token.contains('_'))
+                });
+        let trimmed_query = query.trim_end_matches(|c: char| {
+            matches!(c, '.' | '!' | '?' | ',' | ';' | ':') || c.is_whitespace()
+        });
+        let has_literal_marker = trimmed_query.chars().any(|c| matches!(c, '"' | '\'' | '/'))
+            || trimmed_query.contains('.');
+        if has_precise_token || has_literal_marker {
+            return false;
+        }
+
+        let query_terms = fts::tokenize_query_stemmed_base(query);
+        let compact_query = query_terms.len() <= 4;
+        let top_score = top_results
+            .first()
+            .map(|result| result.score)
+            .unwrap_or(0.0);
+        let reference_score = top_results
+            .get(2)
+            .or_else(|| top_results.last())
+            .map(|result| result.score)
+            .unwrap_or(0.0);
+        let confident_ranking = top_score >= 0.28 && (top_score - reference_score) >= 0.03;
+
+        !(compact_query && confident_ranking)
     }
 
     fn expand_query_with_prf(&self, original_query: &str, top_results: &[SearchResult]) -> String {

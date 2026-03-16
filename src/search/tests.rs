@@ -622,6 +622,37 @@ fn graph_stats_with_graph() {
 }
 
 #[test]
+fn local_symbol_overlap_score_uses_chunk_local_symbols() {
+    use crate::graph::{CodeGraph, Symbol, SymbolKind};
+
+    let embedder = Arc::new(MockEmbedder);
+    let mut engine = SearchEngine::new(embedder);
+    let chunk = make_chunk("fn render_json() {}", "rust", "src/output/mod.rs");
+
+    let mut graph = CodeGraph::new();
+    graph.add_symbol(Symbol {
+        id: Uuid::new_v4(),
+        name: "JsonResponse".to_string(),
+        qualified_name: "output::JsonResponse".to_string(),
+        kind: SymbolKind::Struct,
+        file_path: PathBuf::from("src/output/mod.rs"),
+        start_line: 1,
+        end_line: 10,
+        language: "rust".to_string(),
+        signature: "struct JsonResponse".to_string(),
+        parent_id: None,
+        chunk_id: None,
+    });
+    engine.set_graph(graph);
+
+    assert!(engine.local_symbol_overlap_score(&chunk, "json response") > 0.0);
+    assert_eq!(
+        engine.local_symbol_overlap_score(&chunk, "authentication cache"),
+        0.0
+    );
+}
+
+#[test]
 fn cosine_similarity_identical_vectors() {
     let v1 = vec![1.0, 0.0, 0.0, 0.0];
     let similarity = cosine_similarity(&v1, &v1);
@@ -642,6 +673,89 @@ fn cosine_similarity_opposite_vectors() {
     let v2 = vec![-1.0, 0.0, 0.0, 0.0];
     let similarity = cosine_similarity(&v1, &v2);
     assert!((similarity + 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn should_expand_with_prf_skips_precise_queries() {
+    let top_results = vec![SearchResult {
+        chunk: make_chunk("fn test() {}", "rust", "src/test.rs"),
+        score: 0.35,
+        semantic_score: 0.35,
+        bm25_score: 1.0,
+        show_full_context: false,
+    }];
+
+    assert!(!SearchEngine::should_expand_with_prf(
+        "where is the JSON output for BM25 results?",
+        &top_results,
+    ));
+    assert!(!SearchEngine::should_expand_with_prf(
+        "find MmapIndex in src/store/mmap.rs",
+        &top_results,
+    ));
+    assert!(SearchEngine::should_expand_with_prf(
+        "where is retry logic implemented.",
+        &top_results,
+    ));
+}
+
+#[test]
+fn should_expand_with_prf_uses_ranking_confidence_for_compact_queries() {
+    let strong_results = vec![
+        SearchResult {
+            chunk: make_chunk("fn a() {}", "rust", "src/a.rs"),
+            score: 0.34,
+            semantic_score: 0.34,
+            bm25_score: 1.0,
+            show_full_context: false,
+        },
+        SearchResult {
+            chunk: make_chunk("fn b() {}", "rust", "src/b.rs"),
+            score: 0.27,
+            semantic_score: 0.27,
+            bm25_score: 0.7,
+            show_full_context: false,
+        },
+        SearchResult {
+            chunk: make_chunk("fn c() {}", "rust", "src/c.rs"),
+            score: 0.24,
+            semantic_score: 0.24,
+            bm25_score: 0.6,
+            show_full_context: false,
+        },
+    ];
+    assert!(!SearchEngine::should_expand_with_prf(
+        "near duplicate matches suppressed",
+        &strong_results,
+    ));
+
+    let broad_results = vec![
+        SearchResult {
+            chunk: make_chunk("fn a() {}", "rust", "src/a.rs"),
+            score: 0.25,
+            semantic_score: 0.25,
+            bm25_score: 0.8,
+            show_full_context: false,
+        },
+        SearchResult {
+            chunk: make_chunk("fn b() {}", "rust", "src/b.rs"),
+            score: 0.24,
+            semantic_score: 0.24,
+            bm25_score: 0.7,
+            show_full_context: false,
+        },
+        SearchResult {
+            chunk: make_chunk("fn c() {}", "rust", "src/c.rs"),
+            score: 0.23,
+            semantic_score: 0.23,
+            bm25_score: 0.6,
+            show_full_context: false,
+        },
+    ];
+    assert!(SearchEngine::should_expand_with_prf(
+        "retry logic background failures",
+        &broad_results,
+    ));
 }
 
 #[test]

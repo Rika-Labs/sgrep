@@ -16,6 +16,20 @@ static STOPWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     .collect()
 });
 
+static QUERY_STOPWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    [
+        "implement",
+        "configur",
+        "serializ",
+        "document",
+        "explain",
+        "file",
+        "fil",
+    ]
+    .into_iter()
+    .collect()
+});
+
 pub fn extract_keywords(query: &str) -> Vec<String> {
     query
         .split(|c: char| !c.is_alphanumeric())
@@ -102,9 +116,152 @@ pub fn stem_word(word: &str) -> String {
     word
 }
 
+fn split_identifier_parts(token: &str) -> Vec<&str> {
+    let token = token.trim_matches('_');
+    if token.is_empty() {
+        return Vec::new();
+    }
+
+    let chars: Vec<(usize, char)> = token.char_indices().collect();
+    if chars.len() <= 1 {
+        return vec![token];
+    }
+
+    let mut parts = Vec::new();
+    let mut start = 0;
+
+    for i in 1..chars.len() {
+        let prev = chars[i - 1].1;
+        let curr = chars[i].1;
+        let next = chars.get(i + 1).map(|(_, ch)| *ch);
+        let boundary = (prev.is_ascii_lowercase() && curr.is_ascii_uppercase())
+            || (prev.is_ascii_digit() && curr.is_ascii_uppercase())
+            || (prev.is_ascii_uppercase()
+                && curr.is_ascii_uppercase()
+                && next.is_some_and(|ch| ch.is_ascii_lowercase()));
+
+        if boundary {
+            parts.push(&token[start..chars[i].0]);
+            start = chars[i].0;
+        }
+    }
+
+    parts.push(&token[start..]);
+    parts
+}
+
 /// Tokenize text with stemming applied
 pub fn tokenize_stemmed(text: &str) -> Vec<String> {
     tokenize(text).into_iter().map(|t| stem_word(&t)).collect()
+}
+
+pub fn tokenize_identifier_stemmed(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut seen = HashSet::new();
+
+    for raw_token in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        let raw_token = raw_token.trim();
+        if raw_token.len() < 2 {
+            continue;
+        }
+
+        let canonical = raw_token.to_lowercase();
+        let canonical_stem = stem_word(&canonical);
+        if seen.insert(canonical_stem.clone()) {
+            tokens.push(canonical_stem);
+        }
+
+        for segment in raw_token.split('_').filter(|segment| !segment.is_empty()) {
+            for part in split_identifier_parts(segment) {
+                let part = part.to_lowercase();
+                if part.len() >= 2 {
+                    let stemmed = stem_word(&part);
+                    if seen.insert(stemmed.clone()) {
+                        tokens.push(stemmed);
+                    }
+                }
+            }
+        }
+    }
+
+    tokens
+}
+
+fn query_stem_variants(token: &str) -> Vec<String> {
+    let token = token.to_lowercase();
+    let mut variants = Vec::new();
+    let mut seen = HashSet::new();
+
+    let stem = stem_word(&token);
+    if seen.insert(stem.clone()) {
+        variants.push(stem);
+    }
+
+    for suffix_len in [3usize, 2usize] {
+        if token.len() <= suffix_len + 2 {
+            continue;
+        }
+        let suffix = &token[token.len() - suffix_len..];
+        if !matches!(suffix, "ing" | "ed") {
+            continue;
+        }
+
+        let stripped = token[..token.len() - suffix_len].to_string();
+        if seen.insert(stripped.clone()) {
+            variants.push(stripped.clone());
+        }
+
+        if stripped.len() >= 2 {
+            let chars: Vec<char> = stripped.chars().collect();
+            let last = chars[chars.len() - 1];
+            let prev = chars[chars.len() - 2];
+            if last == prev && !matches!(last, 'a' | 'e' | 'i' | 'o' | 'u') {
+                let trimmed = stripped[..stripped.len() - last.len_utf8()].to_string();
+                if seen.insert(trimmed.clone()) {
+                    variants.push(trimmed);
+                }
+            }
+        }
+
+        let restored = format!("{}e", stripped);
+        if seen.insert(restored.clone()) {
+            variants.push(restored);
+        }
+    }
+
+    variants
+}
+
+fn is_query_noise_token(token: &str) -> bool {
+    if STOPWORDS.contains(token) || QUERY_STOPWORDS.contains(token) {
+        return true;
+    }
+
+    let stem = stem_word(token);
+    if QUERY_STOPWORDS.contains(stem.as_str()) {
+        return true;
+    }
+
+    token
+        .strip_suffix('e')
+        .is_some_and(|trimmed| QUERY_STOPWORDS.contains(trimmed))
+}
+
+pub fn tokenize_query_stemmed_base(text: &str) -> Vec<String> {
+    tokenize(text)
+        .into_iter()
+        .map(|t| stem_word(&t))
+        .filter(|token| !is_query_noise_token(token))
+        .collect()
+}
+
+/// Tokenize a query with stemming and extra filtering for generic action words.
+pub fn tokenize_query_stemmed(text: &str) -> Vec<String> {
+    tokenize(text)
+        .into_iter()
+        .flat_map(|t| query_stem_variants(&t))
+        .filter(|token| !is_query_noise_token(token))
+        .collect()
 }
 
 /// BM25 index for a collection of documents
@@ -176,7 +333,7 @@ impl Bm25Index {
             return 0.0;
         }
 
-        let query_tokens = tokenize(query);
+        let query_tokens = tokenize_query_stemmed(query);
         let doc_len = self.doc_lengths[doc_idx] as f32;
         let tf_map = &self.term_freqs[doc_idx];
 
@@ -302,8 +459,14 @@ impl Bm25FIndex {
 
             // Helper to add tokens with a boost factor
             // Use stemmed tokens so "extraction" and "extractor" map to same root
-            let mut add_tokens = |text: &str, boost: usize| {
-                for token in tokenize_stemmed(text) {
+            let mut add_tokens = |text: &str, boost: usize, split_identifiers: bool| {
+                let field_tokens = if split_identifiers {
+                    tokenize_identifier_stemmed(text)
+                } else {
+                    tokenize_stemmed(text)
+                };
+
+                for token in field_tokens {
                     *tf.entry(token.clone()).or_insert(0) += boost;
                     if seen.insert(token.clone()) {
                         *doc_freq.entry(token).or_insert(0) += 1;
@@ -312,17 +475,17 @@ impl Bm25FIndex {
             };
 
             // Add content tokens with no boost (1x)
-            add_tokens(&doc.content, 1);
+            add_tokens(&doc.content, 1, false);
 
             // Add path tokens with path boost
-            add_tokens(&doc.path, BM25F_PATH_BOOST);
+            add_tokens(&doc.path, BM25F_PATH_BOOST, true);
 
             // Add filename tokens with filename boost (highest priority)
-            add_tokens(&doc.filename, BM25F_FILENAME_BOOST);
+            add_tokens(&doc.filename, BM25F_FILENAME_BOOST, true);
 
             // Add symbol tokens with symbol boost
             for symbol in &doc.symbols {
-                add_tokens(symbol, BM25F_SYMBOL_BOOST);
+                add_tokens(symbol, BM25F_SYMBOL_BOOST, true);
             }
 
             // Effective document length is sum of all boosted term frequencies
@@ -356,8 +519,8 @@ impl Bm25FIndex {
             return 0.0;
         }
 
-        // Stem query tokens to match stemmed index
-        let query_tokens = tokenize_stemmed(query);
+        // Stem query tokens to match stemmed index while dropping generic action words.
+        let query_tokens = tokenize_query_stemmed(query);
         let doc_len = self.doc_lengths[doc_idx] as f32;
         let tf_map = &self.term_freqs[doc_idx];
 
@@ -736,6 +899,21 @@ mod tests {
     }
 
     #[test]
+    fn test_bm25f_identifier_subwords_help_symbol_lookup() {
+        let docs = vec![
+            Bm25FDocument::new("struct Response {}", Path::new("src/search/results.rs"))
+                .with_symbols(vec!["JsonResponse".to_string()]),
+            Bm25FDocument::new("struct SearchResult {}", Path::new("src/search/results.rs"))
+                .with_symbols(vec!["SearchResult".to_string()]),
+        ];
+        let index = Bm25FIndex::build(&docs);
+
+        let score_json = index.score("json output", 0);
+        let score_other = index.score("json output", 1);
+        assert!(score_json > score_other);
+    }
+
+    #[test]
     fn test_build_bm25f_index_from_chunks() {
         let chunk1 = CodeChunk {
             id: Uuid::new_v4(),
@@ -806,6 +984,38 @@ mod tests {
         let tokens = tokenize_stemmed("extraction extractor extracting");
         assert!(tokens.iter().all(|t| t == "extract"));
         assert_eq!(tokens.len(), 3);
+    }
+
+    #[test]
+    fn test_tokenize_identifier_stemmed_splits_high_signal_identifiers() {
+        let tokens = tokenize_identifier_stemmed("JsonResponse Bm25FIndex MmapIndex");
+        assert!(tokens.contains(&"jsonresponse".to_string()));
+        assert!(tokens.contains(&"json".to_string()));
+        assert!(tokens.contains(&"response".to_string()));
+        assert!(tokens.contains(&"bm25findex".to_string()));
+        assert!(tokens.contains(&"bm25".to_string()));
+        assert!(tokens.contains(&"index".to_string()));
+        assert!(tokens.contains(&"mmap".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_query_stemmed_filters_generic_query_words() {
+        let tokens = tokenize_query_stemmed("where is JSON output serialized in which file");
+        assert!(tokens.contains(&"json".to_string()));
+        assert!(tokens.contains(&"output".to_string()));
+        assert!(!tokens.contains(&"serializ".to_string()));
+        assert!(!tokens.contains(&"serialize".to_string()));
+        assert!(!tokens.contains(&"file".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_query_stemmed_adds_useful_suffix_variants() {
+        let tokens = tokenize_query_stemmed("bm25 scoring cached");
+        assert!(tokens.contains(&"bm25".to_string()));
+        assert!(tokens.contains(&"scor".to_string()));
+        assert!(tokens.contains(&"score".to_string()));
+        assert!(tokens.contains(&"cach".to_string()));
+        assert!(tokens.contains(&"cache".to_string()));
     }
 
     #[test]

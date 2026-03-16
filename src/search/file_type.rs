@@ -17,6 +17,13 @@ const TEST_PENALTY: f32 = 0.8;
 const DOC_PENALTY: f32 = 0.7;
 const GENERATED_PENALTY: f32 = 0.5;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryIntent {
+    Code,
+    Docs,
+    Neutral,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileTypePriority;
 
@@ -33,6 +40,24 @@ impl FileTypePriority {
             FileType::Test => TEST_PENALTY,
             FileType::Documentation => DOC_PENALTY,
             FileType::Generated => GENERATED_PENALTY,
+        }
+    }
+
+    pub fn query_multiplier(&self, file_type: FileType, intent: QueryIntent) -> f32 {
+        match intent {
+            QueryIntent::Code => match file_type {
+                FileType::Implementation => 1.0,
+                FileType::Test => 0.6,
+                FileType::Documentation => 0.6,
+                FileType::Generated => GENERATED_PENALTY,
+            },
+            QueryIntent::Docs => match file_type {
+                FileType::Implementation => 0.95,
+                FileType::Test => 0.65,
+                FileType::Documentation => 1.15,
+                FileType::Generated => GENERATED_PENALTY,
+            },
+            QueryIntent::Neutral => self.multiplier(file_type),
         }
     }
 }
@@ -301,6 +326,24 @@ mod tests {
 
         let gen_score = apply_priority(1.0, Path::new("vendor/lib.rs"), &priority);
         assert!((gen_score - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn query_multiplier_prefers_docs_for_docs_intent() {
+        let priority = FileTypePriority;
+        assert!(
+            priority.query_multiplier(FileType::Documentation, QueryIntent::Docs)
+                > priority.query_multiplier(FileType::Implementation, QueryIntent::Docs)
+        );
+    }
+
+    #[test]
+    fn query_multiplier_penalizes_tests_for_code_intent() {
+        let priority = FileTypePriority;
+        assert!(
+            priority.query_multiplier(FileType::Implementation, QueryIntent::Code)
+                > priority.query_multiplier(FileType::Test, QueryIntent::Code)
+        );
     }
 
     #[test]
