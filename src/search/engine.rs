@@ -253,7 +253,7 @@ impl SearchEngine {
             }
         }
 
-        Self::apply_file_type_priority(&mut matches, &options.file_type_priority, query);
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
@@ -332,7 +332,7 @@ impl SearchEngine {
             }
         }
 
-        Self::apply_file_type_priority(&mut matches, &options.file_type_priority, query);
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
@@ -427,7 +427,7 @@ impl SearchEngine {
             }
         }
 
-        Self::apply_file_type_priority(&mut matches, &options.file_type_priority, query);
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup(matches, index, &options);
         Ok(matches)
@@ -516,7 +516,7 @@ impl SearchEngine {
             }
         }
 
-        Self::apply_file_type_priority(&mut matches, &options.file_type_priority, query);
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
@@ -614,7 +614,7 @@ impl SearchEngine {
             }
         }
 
-        Self::apply_file_type_priority(&mut matches, &options.file_type_priority, query);
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
@@ -706,7 +706,7 @@ impl SearchEngine {
             }
         }
 
-        Self::apply_file_type_priority(&mut matches, &options.file_type_priority, query);
+        Self::apply_file_type_priority(&mut matches, &options.file_type_priority);
         select_top_k(&mut matches, fetch_limit);
         let matches = self.apply_dedup_mmap(matches, index, &options);
         Ok(matches)
@@ -759,14 +759,35 @@ impl SearchEngine {
         }
     }
 
-    fn apply_file_type_priority(
-        results: &mut [SearchResult],
-        priority: &FileTypePriority,
-        query: &str,
-    ) {
+    fn infer_query_intent(results: &[SearchResult]) -> file_type::QueryIntent {
+        let mut implementation_score = 0.0;
+        let mut documentation_score = 0.0;
+
+        for (rank, result) in results.iter().take(5).enumerate() {
+            let rank_weight = 1.0 / (rank as f32 + 1.0);
+            let score = result.score.max(0.0) * rank_weight;
+            match file_type::classify_path(&result.chunk.path) {
+                file_type::FileType::Implementation => implementation_score += score,
+                file_type::FileType::Test => implementation_score += score * 0.35,
+                file_type::FileType::Documentation => documentation_score += score,
+                file_type::FileType::Generated => {}
+            }
+        }
+
+        if documentation_score > implementation_score * 1.1 {
+            file_type::QueryIntent::Docs
+        } else if implementation_score > documentation_score * 1.05 {
+            file_type::QueryIntent::Code
+        } else {
+            file_type::QueryIntent::Neutral
+        }
+    }
+
+    fn apply_file_type_priority(results: &mut [SearchResult], priority: &FileTypePriority) {
+        let intent = Self::infer_query_intent(results);
         for result in results.iter_mut() {
             let multiplier =
-                priority.query_multiplier(file_type::classify_path(&result.chunk.path), query);
+                priority.query_multiplier(file_type::classify_path(&result.chunk.path), intent);
             result.score *= multiplier;
         }
     }
@@ -776,14 +797,14 @@ impl SearchEngine {
         original_query: &str,
         top_results: &[SearchResult],
     ) -> String {
-        if !Self::should_expand_with_prf(original_query) {
+        if !Self::should_expand_with_prf(original_query, top_results) {
             return original_query.to_string();
         }
 
         self.expand_query_with_prf(original_query, top_results)
     }
 
-    pub(crate) fn should_expand_with_prf(query: &str) -> bool {
+    pub(crate) fn should_expand_with_prf(query: &str, top_results: &[SearchResult]) -> bool {
         let has_precise_token =
             query
                 .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -795,17 +816,24 @@ impl SearchEngine {
                             || token.contains('_'))
                 });
         let has_literal_marker = query.chars().any(|c| matches!(c, '"' | '\'' | '/' | '.'));
+        if has_precise_token || has_literal_marker {
+            return false;
+        }
 
-        let lower = query.to_lowercase();
-        let keyword_count = fts::extract_keywords(query).len();
-        let looks_like_locator_query = lower.starts_with("where is")
-            || lower.starts_with("where are")
-            || lower.starts_with("which file")
-            || lower.starts_with("which document");
+        let query_terms = fts::tokenize_query_stemmed(query);
+        let compact_query = query_terms.len() <= 4;
+        let top_score = top_results
+            .first()
+            .map(|result| result.score)
+            .unwrap_or(0.0);
+        let reference_score = top_results
+            .get(2)
+            .or_else(|| top_results.last())
+            .map(|result| result.score)
+            .unwrap_or(0.0);
+        let confident_ranking = top_score >= 0.28 && (top_score - reference_score) >= 0.03;
 
-        !(has_precise_token
-            || has_literal_marker
-            || (looks_like_locator_query && keyword_count <= 6))
+        !(compact_query && confident_ranking)
     }
 
     fn expand_query_with_prf(&self, original_query: &str, top_results: &[SearchResult]) -> String {

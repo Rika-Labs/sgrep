@@ -646,24 +646,80 @@ fn cosine_similarity_opposite_vectors() {
 
 #[test]
 fn should_expand_with_prf_skips_precise_queries() {
+    let top_results = vec![SearchResult {
+        chunk: make_chunk("fn test() {}", "rust", "src/test.rs"),
+        score: 0.35,
+        semantic_score: 0.35,
+        bm25_score: 1.0,
+        show_full_context: false,
+    }];
+
     assert!(!SearchEngine::should_expand_with_prf(
-        "where is the JSON output for BM25 results?"
+        "where is the JSON output for BM25 results?",
+        &top_results,
     ));
     assert!(!SearchEngine::should_expand_with_prf(
-        "find MmapIndex in src/store/mmap.rs"
-    ));
-    assert!(!SearchEngine::should_expand_with_prf(
-        "where are near-duplicate matches suppressed?"
+        "find MmapIndex in src/store/mmap.rs",
+        &top_results,
     ));
 }
 
 #[test]
-fn should_expand_with_prf_allows_broad_queries() {
-    assert!(SearchEngine::should_expand_with_prf(
-        "where do we handle authentication for users"
+fn should_expand_with_prf_uses_ranking_confidence_for_compact_queries() {
+    let strong_results = vec![
+        SearchResult {
+            chunk: make_chunk("fn a() {}", "rust", "src/a.rs"),
+            score: 0.34,
+            semantic_score: 0.34,
+            bm25_score: 1.0,
+            show_full_context: false,
+        },
+        SearchResult {
+            chunk: make_chunk("fn b() {}", "rust", "src/b.rs"),
+            score: 0.27,
+            semantic_score: 0.27,
+            bm25_score: 0.7,
+            show_full_context: false,
+        },
+        SearchResult {
+            chunk: make_chunk("fn c() {}", "rust", "src/c.rs"),
+            score: 0.24,
+            semantic_score: 0.24,
+            bm25_score: 0.6,
+            show_full_context: false,
+        },
+    ];
+    assert!(!SearchEngine::should_expand_with_prf(
+        "near duplicate matches suppressed",
+        &strong_results,
     ));
+
+    let broad_results = vec![
+        SearchResult {
+            chunk: make_chunk("fn a() {}", "rust", "src/a.rs"),
+            score: 0.25,
+            semantic_score: 0.25,
+            bm25_score: 0.8,
+            show_full_context: false,
+        },
+        SearchResult {
+            chunk: make_chunk("fn b() {}", "rust", "src/b.rs"),
+            score: 0.24,
+            semantic_score: 0.24,
+            bm25_score: 0.7,
+            show_full_context: false,
+        },
+        SearchResult {
+            chunk: make_chunk("fn c() {}", "rust", "src/c.rs"),
+            score: 0.23,
+            semantic_score: 0.23,
+            bm25_score: 0.6,
+            show_full_context: false,
+        },
+    ];
     assert!(SearchEngine::should_expand_with_prf(
-        "show me code related to retry logic and background job failures"
+        "retry logic background failures",
+        &broad_results,
     ));
 }
 
