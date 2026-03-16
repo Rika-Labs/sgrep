@@ -1,6 +1,6 @@
 [package]
 name = "sgrep"
-version = "2.0.6"
+version = "2.0.7"
 edition = "2021"
 rust-version = "1.75"
 description = "Lightning-fast local-first semantic code search"
@@ -10,7 +10,8 @@ include = [
     "Cargo.toml",
     "Cargo.lock",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
 ]
 
 
