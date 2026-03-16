@@ -1,0 +1,20 @@
+{
+  "name": "pi-sgrep",
+  "version": "1.0.0",
+  "description": "sgrep semantic code search integration for Pi — auto-indexes and watches your repo during sessions.",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "Apache-2.0",
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  }
+}

@@ -1,34 +1,25 @@
 # sgrep Pi Plugin
 
-Integrates [sgrep](https://github.com/rika-labs/sgrep) semantic code search with [Pi](https://github.com/pi-ai/pi).
+Integrates [sgrep](https://github.com/rika-labs/sgrep) semantic code search with [Pi](https://github.com/badlogic/pi-mono).
 
 ## Install
 
-```bash
-./scripts/install-agents.sh pi
+In Pi, run:
+
+```
+/install https://github.com/rika-labs/sgrep --subdir plugins/pi
 ```
 
-This installs:
-- Skill file at `~/.pi/agent/skills/sgrep/README.md` (no YAML frontmatter)
-- Extension at `~/.pi/extensions/sgrep-watch.ts`
+Or add to `~/.pi/agent/settings.json`:
 
-## Watch Lifecycle
-
-Pi has full lifecycle support via extensions (`session_start` and `session_shutdown` events).
-
-The extension:
-
-1. On `session_start`: runs `sgrep index`, then spawns `sgrep watch` in detached mode
-2. On `session_shutdown`: kills the watch process by stored PID
-
-## Manual watch
-
-```bash
-# Terminal 1
-sgrep watch
-
-# Terminal 2
-pi
-
-# When done, Ctrl-C the watch in Terminal 1
+```json
+{
+  "packages": [
+    "https://github.com/rika-labs/sgrep?subdir=plugins/pi"
+  ]
+}
 ```
+
+The plugin provides:
+- **Skill** at `skills/sgrep/SKILL.md` — teaches Pi how to use sgrep commands
+- **Extension** at `extensions/sgrep-watch/index.ts` — auto-indexes on startup, watches for changes, cleans up on shutdown

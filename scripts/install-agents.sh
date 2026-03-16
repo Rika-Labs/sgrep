@@ -150,13 +150,35 @@ install_codex() {
 install_pi() {
   echo "=== Pi ==="
 
-  mkdir -p "$HOME/.pi/agent/skills/sgrep"
-  fetch_skill_no_frontmatter "$HOME/.pi/agent/skills/sgrep/README.md"
-  echo "  skill: ~/.pi/agent/skills/sgrep/README.md (no frontmatter)"
+  local PI_PKG="https://github.com/$REPO?subdir=plugins/pi"
+  local settings="$HOME/.pi/agent/settings.json"
 
-  mkdir -p "$HOME/.pi/extensions"
-  fetch_file "plugins/pi/extensions/sgrep-watch.ts" "$HOME/.pi/extensions/sgrep-watch.ts"
-  echo "  ext:   ~/.pi/extensions/sgrep-watch.ts"
+  if [ -f "$settings" ]; then
+    local has_pkg
+    has_pkg=$(python3 -c "
+import json
+d = json.load(open('$settings'))
+pkgs = d.get('packages', [])
+print('yes' if any('sgrep' in p for p in pkgs) else 'no')
+" 2>/dev/null || echo "no")
+
+    if [ "$has_pkg" = "yes" ]; then
+      echo "  package: already in $settings"
+    else
+      python3 -c "
+import json
+f = '$settings'
+d = json.load(open(f))
+d.setdefault('packages', []).append('$PI_PKG')
+json.dump(d, open(f, 'w'), indent=2)
+print('  package: added to $settings')
+"
+    fi
+  else
+    echo "  Pi settings not found at $settings"
+    echo "  Add manually in Pi: /install $PI_PKG"
+  fi
+  echo "  Restart Pi to load the plugin."
   echo ""
 }
 

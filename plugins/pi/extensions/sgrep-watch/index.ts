@@ -1,3 +1,4 @@
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { execSync } from "node:child_process";
 
 let watchPid: number | null = null;
@@ -11,15 +12,12 @@ function isSgrepInstalled(): boolean {
   }
 }
 
-function runIndex(): void {
+function startWatch(): void {
   try {
     execSync("sgrep index", { stdio: "ignore" });
   } catch {
     // Index failure is non-fatal
   }
-}
-
-function startWatch(): void {
   try {
     const output = execSync("sgrep watch --detach", { encoding: "utf-8" });
     const match = output.match(/\d+/);
@@ -42,14 +40,16 @@ function stopWatch(): void {
   }
 }
 
-export function session_start(): void {
+export default function sgrepWatch(context: ExtensionContext) {
   if (!isSgrepInstalled()) {
-    return;
+    return {};
   }
-  runIndex();
-  startWatch();
-}
 
-export function session_shutdown(): void {
-  stopWatch();
+  startWatch();
+
+  return {
+    shutdown() {
+      stopWatch();
+    },
+  };
 }

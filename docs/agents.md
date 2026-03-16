@@ -25,7 +25,7 @@ Or from a local clone:
 |---|---|---|---|
 | Claude Code | `~/.claude/skills/sgrep/SKILL.md` | `SessionStart` hook | `Stop` hook |
 | Codex CLI | `~/.agents/skills/sgrep/SKILL.md` | `~/.codex/hooks/session-start.sh` | Wrapper script (`trap EXIT`) |
-| Pi | `~/.pi/agent/skills/sgrep/README.md` | `~/.pi/extensions/sgrep-watch.ts` | `~/.pi/extensions/sgrep-watch.ts` |
+| Pi | Pi package (skill + extension) | Extension `default()` | Extension `shutdown()` |
 | OpenCode | TypeScript plugin | Plugin load | `SIGINT`/`SIGTERM` handlers |
 
 ## Claude Code plugin
@@ -53,11 +53,19 @@ Details: [plugins/codex/README.md](../plugins/codex/README.md).
 
 ## Pi plugin
 
+Install as a Pi package (in Pi, run):
+
+```
+/install https://github.com/rika-labs/sgrep --subdir plugins/pi
+```
+
+Or via the installer (adds the package to `~/.pi/agent/settings.json`):
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rika-labs/sgrep/main/scripts/install-agents.sh | sh -s pi
 ```
 
-Pi has full lifecycle via extensions (`session_start` + `session_shutdown`). Details: [plugins/pi/README.md](../plugins/pi/README.md).
+The package provides a skill and an extension that auto-indexes on startup and watches for changes. Details: [plugins/pi/README.md](../plugins/pi/README.md).
 
 ## OpenCode plugin
 
