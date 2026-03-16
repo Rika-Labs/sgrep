@@ -809,6 +809,7 @@ impl SearchEngine {
     ) {
         for result in results.iter_mut() {
             result.score += self.high_signal_field_bonus(&result.chunk, query, bm25f_index);
+            result.score += self.doc_heading_bonus(&result.chunk, query, bm25f_index);
         }
     }
 
@@ -865,6 +866,61 @@ impl SearchEngine {
         let avg_idf = idf_sum / matched as f32;
         let coverage = matched as f32 / query_terms.len() as f32;
         (0.025 * avg_idf * coverage).clamp(0.0, 0.08)
+    }
+
+    fn doc_heading_bonus(&self, chunk: &CodeChunk, query: &str, bm25f_index: &Bm25FIndex) -> f32 {
+        if file_type::classify_path(&chunk.path) != file_type::FileType::Documentation
+            || bm25f_index.num_docs == 0
+        {
+            return 0.0;
+        }
+
+        let query_terms: HashSet<String> = fts::tokenize_query_stemmed_base(query)
+            .into_iter()
+            .collect();
+        if query_terms.is_empty() {
+            return 0.0;
+        }
+
+        let heading_terms: HashSet<String> = chunk
+            .text
+            .lines()
+            .filter(|line| !line.starts_with("// File:"))
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                trimmed
+                    .strip_prefix('#')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .take(2)
+            .flat_map(|heading| fts::tokenize_stemmed(heading).into_iter())
+            .collect();
+        if heading_terms.is_empty() {
+            return 0.0;
+        }
+
+        let mut idf_sum = 0.0;
+        let mut matched = 0usize;
+        for term in query_terms
+            .iter()
+            .filter(|term| heading_terms.contains(*term))
+        {
+            let df = *bm25f_index.doc_freq.get(term.as_str()).unwrap_or(&0) as f32;
+            if df <= 0.0 {
+                continue;
+            }
+            let idf = ((bm25f_index.num_docs as f32 - df + 0.5) / (df + 0.5) + 1.0).ln();
+            idf_sum += idf;
+            matched += 1;
+        }
+        if matched == 0 {
+            return 0.0;
+        }
+
+        let avg_idf = idf_sum / matched as f32;
+        let coverage = matched as f32 / query_terms.len() as f32;
+        (0.035 * avg_idf * coverage).clamp(0.0, 0.08)
     }
 
     fn infer_query_intent(results: &[SearchResult]) -> file_type::QueryIntent {
