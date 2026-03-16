@@ -60,3 +60,6 @@ It rebuilds the release binary, force-reindexes the current repo in offline mode
   - query-aware file-type prioritization so code-seeking queries prefer implementation files while docs-seeking queries still surface docs
   - stronger path/symbol overlap signals for module/file discovery queries
   - lexical candidate blending for large indexes so ANN shortlists do not hide strong exact/path matches
+- Kept: replaced hardcoded English phrase checks with generic PRF gating based on query structure plus ranking confidence, and inferred file-type intent from top candidates instead of string-matching the query. This preserved the best quality at 79.33 while making ranking less brittle across repos.
+- Discarded: broad lexical shifts hurt quality or latency, including query-adaptive fusion weights, larger rerank windows, full-content identifier subword expansion, and naive multi-chunk file-evidence bonuses.
+- Kept: expanded BM25F identifier tokenization only for high-signal lexical fields (filename/path/symbols), not all content. This improved module-discovery style code queries and raised quality_mrr to 81.33 without introducing benchmark-specific strings.
