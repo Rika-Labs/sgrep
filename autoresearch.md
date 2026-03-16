@@ -49,10 +49,12 @@ It rebuilds the release binary, force-reindexes the current repo in offline mode
 - 25 queries total
 - Code answers: source files under `src/`
 - Docs answers: files under `docs/` and `plugins/sgrep/`
+- Search space is intentionally restricted to `src/**/*`, `docs/**/*`, and `plugins/**/*` so the benchmark is not polluted by its own harness files (`benchmarks/search_quality/*`, `autoresearch*`)
 - Metric: mean reciprocal rank over accepted files in top 10
 
 ## What's Been Tried
 - Initial benchmark harness created for quality-first autoresearch
+- Corrected the benchmark search space to `src/**/*`, `docs/**/*`, and `plugins/**/*` after the first run revealed benchmark/evaluator files polluting results
 - Candidate improvement areas identified before baseline:
   - query-intent-aware weighting instead of fixed semantic/BM25 weights
   - query-aware file-type prioritization so code-seeking queries prefer implementation files while docs-seeking queries still surface docs

@@ -7,9 +7,16 @@ import sys
 from pathlib import Path
 
 
+SEARCH_GLOBS = ["src/**/*", "docs/**/*", "plugins/**/*"]
+
+
 def run_search(sgrep: str, repo: str, query: str, limit: int) -> dict:
+    cmd = [sgrep, "search", query, "--path", repo, "--json", "-n", str(limit), "--offline"]
+    for pattern in SEARCH_GLOBS:
+        cmd.extend(["--glob", pattern])
+
     proc = subprocess.run(
-        [sgrep, "search", query, "--path", repo, "--json", "-n", str(limit), "--offline"],
+        cmd,
         check=True,
         capture_output=True,
         text=True,
