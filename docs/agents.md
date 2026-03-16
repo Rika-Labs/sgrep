@@ -56,7 +56,7 @@ Details: [plugins/codex/README.md](../plugins/codex/README.md).
 Install as a Pi package (in Pi, run):
 
 ```
-/install https://github.com/rika-labs/sgrep --subdir plugins/pi
+/install https://github.com/rika-labs/sgrep
 ```
 
 Or via the installer (adds the package to `~/.pi/agent/settings.json`):

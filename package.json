@@ -1,0 +1,20 @@
+{
+  "name": "pi-sgrep",
+  "version": "1.0.0",
+  "description": "sgrep semantic code search — Pi integration",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "Apache-2.0",
+  "pi": {
+    "extensions": [
+      "./plugins/pi/extensions"
+    ],
+    "skills": [
+      "./plugins/pi/skills"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  }
+}

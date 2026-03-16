@@ -150,7 +150,7 @@ install_codex() {
 install_pi() {
   echo "=== Pi ==="
 
-  local PI_PKG="https://github.com/$REPO?subdir=plugins/pi"
+  local PI_PKG="https://github.com/$REPO"
   local settings="$HOME/.pi/agent/settings.json"
 
   if [ -f "$settings" ]; then
