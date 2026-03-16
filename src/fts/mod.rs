@@ -16,6 +16,20 @@ static STOPWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     .collect()
 });
 
+static QUERY_STOPWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    [
+        "implement",
+        "configur",
+        "serializ",
+        "document",
+        "explain",
+        "file",
+        "fil",
+    ]
+    .into_iter()
+    .collect()
+});
+
 pub fn extract_keywords(query: &str) -> Vec<String> {
     query
         .split(|c: char| !c.is_alphanumeric())
@@ -107,6 +121,17 @@ pub fn tokenize_stemmed(text: &str) -> Vec<String> {
     tokenize(text).into_iter().map(|t| stem_word(&t)).collect()
 }
 
+/// Tokenize a query with stemming and extra filtering for generic action words.
+pub fn tokenize_query_stemmed(text: &str) -> Vec<String> {
+    tokenize(text)
+        .into_iter()
+        .map(|t| stem_word(&t))
+        .filter(|token| {
+            !STOPWORDS.contains(token.as_str()) && !QUERY_STOPWORDS.contains(token.as_str())
+        })
+        .collect()
+}
+
 /// BM25 index for a collection of documents
 #[derive(Default, Clone)]
 pub struct Bm25Index {
@@ -176,7 +201,7 @@ impl Bm25Index {
             return 0.0;
         }
 
-        let query_tokens = tokenize(query);
+        let query_tokens = tokenize_query_stemmed(query);
         let doc_len = self.doc_lengths[doc_idx] as f32;
         let tf_map = &self.term_freqs[doc_idx];
 
@@ -356,8 +381,8 @@ impl Bm25FIndex {
             return 0.0;
         }
 
-        // Stem query tokens to match stemmed index
-        let query_tokens = tokenize_stemmed(query);
+        // Stem query tokens to match stemmed index while dropping generic action words.
+        let query_tokens = tokenize_query_stemmed(query);
         let doc_len = self.doc_lengths[doc_idx] as f32;
         let tf_map = &self.term_freqs[doc_idx];
 
@@ -806,6 +831,15 @@ mod tests {
         let tokens = tokenize_stemmed("extraction extractor extracting");
         assert!(tokens.iter().all(|t| t == "extract"));
         assert_eq!(tokens.len(), 3);
+    }
+
+    #[test]
+    fn test_tokenize_query_stemmed_filters_generic_query_words() {
+        let tokens = tokenize_query_stemmed("where is JSON output serialized in which file");
+        assert!(tokens.contains(&"json".to_string()));
+        assert!(tokens.contains(&"output".to_string()));
+        assert!(!tokens.contains(&"serializ".to_string()));
+        assert!(!tokens.contains(&"file".to_string()));
     }
 
     #[test]
