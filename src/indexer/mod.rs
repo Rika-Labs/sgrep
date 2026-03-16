@@ -375,28 +375,23 @@ impl Indexer {
             pb.set_length(total_pending as u64);
             pb.set_position(0);
 
-            let texts: Vec<String> = pending_batches
-                .iter()
-                .flat_map(|b| b.texts.iter().cloned())
-                .collect();
-            let indices: Vec<usize> = pending_batches
-                .iter()
-                .flat_map(|b| b.indices.iter().copied())
-                .collect();
+            let mut completed = 0usize;
 
-            let progress_callback = make_progress_callback(pb.clone(), 0, total_pending);
+            for batch in pending_batches {
+                let progress_callback =
+                    make_progress_callback(pb.clone(), completed, total_pending);
+                let batch_embeddings = self
+                    .embedder
+                    .embed_batch_with_progress(&batch.texts, Some(&progress_callback))?;
 
-            let all_embeddings = self
-                .embedder
-                .embed_batch_with_progress(&texts, Some(&progress_callback))?;
+                for (idx, vec) in batch.indices.into_iter().zip(batch_embeddings.into_iter()) {
+                    vectors[idx] = Some(vec);
+                    embedded_chunks.insert(idx);
+                }
 
-            for (i, vec) in all_embeddings.into_iter().enumerate() {
-                let idx = indices[i];
-                vectors[idx] = Some(vec);
-                embedded_chunks.insert(idx);
+                completed += batch.texts.len();
+                pb.set_position(completed as u64);
             }
-
-            pb.set_position(total_pending as u64);
         }
 
         let vectors: Vec<Vec<f32>> = vectors

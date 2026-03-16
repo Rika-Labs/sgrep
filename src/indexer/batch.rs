@@ -25,7 +25,7 @@ pub fn determine_batch_size(override_val: Option<usize>) -> usize {
         .as_str()
     {
         "cuda" | "coreml" => 128,
-        _ => 64,
+        _ => 12,
     }
 }
 

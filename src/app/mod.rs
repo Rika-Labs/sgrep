@@ -1,4 +1,3 @@
-use once_cell::sync::OnceCell;
 use std::env;
 use std::ffi::OsString;
 use std::path::Path;
@@ -52,7 +51,6 @@ use crate::cli::{resolve_repo_path, Cli, ColorChoice, Commands, ProgressChoice};
 use crate::config::{Config, EmbeddingProviderType, RemoteProviderType};
 use crate::embedding::{self, Embedder, EmbeddingModel, PooledEmbedder};
 use crate::fts;
-use crate::modal::{ModalDeployer, ModalEmbedder};
 use crate::output::JsonResponse;
 use crate::remote;
 use crate::remote::{push_remote_index, RemoteFactory, RemoteVectorStore};
@@ -196,14 +194,16 @@ fn resolve_embedding_model(config: &Config, _cli_model: Option<&str>) -> Embeddi
 }
 
 fn resolve_embedding_provider(
-    config: &Config,
+    _config: &Config,
     offload_flag: Option<bool>,
-) -> EmbeddingProviderType {
-    match offload_flag {
-        Some(true) => EmbeddingProviderType::Modal,
-        Some(false) => EmbeddingProviderType::Local,
-        None => config.embedding.provider.clone(),
+) -> Result<EmbeddingProviderType> {
+    if matches!(offload_flag, Some(true)) {
+        return Err(anyhow!(
+            "Modal/offload support has been removed. Use local embeddings instead."
+        ));
     }
+
+    Ok(EmbeddingProviderType::Local)
 }
 
 fn resolve_remote_provider(config: &Config, remote_flag: Option<bool>) -> bool {
@@ -332,16 +332,16 @@ pub fn run_with_cli(cli: Cli) -> Result<i32> {
 
     let config = Config::load().unwrap_or_default();
     let model = resolve_embedding_model(&config, None);
-    let provider = resolve_embedding_provider(&config, offload_flag);
-    let offload = matches!(provider, EmbeddingProviderType::Modal);
+    let provider = resolve_embedding_provider(&config, offload_flag)?;
 
-    let embedder = build_embedder(
-        model,
-        cli.offline,
-        cli.device.clone(),
-        provider.clone(),
-        &config,
-    )?;
+    let local_max_length = match &cli.command {
+        Commands::Search { .. } => 40,
+        Commands::Index { .. } | Commands::Watch { .. } => 17,
+        Commands::Config { .. } => 40,
+    };
+    env::set_var("SGREP_MAX_LENGTH", local_max_length.to_string());
+
+    let embedder = build_embedder(model, cli.offline, cli.device.clone(), provider, &config)?;
 
     match cli.command {
         Commands::Index {
@@ -360,7 +360,7 @@ pub fn run_with_cli(cli: Cli) -> Result<i32> {
             }
             let use_remote = resolve_remote_provider(&config, remote);
             handle_index(
-                embedder, path, force, batch_size, profile, use_remote, None, offload,
+                embedder, path, force, batch_size, profile, use_remote, None, false,
             )?;
             Ok(0)
         }
@@ -410,7 +410,7 @@ pub fn run_with_cli(cli: Cli) -> Result<i32> {
                 batch_size,
                 use_remote,
                 None,
-                offload,
+                false,
             )?;
             Ok(0)
         }
@@ -422,9 +422,11 @@ fn build_embedder(
     model: EmbeddingModel,
     offline: bool,
     device: Option<String>,
-    provider: EmbeddingProviderType,
-    config: &Config,
+    _provider: EmbeddingProviderType,
+    _config: &Config,
 ) -> Result<Arc<dyn embedding::BatchEmbedder>> {
+    #[cfg(test)]
+    let _ = model;
     let _progress = ProgressLine::stderr();
 
     if env::var("TOKENIZERS_PARALLELISM").is_err() {
@@ -437,10 +439,6 @@ fn build_embedder(
 
     if let Some(device) = device {
         env::set_var("SGREP_DEVICE", device);
-    }
-
-    if matches!(provider, EmbeddingProviderType::Modal) {
-        return build_modal_embedder(model, config);
     }
 
     embedding::configure_offline_env(offline)?;
@@ -464,106 +462,6 @@ fn build_embedder(
     };
 
     Ok(embedder)
-}
-
-const MODAL_MAX_TEXTS_PER_REQUEST: usize = 1000;
-
-static MODAL_ENDPOINTS: OnceCell<(String, bool)> = OnceCell::new();
-
-fn resolve_modal_endpoints(config: &Config, json_mode: bool) -> Result<(String, bool)> {
-    if let Some(existing) = MODAL_ENDPOINTS.get() {
-        return Ok(existing.clone());
-    }
-
-    let deployer = ModalDeployer::new(
-        config.modal.token_id.clone(),
-        config.modal.token_secret.clone(),
-    );
-
-    let (embed_url, cached) = deployer.ensure_deployed()?;
-
-    if !json_mode {
-        if cached {
-            log_info("Using cached Modal endpoints");
-        } else {
-            log_info("Deployed Modal endpoints");
-        }
-    }
-
-    let _ = MODAL_ENDPOINTS.set((embed_url.clone(), cached));
-    Ok((embed_url, cached))
-}
-
-fn build_modal_embedder(
-    model: EmbeddingModel,
-    config: &Config,
-) -> Result<Arc<dyn embedding::BatchEmbedder>> {
-    let model_config = model.config();
-    let dimension = model_config.output_dim;
-    let batch_size = resolve_modal_batch_size(config);
-    let concurrency = resolve_modal_concurrency(config);
-    let use_gzip = env::var("SGREP_MODAL_GZIP")
-        .ok()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    let (embed_endpoint, _cached) =
-        resolve_modal_endpoints(config, false).context("Modal embedder unavailable")?;
-
-    log_info(&format!(
-        "Using Modal embedder (model: {}, GPU: A10G, dim: {}, batch: {}, concurrency: {})",
-        model_config.display_name, dimension, batch_size, concurrency
-    ));
-
-    let endpoint = if let Some(endpoint) = config.modal.endpoint.clone() {
-        log_info(&format!("Using cached endpoint: {}", endpoint));
-        endpoint
-    } else {
-        embed_endpoint
-    };
-
-    let embedder = ModalEmbedder::new(
-        endpoint,
-        dimension,
-        config.modal.proxy_token_id.clone(),
-        config.modal.proxy_token_secret.clone(),
-    )
-    .with_batch_size(batch_size)
-    .with_concurrency(concurrency)
-    .with_gzip(use_gzip);
-
-    Ok(Arc::new(embedder))
-}
-
-fn resolve_modal_batch_size(config: &Config) -> usize {
-    let env_override = env::var("SGREP_MODAL_BATCH_SIZE")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok());
-
-    let configured = if config.modal.batch_size == 0 {
-        None
-    } else {
-        Some(config.modal.batch_size)
-    };
-
-    let batch_size = env_override.or(configured).unwrap_or(128);
-    batch_size.clamp(16, MODAL_MAX_TEXTS_PER_REQUEST)
-}
-
-fn resolve_modal_concurrency(config: &Config) -> usize {
-    let env_override = env::var("SGREP_MODAL_CONCURRENCY")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok());
-
-    let default = default_modal_concurrency();
-    let value = env_override.or(config.modal.concurrency).unwrap_or(default);
-
-    value.clamp(1, 64)
-}
-
-fn default_modal_concurrency() -> usize {
-    let cpus = num_cpus::get();
-    cpus.clamp(16, 48)
 }
 
 fn handle_config(init: bool, show_model_dir: bool, verify_model: bool) -> Result<()> {
@@ -1314,47 +1212,6 @@ mod tests {
         let result = maybe_detach(&cli).unwrap();
         env::remove_var("SGREP_DETACH_TEST");
         assert_eq!(result, Some(("index", 0)));
-    }
-
-    #[test]
-    #[serial]
-    fn modal_batch_size_defaults_and_env_override() {
-        env::remove_var("SGREP_MODAL_BATCH_SIZE");
-
-        let mut config = Config::default();
-        config.modal.batch_size = 0;
-        assert_eq!(resolve_modal_batch_size(&config), 128);
-
-        config.modal.batch_size = 2000;
-        assert_eq!(
-            resolve_modal_batch_size(&config),
-            MODAL_MAX_TEXTS_PER_REQUEST
-        );
-
-        env::set_var("SGREP_MODAL_BATCH_SIZE", "32");
-        config.modal.batch_size = 0;
-        assert_eq!(resolve_modal_batch_size(&config), 32);
-        env::remove_var("SGREP_MODAL_BATCH_SIZE");
-    }
-
-    #[test]
-    #[serial]
-    fn modal_concurrency_prefers_env_and_clamps() {
-        env::remove_var("SGREP_MODAL_CONCURRENCY");
-
-        let mut config = Config::default();
-        config.modal.concurrency = Some(100);
-        assert_eq!(resolve_modal_concurrency(&config), 64);
-
-        config.modal.concurrency = Some(4);
-        assert_eq!(resolve_modal_concurrency(&config), 4);
-
-        env::set_var("SGREP_MODAL_CONCURRENCY", "1");
-        assert_eq!(resolve_modal_concurrency(&config), 1);
-
-        env::set_var("SGREP_MODAL_CONCURRENCY", "100");
-        assert_eq!(resolve_modal_concurrency(&config), 64);
-        env::remove_var("SGREP_MODAL_CONCURRENCY");
     }
 
     fn sample_index(root: &Path) -> RepositoryIndex {

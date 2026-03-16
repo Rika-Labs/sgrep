@@ -11,7 +11,6 @@ use crate::embedding::EmbeddingModel;
 pub enum EmbeddingProviderType {
     #[default]
     Local,
-    Modal,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -21,30 +20,6 @@ pub struct EmbeddingConfig {
     pub model: EmbeddingModel,
     #[serde(default)]
     pub provider: EmbeddingProviderType,
-}
-
-/// Configuration for Modal.dev offload
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ModalConfig {
-    /// Modal token ID for CLI authentication (ak-... format, from modal.com/settings)
-    pub token_id: Option<String>,
-    /// Modal token secret for CLI authentication (as-... format, from modal.com/settings)
-    pub token_secret: Option<String>,
-    /// Modal proxy token ID for endpoint auth (wk-... format, from modal.com/settings)
-    pub proxy_token_id: Option<String>,
-    /// Modal proxy token secret for endpoint auth (ws-... format, from modal.com/settings)
-    pub proxy_token_secret: Option<String>,
-    /// Batch size for embedding requests (default: 128)
-    #[serde(default = "default_batch_size")]
-    pub batch_size: usize,
-    /// Optional concurrency override for Modal embedder
-    pub concurrency: Option<usize>,
-    /// Cached endpoint URL (auto-populated after first deploy)
-    pub endpoint: Option<String>,
-}
-
-fn default_batch_size() -> usize {
-    128
 }
 
 /// Configuration for Turbopuffer remote storage
@@ -102,8 +77,6 @@ fn default_remote_timeout_secs() -> u64 {
 pub struct Config {
     #[serde(default)]
     pub embedding: EmbeddingConfig,
-    #[serde(default)]
-    pub modal: ModalConfig,
     #[serde(default)]
     pub turbopuffer: TurbopufferConfig,
     #[serde(default)]
@@ -222,14 +195,14 @@ provider = "local"
         let toml = r#"
 [embedding]
 model = "jina"
-provider = "modal"
+provider = "local"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(
             config.embedding.model,
             crate::embedding::EmbeddingModel::Jina
         );
-        assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
+        assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
     }
 
     #[test]
@@ -312,60 +285,6 @@ provider = "modal"
         std::fs::remove_dir_all(&temp).ok();
     }
 
-    // Modal config tests
-    #[test]
-    fn parse_modal_config() {
-        let toml = r#"
-[embedding]
-provider = "modal"
-
-[modal]
-token_id = "ak-test"
-token_secret = "as-test"
-proxy_token_id = "wk-proxy-test"
-proxy_token_secret = "ws-proxy-test"
-batch_size = 64
-concurrency = 6
-endpoint = "https://example.modal.run"
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
-        assert_eq!(config.modal.token_id, Some("ak-test".to_string()));
-        assert_eq!(config.modal.token_secret, Some("as-test".to_string()));
-        assert_eq!(
-            config.modal.proxy_token_id,
-            Some("wk-proxy-test".to_string())
-        );
-        assert_eq!(
-            config.modal.proxy_token_secret,
-            Some("ws-proxy-test".to_string())
-        );
-        assert_eq!(config.modal.batch_size, 64);
-        assert_eq!(config.modal.concurrency, Some(6));
-        assert_eq!(
-            config.modal.endpoint,
-            Some("https://example.modal.run".to_string())
-        );
-    }
-
-    #[test]
-    fn modal_config_defaults() {
-        let toml = r#"
-[modal]
-token_id = "ak-test"
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.modal.batch_size, 128);
-        assert_eq!(config.modal.concurrency, None);
-        assert_eq!(config.modal.endpoint, None);
-    }
-
-    #[test]
-    fn empty_config_has_modal_defaults() {
-        let config = Config::default();
-        assert_eq!(config.modal.concurrency, None);
-    }
-
     // Turbopuffer config tests
     #[test]
     fn parse_turbopuffer_config() {
@@ -402,13 +321,8 @@ api_key = "tpuf_test_key"
 remote_provider = "turbopuffer"
 
 [embedding]
-provider = "modal"
+provider = "local"
 
-[modal]
-token_id = "ak-test"
-token_secret = "as-test"
-proxy_token_id = "wk-proxy"
-proxy_token_secret = "ws-proxy"
 
 [turbopuffer]
 api_key = "tpuf-key"
@@ -421,9 +335,7 @@ endpoint = "https://idx.svc.test.pinecone.io"
 namespace = "ns"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.embedding.provider, EmbeddingProviderType::Modal);
-        assert_eq!(config.modal.token_id, Some("ak-test".to_string()));
-        assert_eq!(config.modal.proxy_token_id, Some("wk-proxy".to_string()));
+        assert_eq!(config.embedding.provider, EmbeddingProviderType::Local);
         assert_eq!(config.turbopuffer.api_key, Some("tpuf-key".to_string()));
         assert_eq!(config.turbopuffer.namespace_prefix, "acme");
         assert_eq!(config.pinecone.api_key, Some("pc-key".to_string()));

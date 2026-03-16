@@ -9,7 +9,6 @@ A Claude Code plugin that integrates [sgrep](https://github.com/rika-labs/sgrep)
 - **Skill Integration**: Provides a skill that enables Claude to use sgrep CLI commands for semantic code search
 - **Session Lifecycle Management**: Automatically starts watch on session start and stops it on session end
 - **Agent-Ready Output**: Uses `sgrep search --json` so Claude receives structured results (scores, lines, paths, snippets)
-- **Cloud Offload**: Optional GPU acceleration via [Modal.dev](https://modal.com) for faster embeddings
 - **Remote Storage**: Optional remote vector storage (Pinecone or Turbopuffer) for search/index; watch runs locally
 
 ## Prerequisites
@@ -101,36 +100,8 @@ provider = "local"
 - `SGREP_BATCH_SIZE`: Override embedding batch size
 - `SGREP_MAX_THREADS`: Maximum threads for parallel operations
 - `SGREP_CPU_PRESET`: CPU usage preset (auto|low|medium|high|background)
-- `SGREP_OFFLOAD`: Enable Modal.dev GPU offload (`true`/`false`)
 - `SGREP_REMOTE`: Enable remote vector storage (`true`/`false`)
-- `MODAL_TOKEN_ID`: Modal CLI token ID (ak-...)
-- `MODAL_TOKEN_SECRET`: Modal CLI token secret (as-...)
 - `HTTP_PROXY` / `HTTPS_PROXY`: Proxy for model downloads
-
-### Cloud Offload (Modal.dev)
-
-For GPU-accelerated embeddings using [Modal.dev](https://modal.com):
-
-```bash
-export MODAL_TOKEN_ID="ak-..."
-export MODAL_TOKEN_SECRET="as-..."
-export SGREP_OFFLOAD=true
-```
-
-Or add to `~/.sgrep/config.toml`:
-
-```toml
-[modal]
-token_id = "ak-..."            # Modal API token ID (or authenticate via `modal token new`)
-token_secret = "as-..."        # Modal API token secret
-proxy_token_id = "wk-..."     # Optional proxy auth token for endpoint access
-proxy_token_secret = "ws-..." # Optional proxy auth secret for endpoint access
-gpu_tier = "high"             # budget (T4), balanced (A10G), or high (L40S)
-batch_size = 128               # texts per request
-```
-
-This auto-deploys a Modal service with:
-- **Embeddings**: Qwen3-Embedding-8B (8K context, outputs truncated to 384 dimensions for local compatibility)
 
 ### Remote Storage (Pinecone or Turbopuffer)
 

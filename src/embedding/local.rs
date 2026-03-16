@@ -181,16 +181,12 @@ impl Embedder {
             return Ok(Vec::new());
         }
 
-        let total = texts.len();
-        let mut results = Vec::with_capacity(total);
+        let results = self.embed_batch(texts)?;
 
-        for (i, text) in texts.iter().enumerate() {
-            let vec = self.embed(text)?;
-            results.push(vec);
-
-            if let Some(callback) = on_progress {
+        if let Some(callback) = on_progress {
+            for completed in 1..=texts.len() {
                 callback(super::EmbedProgress {
-                    completed: i + 1,
+                    completed,
                     message: None,
                 });
             }
@@ -507,9 +503,16 @@ fn init_model_with_timeout(
     thread::spawn(move || {
         let result = (|| {
             let model_data = load_model(model, show_download_progress)?;
+            let max_length = env::var("SGREP_MAX_LENGTH")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(40);
+
             TextEmbedding::try_new_from_user_defined(
                 model_data,
-                InitOptionsUserDefined::default().with_execution_providers(execution_providers),
+                InitOptionsUserDefined::default()
+                    .with_execution_providers(execution_providers)
+                    .with_max_length(max_length),
             )
             .map_err(|e| anyhow!("{}", e))
         })();

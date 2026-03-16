@@ -6,7 +6,6 @@ mod embedding;
 mod fts;
 mod graph;
 mod indexer;
-mod modal;
 mod output;
 mod remote;
 mod search;
